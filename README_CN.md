@@ -102,6 +102,16 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 4. 推送到分支（`git push origin feature/amazing-feature`）
 5. 打开 Pull Request
 
+## Fork 与分支规范
+
+这个仓库按 `router-for-me/CLIProxyAPI` 的 fork 来维护。
+
+- `main` 只保留上游同步内容，先把上游更新合进 `main`。
+- `CPA-fork` 是团队的主线分支，日常开发和修复都从这里展开。
+- 上游更新先进入 `main`，再按需把功能或修复合并到 `CPA-fork`。
+- 新功能分支默认从 `CPA-fork` 切出，除非这次工作就是同步上游。
+- 如果使用个人 GitHub fork，建议把 `origin` 指向自己的 fork，把 `upstream` 指向 `router-for-me/CLIProxyAPI`。
+
 ## 谁与我们在一起？
 
 这些项目基于 CLIProxyAPI:

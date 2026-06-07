@@ -5,6 +5,14 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 ## Repository
 - GitHub: https://github.com/router-for-me/CLIProxyAPI
 
+## Branch Workflow
+- This repository is maintained as a fork of `router-for-me/CLIProxyAPI`.
+- `main` is the upstream sync line.
+- `CPA-fork` is the team mainline branch for daily development.
+- Land upstream updates in `main` first, review them, then merge the needed changes into `CPA-fork`.
+- Create feature branches from `CPA-fork` unless the work is specifically for upstream sync.
+- Keep `README.md` and `README_CN.md` aligned when editing workflow docs.
+
 ## Commands
 ```bash
 gofmt -w . # Format (required after Go changes)

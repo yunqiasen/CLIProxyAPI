@@ -1,0 +1,154 @@
+package management
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestExtractResponseTextFiltersResponsesToolDeltas(t *testing.T) {
+	response := strings.Join([]string{
+		"Status: 200",
+		"Content-Type: text/event-stream",
+		"",
+		"event: response.output_text.delta",
+		`data: {"type":"response.output_text.delta","delta":"自然语言输出"}`,
+		"",
+		"event: response.function_call_arguments.delta",
+		`data: {"type":"response.function_call_arguments.delta","delta":"{\"cmd\":\"noise\"}"}`,
+		"",
+		"event: response.output_text.done",
+		`data: {"type":"response.output_text.done","text":"自然语言输出"}`,
+		"",
+	}, "\n")
+
+	got := extractResponseText(response, 200)
+	if got != "自然语言输出" {
+		t.Fatalf("extractResponseText() = %q, want natural language text only", got)
+	}
+	if strings.Contains(got, "cmd") || strings.Contains(got, "noise") {
+		t.Fatalf("extractResponseText() leaked tool arguments: %q", got)
+	}
+}
+
+func TestExtractResponseTextReadsResponsesOutputMessage(t *testing.T) {
+	response := strings.Join([]string{
+		"Status: 200",
+		"Content-Type: application/json",
+		"",
+		`{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"最终输出"}]},{"type":"function_call","arguments":"{\"cmd\":\"noise\"}"}]}`,
+	}, "\n")
+
+	got := extractResponseText(response, 200)
+	if got != "最终输出" {
+		t.Fatalf("extractResponseText() = %q, want final assistant output", got)
+	}
+}
+
+func TestExtractResponseTextReadsChatCompletions(t *testing.T) {
+	response := strings.Join([]string{
+		"Status: 200",
+		"Content-Type: application/json",
+		"",
+		`{"choices":[{"message":{"role":"assistant","content":"chat 输出"}}]}`,
+	}, "\n")
+
+	got := extractResponseText(response, 200)
+	if got != "chat 输出" {
+		t.Fatalf("extractResponseText() = %q, want chat completion content", got)
+	}
+}
+
+func TestExtractResponseTextSummarizesToolOnlyResponses(t *testing.T) {
+	response := strings.Join([]string{
+		"Status: 200",
+		"Content-Type: text/event-stream",
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","item":{"type":"function_call","name":"exec_command","arguments":""}}`,
+		"",
+		"event: response.function_call_arguments.done",
+		`data: {"type":"response.function_call_arguments.done","arguments":"{\"cmd\":\"secret command\"}"}`,
+		"",
+		"event: response.completed",
+		`data: {"type":"response.completed","response":{"status":"completed","output":[]}}`,
+		"",
+	}, "\n")
+
+	got := extractResponseText(response, 200)
+	want := "仅工具调用，无最终文本输出：exec_command"
+	if got != want {
+		t.Fatalf("extractResponseText() = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "secret command") || strings.Contains(got, "cmd") {
+		t.Fatalf("extractResponseText() leaked tool arguments: %q", got)
+	}
+}
+
+func TestExtractResponseTextShowsEmptyBodySummary(t *testing.T) {
+	response := strings.Join([]string{
+		"Status: 200",
+		"Content-Type: text/event-stream",
+		"",
+	}, "\n")
+
+	got := extractResponseText(response, 200)
+	want := "响应体为空（未记录最终输出）"
+	if got != want {
+		t.Fatalf("extractResponseText() = %q, want %q", got, want)
+	}
+}
+
+func TestRequestIPPrefersForwardedHeaders(t *testing.T) {
+	headers := map[string]string{
+		"X-CPA-Client-IP":  "172.17.0.1",
+		"X-Forwarded-For":  "8.8.8.8, 172.17.0.1",
+		"CF-Connecting-IP": "1.1.1.1",
+	}
+
+	got := requestIP(headers)
+	if got != "1.1.1.1" {
+		t.Fatalf("requestIP() = %q, want CF-Connecting-IP", got)
+	}
+}
+
+func TestExtractPromptMetadataFromCodexBody(t *testing.T) {
+	body := `{"model":"gpt-5.5","instructions":"<skills_instructions>\n### Available skills\n- frontend-design: Create polished frontend interfaces. (file: /skills/frontend-design/SKILL.md)\n- browser-use:control-in-app-browser: Control the browser. (file: /skills/browser/SKILL.md)\n### How to use skills\nUse them.\n</skills_instructions>\n\n# System\nKeep it short.","tools":[{"type":"function","name":"mcp__context7__query_docs","description":"Context7 docs lookup."},{"type":"function","name":"mcp__node_repl","description":"Node REPL runner."},{"type":"function","name":"exec_command","description":"Run shell."}],"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"用户问题"}]}]}`
+
+	meta := extractPromptMetadata(body)
+	if meta.SystemPrompt == "" || !strings.Contains(meta.SystemPrompt, "Keep it short") {
+		t.Fatalf("system prompt missing: %#v", meta.SystemPrompt)
+	}
+	if len(meta.MCPs) != 2 || meta.MCPs[0].Name != "context7" || meta.MCPs[1].Name != "node_repl" {
+		t.Fatalf("MCPs = %#v", meta.MCPs)
+	}
+	if len(meta.Skills) != 2 || meta.Skills[0].Name != "frontend-design" || meta.Skills[1].Name != "browser-use:control-in-app-browser" {
+		t.Fatalf("Skills = %#v", meta.Skills)
+	}
+	if meta.ToolPreview != "MCP: context7、node_repl；Skill: frontend-design、browser-use:control-in-app-browser" {
+		t.Fatalf("ToolPreview = %q", meta.ToolPreview)
+	}
+}
+
+func TestExtractCalledToolsFromResponsesSSE(t *testing.T) {
+	response := strings.Join([]string{
+		"Status: 200",
+		"Content-Type: text/event-stream",
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","item":{"type":"function_call","name":"exec_command","arguments":""}}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","item":{"type":"custom_tool_call","name":"mcp__context7__query_docs"}}`,
+		"",
+		"event: response.function_call_arguments.done",
+		`data: {"type":"response.function_call_arguments.done","arguments":"{\"cmd\":\"secret\"}"}`,
+	}, "\n")
+
+	got := extractCalledTools(response)
+	if len(got) != 2 || got[0].Name != "exec_command" || got[1].Name != "mcp__context7__query_docs" {
+		t.Fatalf("called tools = %#v", got)
+	}
+	if strings.Contains(got[0].Summary, "secret") {
+		t.Fatalf("called tool summary leaked noisy args: %#v", got[0])
+	}
+}

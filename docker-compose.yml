@@ -14,6 +14,12 @@ services:
     #   - .env
     environment:
       DEPLOY: ${DEPLOY:-}
+      HTTP_PROXY: http://172.17.0.1:41001
+      HTTPS_PROXY: http://172.17.0.1:41001
+      http_proxy: http://172.17.0.1:41001
+      https_proxy: http://172.17.0.1:41001
+      NO_PROXY: host.docker.internal,127.0.0.1,localhost,172.17.0.1,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16,sub2api,postgres,redis,mysql
+      no_proxy: host.docker.internal,127.0.0.1,localhost,172.17.0.1,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16,sub2api,postgres,redis,mysql
     ports:
       - "8317:8317"
       - "8085:8085"
@@ -25,4 +31,6 @@ services:
       - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
       - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped

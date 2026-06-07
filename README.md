@@ -102,6 +102,16 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
+## Fork And Branch Workflow
+
+This repository is maintained as a fork of `router-for-me/CLIProxyAPI`.
+
+- `main` stays close to upstream and is used to land upstream updates first.
+- `CPA-fork` is the team mainline branch for day-to-day development.
+- Merge upstream changes into `main` first, review them, then merge the needed work into `CPA-fork`.
+- Create feature branches from `CPA-fork` unless the change is specifically for upstream sync.
+- If you work from a personal GitHub fork, keep `origin` pointed at your fork and use `upstream` for `router-for-me/CLIProxyAPI`.
+
 ## Who is with us?
 
 Those projects are based on CLIProxyAPI:

@@ -156,6 +156,9 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 	for key, values := range c.Request.Header {
 		headers[key] = values
 	}
+	if sourceIP := requestLogSourceIP(c); sourceIP != "" {
+		headers["X-CPA-Client-IP"] = []string{sourceIP}
+	}
 
 	// Capture request body
 	var body []byte
@@ -179,6 +182,25 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 		RequestID: logging.GetGinRequestID(c),
 		Timestamp: time.Now(),
 	}, nil
+}
+
+func requestLogSourceIP(c *gin.Context) string {
+	if c == nil || c.Request == nil {
+		return ""
+	}
+	for _, key := range []string{"CF-Connecting-IP", "X-Forwarded-For", "X-Real-IP"} {
+		value := strings.TrimSpace(c.Request.Header.Get(key))
+		if value == "" {
+			continue
+		}
+		if strings.EqualFold(key, "X-Forwarded-For") {
+			value = strings.TrimSpace(strings.Split(value, ",")[0])
+		}
+		if value != "" {
+			return value
+		}
+	}
+	return strings.TrimSpace(c.ClientIP())
 }
 
 func decodeCapturedRequestBodyForLog(raw []byte, encoding string) []byte {

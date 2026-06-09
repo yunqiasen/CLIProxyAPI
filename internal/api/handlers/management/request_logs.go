@@ -1,6 +1,7 @@
 package management
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -144,6 +145,25 @@ func (h *Handler) GetRequestLogs(c *gin.Context) {
 	}
 	query := strings.TrimSpace(c.Query("q"))
 
+	store, errStore := openRequestLogStore(dir)
+	if errStore == nil {
+		defer store.close()
+		if errSync := syncRequestLogStore(c.Request.Context(), store, dir); errSync == nil {
+			items, total, errList := store.list(c.Request.Context(), requestLogQueryOptions{Query: query, Limit: limit, Offset: offset})
+			if errList == nil {
+				c.JSON(http.StatusOK, gin.H{
+					"items":          items,
+					"total":          total,
+					"limit":          limit,
+					"offset":         offset,
+					"retention_days": requestLogRetentionDays,
+					"storage":        "sqlite",
+				})
+				return
+			}
+		}
+	}
+
 	candidates, errCollect := collectRequestLogCandidates(dir)
 	if errCollect != nil {
 		if os.IsNotExist(errCollect) {
@@ -232,6 +252,22 @@ func (h *Handler) GetRequestLogDetail(c *gin.Context) {
 		return
 	}
 
+	store, errStore := openRequestLogStore(dir)
+	if errStore == nil {
+		defer store.close()
+		if errSync := syncRequestLogStore(c.Request.Context(), store, dir); errSync == nil {
+			detail, errDetail := store.detail(c.Request.Context(), id)
+			if errDetail == nil {
+				c.JSON(http.StatusOK, detail)
+				return
+			}
+			if errDetail != sql.ErrNoRows {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to load request log: %v", errDetail)})
+				return
+			}
+		}
+	}
+
 	candidate, errFind := findRequestLogCandidateByID(dir, id)
 	if errFind != nil {
 		if os.IsNotExist(errFind) {
@@ -261,6 +297,74 @@ func (h *Handler) GetRequestLogDetail(c *gin.Context) {
 		PromptMetadata:     parsed.promptMetadata,
 		RequestMetadata:    parsed.requestMetadata,
 	})
+}
+
+// ExportRequestLogs exports structured request log rows from the local SQLite index.
+func (h *Handler) ExportRequestLogs(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return
+	}
+	if h.cfg == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
+		return
+	}
+	dir := h.logDirectory()
+	if strings.TrimSpace(dir) == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
+		return
+	}
+	limit, errLimit := parseRequestLogLimit(c.Query("limit"))
+	if errLimit != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid limit: %v", errLimit)})
+		return
+	}
+	pagesRaw := strings.TrimSpace(c.Query("pages"))
+	if pagesRaw != "" {
+		pages, errPages := strconv.Atoi(pagesRaw)
+		if errPages != nil || pages < 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid pages"})
+			return
+		}
+		if pages > 100 {
+			pages = 100
+		}
+		limit *= pages
+	}
+	offset, errOffset := parseRequestLogOffset(c.Query("offset"))
+	if errOffset != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid offset: %v", errOffset)})
+		return
+	}
+	format := strings.ToLower(strings.TrimSpace(c.Query("format")))
+	if format == "" {
+		format = "csv"
+	}
+	if format != "csv" && format != "jsonl" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "format must be csv or jsonl"})
+		return
+	}
+	store, errStore := openRequestLogStore(dir)
+	if errStore != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to open request log database: %v", errStore)})
+		return
+	}
+	defer store.close()
+	if errSync := syncRequestLogStore(c.Request.Context(), store, dir); errSync != nil && !os.IsNotExist(errSync) {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to sync request logs: %v", errSync)})
+		return
+	}
+	filename := fmt.Sprintf("request-logs-%s.%s", time.Now().Format("20060102-150405"), format)
+	if format == "jsonl" {
+		c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
+	} else {
+		c.Header("Content-Type", "text/csv; charset=utf-8")
+	}
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	if errExport := store.export(c.Request.Context(), c.Writer, requestLogQueryOptions{Query: c.Query("q"), Limit: limit, Offset: offset}, format); errExport != nil {
+		_ = c.Error(errExport)
+		return
+	}
 }
 
 func parseRequestLogLimit(raw string) (int, error) {

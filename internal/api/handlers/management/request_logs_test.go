@@ -1,6 +1,9 @@
 package management
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -150,5 +153,65 @@ func TestExtractCalledToolsFromResponsesSSE(t *testing.T) {
 	}
 	if strings.Contains(got[0].Summary, "secret") {
 		t.Fatalf("called tool summary leaked noisy args: %#v", got[0])
+	}
+}
+
+func TestRequestLogStoreListDetailAndExport(t *testing.T) {
+	logsDir := t.TempDir()
+	logPath := filepath.Join(logsDir, "v1-responses-2026-06-09T185805-testid.log")
+	content := strings.Join([]string{
+		"=== REQUEST INFO ===",
+		"Timestamp: 2026-06-09T18:58:05+08:00",
+		"URL: /v1/responses",
+		"Method: POST",
+		"",
+		"=== HEADERS ===",
+		"X-Forwarded-For: 8.8.8.8",
+		"",
+		"=== REQUEST BODY ===",
+		`{"model":"gpt-test","input":[{"role":"user","content":[{"type":"input_text","text":"用户提示词"}]}],"instructions":"系统提示词"}`,
+		"",
+		"=== RESPONSE ===",
+		"Status: 200",
+		"Content-Type: application/json",
+		"",
+		`{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"最终输出"}]}]}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(logPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+
+	store, err := openRequestLogStore(logsDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.close()
+	if err := syncRequestLogStore(context.Background(), store, logsDir); err != nil {
+		t.Fatalf("sync store: %v", err)
+	}
+	items, total, err := store.list(context.Background(), requestLogQueryOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if total != 1 || len(items) != 1 {
+		t.Fatalf("total/items = %d/%d", total, len(items))
+	}
+	if items[0].Model != "gpt-test" || items[0].IP != "8.8.8.8" || !items[0].Success {
+		t.Fatalf("unexpected item: %#v", items[0])
+	}
+	detail, err := store.detail(context.Background(), items[0].ID)
+	if err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	if detail.Prompt != "用户提示词" || detail.Output != "最终输出" || detail.SystemPrompt != "系统提示词" {
+		t.Fatalf("unexpected detail: %#v", detail)
+	}
+	var out strings.Builder
+	if err := store.export(context.Background(), &out, requestLogQueryOptions{Limit: 10}, "csv"); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "用户提示词") || !strings.Contains(got, "最终输出") {
+		t.Fatalf("export missing content: %s", got)
 	}
 }

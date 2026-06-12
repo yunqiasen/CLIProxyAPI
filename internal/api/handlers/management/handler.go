@@ -49,6 +49,7 @@ type Handler struct {
 	postAuthHook        coreauth.PostAuthHook
 	postAuthPersistHook coreauth.PostAuthHook
 	pluginHost          *pluginhost.Host
+	quotaRefreshJobs    *quotaRefreshJobStore
 }
 
 // NewHandler creates a new management handler instance.
@@ -64,6 +65,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
+		quotaRefreshJobs:    newQuotaRefreshJobStore(),
 	}
 	h.startAttemptCleanup()
 	return h

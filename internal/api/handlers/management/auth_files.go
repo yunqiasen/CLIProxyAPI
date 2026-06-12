@@ -785,11 +785,32 @@ func safeZipDownloadName(value string) string {
 	return out
 }
 
+type downloadAuthFilesZipRequest struct {
+	Name  []string `json:"name"`
+	Names []string `json:"names"`
+}
+
+func authFileZipNamesFromRequest(c *gin.Context) ([]string, error) {
+	names := append([]string{}, c.QueryArray("name")...)
+	names = append(names, c.QueryArray("names")...)
+	if len(names) > 0 || c.Request == nil || c.Request.Method == http.MethodGet || c.Request.Body == nil || c.Request.ContentLength == 0 {
+		return names, nil
+	}
+	var req downloadAuthFilesZipRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		return nil, err
+	}
+	names = append(names, req.Name...)
+	names = append(names, req.Names...)
+	return names, nil
+}
+
 // DownloadAuthFilesZip downloads selected auth files as a single zip archive.
 func (h *Handler) DownloadAuthFilesZip(c *gin.Context) {
-	names := c.QueryArray("name")
-	if len(names) == 0 {
-		names = c.QueryArray("names")
+	names, errNames := authFileZipNamesFromRequest(c)
+	if errNames != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
 	}
 	if len(names) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
@@ -824,14 +845,15 @@ func (h *Handler) DownloadAuthFilesZip(c *gin.Context) {
 		}
 	}
 	filename := fmt.Sprintf("%s-%d.zip", safeZipDownloadName(archiveType), len(cleaned))
-	c.Header("Content-Type", "application/zip")
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
-	zw := zip.NewWriter(c.Writer)
+	type zipFileEntry struct {
+		name string
+		data []byte
+	}
+	entries := make([]zipFileEntry, 0, len(cleaned))
 	for _, name := range cleaned {
 		full := filepath.Join(h.cfg.AuthDir, name)
 		data, err := os.ReadFile(full)
 		if err != nil {
-			_ = zw.Close()
 			if os.IsNotExist(err) {
 				c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
 			} else {
@@ -839,12 +861,18 @@ func (h *Handler) DownloadAuthFilesZip(c *gin.Context) {
 			}
 			return
 		}
-		entry, errCreate := zw.Create(name)
+		entries = append(entries, zipFileEntry{name: name, data: data})
+	}
+	c.Header("Content-Type", "application/zip")
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	zw := zip.NewWriter(c.Writer)
+	for _, file := range entries {
+		entry, errCreate := zw.Create(file.name)
 		if errCreate != nil {
 			_ = zw.Close()
 			return
 		}
-		if _, errWrite := entry.Write(data); errWrite != nil {
+		if _, errWrite := entry.Write(file.data); errWrite != nil {
 			_ = zw.Close()
 			return
 		}

@@ -2,10 +2,18 @@ package management
 
 import (
 	"context"
+	"encoding/csv"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 func TestExtractResponseTextFiltersResponsesToolDeltas(t *testing.T) {
@@ -213,5 +221,54 @@ func TestRequestLogStoreListDetailAndExport(t *testing.T) {
 	}
 	if got := out.String(); !strings.Contains(got, "用户提示词") || !strings.Contains(got, "最终输出") {
 		t.Fatalf("export missing content: %s", got)
+	}
+}
+
+func TestExportRequestLogsHonorsPages(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	logsDir := t.TempDir()
+	baseTime := time.Now().Add(-time.Hour).UTC()
+	for i := 0; i < 3; i++ {
+		ts := baseTime.Add(time.Duration(i) * time.Second)
+		logPath := filepath.Join(logsDir, fmt.Sprintf("v1-responses-%s-page-%d.log", ts.Format("2006-01-02T150405"), i))
+		content := strings.Join([]string{
+			"=== REQUEST INFO ===",
+			"Timestamp: " + ts.Format(time.RFC3339),
+			"URL: /v1/responses",
+			"Method: POST",
+			"",
+			"=== REQUEST BODY ===",
+			fmt.Sprintf(`{"model":"gpt-test","input":[{"role":"user","content":[{"type":"input_text","text":"用户提示词-%d"}]}]}`, i),
+			"",
+			"=== RESPONSE ===",
+			"Status: 200",
+			"Content-Type: application/json",
+			"",
+			fmt.Sprintf(`{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"最终输出-%d"}]}]}`, i),
+			"",
+		}, "\n")
+		if err := os.WriteFile(logPath, []byte(content), 0o600); err != nil {
+			t.Fatalf("write log: %v", err)
+		}
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{}, nil)
+	h.SetLogDirectory(logsDir)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/request-logs/export?limit=1&pages=2&format=csv", nil)
+	h.ExportRequestLogs(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	records, err := csv.NewReader(strings.NewReader(rec.Body.String())).ReadAll()
+	if err != nil {
+		t.Fatalf("read csv: %v", err)
+	}
+	if len(records) != 3 {
+		t.Fatalf("csv row count = %d, want header + 2 rows", len(records))
 	}
 }

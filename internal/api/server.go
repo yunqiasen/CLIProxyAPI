@@ -657,6 +657,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/logs", s.mgmt.DeleteLogs)
 		mgmt.GET("/request-logs", s.mgmt.GetRequestLogs)
 		mgmt.GET("/request-logs/export", s.mgmt.ExportRequestLogs)
+		mgmt.GET("/request-logs/failure-details", s.mgmt.GetRequestLogFailureDetails)
 		mgmt.GET("/request-logs/:id", s.mgmt.GetRequestLogDetail)
 		mgmt.GET("/request-error-logs", s.mgmt.GetRequestErrorLogs)
 		mgmt.GET("/request-error-logs/:name", s.mgmt.DownloadRequestErrorLog)
@@ -871,6 +872,9 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
 	c.File(filePath)
 }
 

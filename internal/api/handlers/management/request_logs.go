@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -37,6 +38,12 @@ type requestLogListItem struct {
 	URL                 string `json:"url"`
 	Method              string `json:"method"`
 	Model               string `json:"model"`
+	Provider            string `json:"provider"`
+	AuthID              string `json:"auth_id"`
+	AuthType            string `json:"auth_type"`
+	UpstreamURL         string `json:"upstream_url"`
+	UpstreamModel       string `json:"upstream_model"`
+	ChannelModel        string `json:"channel_model"`
 	IP                  string `json:"ip"`
 	IPLocation          string `json:"ip_location"`
 	Status              int    `json:"status"`
@@ -83,6 +90,22 @@ type parsedRequestLog struct {
 	promptMetadata  requestPromptMetadata
 	calledTools     []requestLogToolInfo
 	requestMetadata map[string]string
+}
+
+type requestLogUpstreamMetadata struct {
+	Provider      string
+	AuthID        string
+	AuthType      string
+	UpstreamURL   string
+	UpstreamModel string
+	ChannelModel  string
+}
+
+type requestLogFailureDetail struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Error    string `json:"error"`
+	Count    int64  `json:"count"`
 }
 
 type requestLogToolInfo struct {
@@ -145,23 +168,37 @@ func (h *Handler) GetRequestLogs(c *gin.Context) {
 	}
 	query := strings.TrimSpace(c.Query("q"))
 
+	storageError := ""
 	store, errStore := openRequestLogStore(dir)
 	if errStore == nil {
 		defer store.close()
-		if errSync := syncRequestLogStore(c.Request.Context(), store, dir); errSync == nil {
-			items, total, errList := store.list(c.Request.Context(), requestLogQueryOptions{Query: query, Limit: limit, Offset: offset})
-			if errList == nil {
-				c.JSON(http.StatusOK, gin.H{
-					"items":          items,
-					"total":          total,
-					"limit":          limit,
-					"offset":         offset,
-					"retention_days": requestLogRetentionDays,
-					"storage":        "sqlite",
-				})
-				return
-			}
+		requestLogStoreMu.Lock()
+		errSync := syncRequestLogStore(c.Request.Context(), store, dir)
+		var items []requestLogListItem
+		var total int
+		var errList error
+		if errSync == nil {
+			items, total, errList = store.list(c.Request.Context(), requestLogQueryOptions{Query: query, Limit: limit, Offset: offset})
 		}
+		requestLogStoreMu.Unlock()
+		if errSync == nil && errList == nil {
+			c.JSON(http.StatusOK, gin.H{
+				"items":          items,
+				"total":          total,
+				"limit":          limit,
+				"offset":         offset,
+				"retention_days": requestLogRetentionDays,
+				"storage":        "sqlite",
+			})
+			return
+		}
+		if errSync == nil {
+			storageError = fmt.Sprintf("failed to list sqlite request logs: %v", errList)
+		} else {
+			storageError = fmt.Sprintf("failed to sync sqlite request logs: %v", errSync)
+		}
+	} else {
+		storageError = fmt.Sprintf("failed to open sqlite request log store: %v", errStore)
 	}
 
 	candidates, errCollect := collectRequestLogCandidates(dir)
@@ -226,6 +263,8 @@ func (h *Handler) GetRequestLogs(c *gin.Context) {
 		"limit":          limit,
 		"offset":         offset,
 		"retention_days": requestLogRetentionDays,
+		"storage":        "file",
+		"storage_error":  storageError,
 	})
 }
 
@@ -255,16 +294,21 @@ func (h *Handler) GetRequestLogDetail(c *gin.Context) {
 	store, errStore := openRequestLogStore(dir)
 	if errStore == nil {
 		defer store.close()
-		if errSync := syncRequestLogStore(c.Request.Context(), store, dir); errSync == nil {
-			detail, errDetail := store.detail(c.Request.Context(), id)
-			if errDetail == nil {
-				c.JSON(http.StatusOK, detail)
-				return
-			}
-			if errDetail != sql.ErrNoRows {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to load request log: %v", errDetail)})
-				return
-			}
+		requestLogStoreMu.Lock()
+		errSync := syncRequestLogStore(c.Request.Context(), store, dir)
+		var detail requestLogDetail
+		var errDetail error
+		if errSync == nil {
+			detail, errDetail = store.detail(c.Request.Context(), id)
+		}
+		requestLogStoreMu.Unlock()
+		if errSync == nil && errDetail == nil {
+			c.JSON(http.StatusOK, detail)
+			return
+		}
+		if errSync == nil && errDetail != sql.ErrNoRows {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to load request log: %v", errDetail)})
+			return
 		}
 	}
 
@@ -350,6 +394,8 @@ func (h *Handler) ExportRequestLogs(c *gin.Context) {
 		return
 	}
 	defer store.close()
+	requestLogStoreMu.Lock()
+	defer requestLogStoreMu.Unlock()
 	if errSync := syncRequestLogStore(c.Request.Context(), store, dir); errSync != nil && !os.IsNotExist(errSync) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to sync request logs: %v", errSync)})
 		return
@@ -365,6 +411,63 @@ func (h *Handler) ExportRequestLogs(c *gin.Context) {
 		_ = c.Error(errExport)
 		return
 	}
+}
+
+// GetRequestLogFailureDetails returns deduplicated failure summaries from the request log index.
+func (h *Handler) GetRequestLogFailureDetails(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return
+	}
+	if h.cfg == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
+		return
+	}
+
+	dir := h.logDirectory()
+	if strings.TrimSpace(dir) == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
+		return
+	}
+
+	limit := 80
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit"})
+			return
+		}
+		if parsed < limit {
+			limit = parsed
+		}
+	}
+	provider := strings.TrimSpace(c.Query("provider"))
+
+	store, errStore := openRequestLogStore(dir)
+	if errStore != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to open request log database: %v", errStore)})
+		return
+	}
+	defer store.close()
+
+	requestLogStoreMu.Lock()
+	errSync := syncRequestLogStore(c.Request.Context(), store, dir)
+	var details []requestLogFailureDetail
+	var errDetails error
+	if errSync == nil {
+		details, errDetails = store.failureDetails(c.Request.Context(), provider, limit)
+	}
+	requestLogStoreMu.Unlock()
+	if errSync != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to sync request logs: %v", errSync)})
+		return
+	}
+	if errDetails != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to load failure details: %v", errDetails)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"items": details, "limit": limit, "retention_days": requestLogRetentionDays})
 }
 
 func parseRequestLogLimit(raw string) (int, error) {
@@ -490,6 +593,12 @@ func requestLogMatchesQuery(parsed parsedRequestLog, query string) bool {
 		item.URL,
 		item.Method,
 		item.Model,
+		item.Provider,
+		item.AuthID,
+		item.AuthType,
+		item.UpstreamURL,
+		item.UpstreamModel,
+		item.ChannelModel,
 		item.IP,
 		item.IPLocation,
 		strconv.Itoa(item.Status),
@@ -605,7 +714,8 @@ func parseRequestLogFile(candidate requestLogCandidate) (parsedRequestLog, error
 	promptMetadata := extractPromptMetadata(requestBody)
 	requestMetadata := mergeRequestMetadata(promptMetadata.RequestMetadata, requestMetadataFromHeaders(headers))
 	promptMetadata.RequestMetadata = requestMetadata
-	calledTools := extractCalledTools(response)
+	calledTools := enrichCalledTools(extractCalledTools(response), promptMetadata)
+	upstream := extractUpstreamMetadata(sections["API REQUEST"], sections["API RESPONSE"], apiErrors)
 	output := extractResponseText(response, status)
 	errText := extractErrorPreviewText(apiErrors, response, status)
 	errFullText := extractErrorFullText(apiErrors, response, status)
@@ -631,6 +741,12 @@ func parseRequestLogFile(candidate requestLogCandidate) (parsedRequestLog, error
 			URL:                 strings.TrimSpace(info["URL"]),
 			Method:              strings.TrimSpace(info["Method"]),
 			Model:               extractModel(requestBody),
+			Provider:            upstream.Provider,
+			AuthID:              upstream.AuthID,
+			AuthType:            upstream.AuthType,
+			UpstreamURL:         upstream.UpstreamURL,
+			UpstreamModel:       upstream.UpstreamModel,
+			ChannelModel:        upstream.ChannelModel,
 			IP:                  ip,
 			IPLocation:          location,
 			Status:              status,
@@ -738,6 +854,214 @@ func extractModel(body string) string {
 	}
 	if object, ok := payload.(map[string]any); ok {
 		return stringFromAny(object["model"])
+	}
+	return ""
+}
+
+func extractUpstreamMetadata(apiRequests, apiResponses, apiErrors []string) requestLogUpstreamMetadata {
+	var out requestLogUpstreamMetadata
+	for _, section := range apiRequests {
+		if strings.TrimSpace(section) == "" {
+			continue
+		}
+		values := parseUpstreamHeaderLines(section)
+		if out.UpstreamURL == "" {
+			out.UpstreamURL = firstNonEmptyRequestLogValue(values["Upstream URL"], values["URL"])
+		}
+		if authLine := values["Auth"]; authLine != "" {
+			auth := parseRequestLogAuthLine(authLine)
+			if out.Provider == "" {
+				out.Provider = firstNonEmptyRequestLogValue(auth["label"], auth["provider"])
+			}
+			if out.AuthID == "" {
+				out.AuthID = auth["auth_id"]
+			}
+			if out.AuthType == "" {
+				out.AuthType = auth["type"]
+			}
+		}
+		if out.UpstreamModel == "" {
+			out.UpstreamModel = extractModel(extractUpstreamBody(section))
+		}
+	}
+	if out.UpstreamModel == "" {
+		out.UpstreamModel = extractUpstreamModelFromSections(apiResponses)
+	}
+	if out.UpstreamModel == "" {
+		out.UpstreamModel = extractUpstreamModelFromSections(apiErrors)
+	}
+	if out.Provider == "" {
+		out.Provider = inferProviderFromUpstream(out.UpstreamModel, out.UpstreamURL)
+	}
+	out.ChannelModel = buildChannelModel(out.Provider, out.UpstreamModel, out.UpstreamURL)
+	return out
+}
+
+func parseUpstreamHeaderLines(section string) map[string]string {
+	out := make(map[string]string)
+	for _, line := range strings.Split(section, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.EqualFold(line, "Body:") {
+			break
+		}
+		if line == "" || strings.EqualFold(line, "Headers:") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), "{") || strings.HasPrefix(strings.TrimSpace(line), "[") {
+			continue
+		}
+		out[key] = strings.TrimSpace(value)
+	}
+	return out
+}
+
+func extractUpstreamBody(section string) string {
+	lines := strings.Split(section, "\n")
+	for i, line := range lines {
+		if strings.EqualFold(strings.TrimSpace(line), "Body:") {
+			return strings.TrimSpace(strings.Join(lines[i+1:], "\n"))
+		}
+	}
+	return ""
+}
+
+func parseRequestLogAuthLine(line string) map[string]string {
+	out := make(map[string]string)
+	for _, part := range strings.Split(line, ",") {
+		part = strings.TrimSpace(part)
+		key, value, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "type" {
+			value = strings.TrimSpace(strings.Split(value, " ")[0])
+		}
+		if key != "" && value != "" {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func extractUpstreamModelFromSections(sections []string) string {
+	for _, section := range sections {
+		if model := extractModelFromUpstreamResponseBody(extractUpstreamBody(section)); model != "" {
+			return model
+		}
+		if model := extractModelFromUpstreamResponseBody(stripStatusAndHeaders(section)); model != "" {
+			return model
+		}
+	}
+	return ""
+}
+
+func extractModelFromUpstreamResponseBody(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return ""
+	}
+	if strings.Contains(body, "\ndata:") || strings.HasPrefix(body, "data:") {
+		for _, line := range strings.Split(body, "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if data == "" || data == "[DONE]" {
+				continue
+			}
+			if model := modelFromJSON(data); model != "" {
+				return model
+			}
+		}
+		return ""
+	}
+	return modelFromJSON(body)
+}
+
+func modelFromJSON(text string) string {
+	var payload any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(text)), &payload); err != nil {
+		return ""
+	}
+	return modelFromJSONValue(payload)
+}
+
+func modelFromJSONValue(value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"model", "modelVersion", "model_version"} {
+			if model := stringFromAny(typed[key]); model != "" {
+				return model
+			}
+		}
+		for _, key := range []string{"response", "message"} {
+			if model := modelFromJSONValue(typed[key]); model != "" {
+				return model
+			}
+		}
+		for _, key := range []string{"choices", "candidates", "output"} {
+			if model := modelFromJSONValue(typed[key]); model != "" {
+				return model
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if model := modelFromJSONValue(item); model != "" {
+				return model
+			}
+		}
+	}
+	return ""
+}
+
+func inferProviderFromUpstream(model, upstreamURL string) string {
+	model = strings.TrimSpace(model)
+	if strings.Contains(model, "/") {
+		provider := strings.TrimSpace(strings.Split(model, "/")[0])
+		if provider != "" {
+			return provider
+		}
+	}
+	parsed, err := url.Parse(strings.TrimSpace(upstreamURL))
+	if err == nil {
+		if host := strings.TrimSpace(parsed.Hostname()); host != "" {
+			return host
+		}
+	}
+	return ""
+}
+
+func buildChannelModel(provider, upstreamModel, upstreamURL string) string {
+	provider = strings.TrimSpace(provider)
+	upstreamModel = strings.TrimSpace(upstreamModel)
+	if provider != "" && upstreamModel != "" {
+		return provider + " / " + upstreamModel
+	}
+	if upstreamModel != "" {
+		return upstreamModel
+	}
+	if provider != "" {
+		return provider
+	}
+	return strings.TrimSpace(upstreamURL)
+}
+
+func firstNonEmptyRequestLogValue(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
 	}
 	return ""
 }
@@ -1742,6 +2066,43 @@ func extractCalledTools(response string) []requestLogToolInfo {
 		addTool(tool.Name, tool.Type)
 	}
 	return tools
+}
+
+func enrichCalledTools(tools []requestLogToolInfo, meta requestPromptMetadata) []requestLogToolInfo {
+	if len(tools) == 0 {
+		return nil
+	}
+	available := make(map[string]requestLogToolInfo)
+	for _, tool := range meta.AvailableTools {
+		if strings.TrimSpace(tool.Name) != "" {
+			available[tool.Name] = tool
+		}
+	}
+	out := make([]requestLogToolInfo, 0, len(tools))
+	for _, tool := range tools {
+		if known, ok := available[tool.Name]; ok {
+			if tool.DisplayName == "" {
+				tool.DisplayName = known.DisplayName
+			}
+			if tool.Type == "" {
+				tool.Type = known.Type
+			}
+			if tool.Description == "" {
+				tool.Description = known.Description
+			}
+			if tool.Summary == "" || strings.HasPrefix(tool.Summary, "MCP: ") || strings.HasPrefix(tool.Summary, "调用工具: ") {
+				tool.Summary = known.Summary
+			}
+		}
+		if tool.DisplayName == "" {
+			tool.DisplayName = displayToolName(tool.Name)
+		}
+		if tool.Summary == "" {
+			tool.Summary = toolCallSummary(tool.Name)
+		}
+		out = append(out, tool)
+	}
+	return out
 }
 
 func calledToolsFromObject(value any) []requestLogToolInfo {

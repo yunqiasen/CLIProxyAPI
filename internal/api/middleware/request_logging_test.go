@@ -144,6 +144,62 @@ func TestShouldCaptureRequestBody(t *testing.T) {
 	}
 }
 
+func TestRequestLogSourceIPPrefersForwardedHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name    string
+		headers map[string]string
+		remote  string
+		want    string
+	}{
+		{
+			name: "cloudflare header wins",
+			headers: map[string]string{
+				"CF-Connecting-IP": "203.0.113.10",
+				"X-Forwarded-For":  "198.51.100.1, 172.17.0.1",
+				"X-Real-IP":        "198.51.100.2",
+			},
+			remote: "172.17.0.1:55321",
+			want:   "203.0.113.10",
+		},
+		{
+			name: "forwarded first hop wins",
+			headers: map[string]string{
+				"X-Forwarded-For": "198.51.100.3, 172.17.0.1",
+				"X-Real-IP":       "198.51.100.4",
+			},
+			remote: "172.17.0.1:55321",
+			want:   "198.51.100.3",
+		},
+		{
+			name: "real ip wins before docker gateway",
+			headers: map[string]string{
+				"X-Real-IP": "198.51.100.5",
+			},
+			remote: "172.17.0.1:55321",
+			want:   "198.51.100.5",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			ctx.Request.RemoteAddr = tt.remote
+			for key, value := range tt.headers {
+				ctx.Request.Header.Set(key, value)
+			}
+
+			got := requestLogSourceIP(ctx)
+			if got != tt.want {
+				t.Fatalf("requestLogSourceIP() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAttachRequestLogSourcesUsesLoggerLogsDir(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

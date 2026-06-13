@@ -243,18 +243,259 @@ function cpaInstallQuotaRefreshAllPatch(){
 
 cpaInstallQuotaRefreshAllPatch();
 
+function cpaProviderUsageProviderForElement(element, providers){
+  const normalize = value => String(value || '').trim().toLowerCase();
+  const textOf = node => String(node?.textContent || '').replace(/\s+/g, ' ').trim();
+  const numberFor = (text, label) => {
+    const pattern = new RegExp(`${label}\\s*[:：]?\\s*(\\d+)`);
+    const match = String(text || '').match(pattern);
+    return match ? Number(match[1]) : null;
+  };
+  const countFor = (text, label) => (String(text || '').match(new RegExp(`${label}\\s*[:：]?\\s*\\d+`, 'g')) || []).length;
+  const providerMatches = text => {
+    const normalized = normalize(text);
+    if (!normalized) return [];
+    return providers.filter(item => item?.providerKey && normalized.includes(item.providerKey));
+  };
+  const statsTextFor = () => {
+    const original = textOf(element);
+    let fallback = original;
+    let scope = element;
+    for (let depth = 0; scope && depth < 6; depth += 1, scope = scope.parentElement) {
+      const tagName = String(scope.tagName || '').toUpperCase();
+      if (tagName === 'BODY' || tagName === 'HTML') break;
+      const text = textOf(scope);
+      if (!text || text.length > 700) break;
+      const successCount = countFor(text, '成功');
+      const failedCount = countFor(text, '失败');
+      if (successCount + failedCount === 0) continue;
+      if (successCount > 1 || failedCount > 1) break;
+      fallback = text;
+      if (successCount === 1 && failedCount === 1) return text;
+    }
+    return fallback;
+  };
+  const localProvider = () => {
+    let scope = element;
+    for (let depth = 0; scope && depth < 6; depth += 1, scope = scope.parentElement) {
+      const tagName = String(scope.tagName || '').toUpperCase();
+      if (tagName === 'BODY' || tagName === 'HTML') break;
+      const text = textOf(scope);
+      if (!text || text.length > 700) break;
+      const matches = providerMatches(text);
+      if (matches.length === 1) return matches[0];
+      if (matches.length > 1) break;
+    }
+    return null;
+  };
+  const statsText = statsTextFor();
+  const successValue = numberFor(statsText, '成功');
+  const failedValue = numberFor(statsText, '失败');
+  if (successValue === null && failedValue === null) return null;
+  if ((successValue ?? 0) === 0 && (failedValue ?? 0) === 0) return null;
+  const local = localProvider();
+  const entryPool = providers.flatMap(provider => {
+    const entries = Array.isArray(provider.entries) && provider.entries.length ? provider.entries : [provider];
+    return entries.map(entry => ({...entry, provider: provider.provider, providerKey: provider.providerKey, parentProvider: provider}));
+  }).filter(entry => !local || entry.providerKey === local.providerKey);
+  const matchesStats = item => {
+    if (successValue !== null && Number(item.success || 0) !== successValue) return false;
+    if (failedValue !== null && Number(item.failed || 0) !== failedValue) return false;
+    if (successValue !== null && successValue > 0 && !item.successDetails?.length) return false;
+    if (failedValue !== null && failedValue > 0 && !item.failureDetails?.length) return false;
+    return true;
+  };
+  const entryMatches = entryPool.filter(matchesStats);
+  if (entryMatches.length === 1) return entryMatches[0];
+  if (local && matchesStats(local)) return local;
+  return null;
+}
+
+function cpaInstallProviderUsageDetailsPatch(){
+  const state = {providers: [], loading: false, loadedAt: 0};
+  const normalize = value => String(value || '').trim().toLowerCase();
+  const getKey = () => String(Zf.getState().managementKey || '').trim();
+  const authHeaders = () => {
+    const key = getKey();
+    if (!key) throw new Error('请先登录管理页');
+    return {'X-Management-Key': key, 'Authorization': `Bearer ${key}`};
+  };
+  const cleanText = value => {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    return text.length > 180 ? `${text.slice(0, 180)}...` : text;
+  };
+  const sortByCount = list => list.sort((a, b) => (b.count || 0) - (a.count || 0) || String(a.model || '').localeCompare(String(b.model || '')) || (a.status || 0) - (b.status || 0));
+  const addSuccessDetail = (map, item) => {
+    const model = cleanText(item?.model) || 'unknown';
+    const status = Number(item?.status || 0);
+    const key = `${model}\u0000${status}`;
+    const existing = map.get(key) || {model, status, count: 0};
+    existing.count += Number(item?.count || 0);
+    map.set(key, existing);
+  };
+  const addFailureDetail = (map, item) => {
+    const model = cleanText(item?.model) || 'unknown';
+    const status = Number(item?.status || 0);
+    const error = cleanText(item?.error) || 'unknown';
+    const key = `${model}\u0000${status}\u0000${error}`;
+    const existing = map.get(key) || {model, status, error, count: 0};
+    existing.count += Number(item?.count || 0);
+    map.set(key, existing);
+  };
+  const successDetailsFor = items => sortByCount((items || []).map(item => ({model: cleanText(item?.model) || 'unknown', status: Number(item?.status || 0), count: Number(item?.count || 0)})).filter(item => item.count > 0)).slice(0, 10);
+  const failureDetailsFor = items => sortByCount((items || []).map(item => ({model: cleanText(item?.model) || 'unknown', status: Number(item?.status || 0), error: cleanText(item?.error) || 'unknown', count: Number(item?.count || 0)})).filter(item => item.count > 0)).slice(0, 10);
+  const normalizeUsage = payload => Object.entries(payload || {}).map(([provider, bucket]) => {
+    const successMap = new Map();
+    const failureMap = new Map();
+    let success = 0;
+    let failed = 0;
+    const entries = Object.entries(bucket || {}).map(([compositeKey, entry]) => {
+      const entrySuccess = Number(entry?.success || 0);
+      const entryFailed = Number(entry?.failed || 0);
+      const successDetails = successDetailsFor(entry?.success_details);
+      const failureDetails = failureDetailsFor(entry?.failure_details);
+      success += entrySuccess;
+      failed += entryFailed;
+      successDetails.forEach(item => addSuccessDetail(successMap, item));
+      failureDetails.forEach(item => addFailureDetail(failureMap, item));
+      return {provider, providerKey: normalize(provider), compositeKey, success: entrySuccess, failed: entryFailed, successDetails, failureDetails};
+    });
+    const successDetails = sortByCount(Array.from(successMap.values())).slice(0, 10);
+    const failureDetails = sortByCount(Array.from(failureMap.values())).slice(0, 10);
+    return {provider, providerKey: normalize(provider), success, failed, successDetails, failureDetails, entries};
+  }).sort((a, b) => b.providerKey.length - a.providerKey.length);
+  const loadDetails = async () => {
+    if (state.loading || Date.now() - state.loadedAt < 15000) return;
+    const key = getKey();
+    if (!key) return;
+    state.loading = true;
+    try {
+      const response = await fetch('/v0/management/api-key-usage', {headers: authHeaders()});
+      if (!response.ok) throw new Error(await response.text());
+      const data = await response.json();
+      state.providers = normalizeUsage(data);
+      state.loadedAt = Date.now();
+    } catch (_) {
+      state.loadedAt = Date.now();
+    } finally {
+      state.loading = false;
+    }
+  };
+  const statusText = status => status ? String(status) : '状态未记录';
+  const successTitleFor = provider => {
+    const list = (provider?.successDetails || []).slice(0, 10).map(item => `${item.model || 'unknown'} · ${statusText(item.status)} · ${item.count || 0} 次`);
+    if (!list.length) return '';
+    return `成功明细\n${list.join('\n')}`;
+  };
+  const failureTitleFor = provider => {
+    const list = (provider?.failureDetails || []).slice(0, 10).map(item => `${item.model || 'unknown'} · ${statusText(item.status)} · ${item.count || 0} 次 · ${item.error || 'unknown'}`);
+    if (!list.length) return '';
+    return `失败明细\n${list.join('\n')}`;
+  };
+  const clearUsageTitle = element => {
+    element.classList.remove('cpaProviderUsageHover');
+    element.removeAttribute('data-cpa-usage-title');
+    element.removeAttribute('title');
+  };
+  let tooltip = null;
+  const ensureTooltip = () => {
+    if (tooltip) return tooltip;
+    tooltip = document.createElement('div');
+    tooltip.id = 'cpaProviderUsageTip';
+    document.body.appendChild(tooltip);
+    return tooltip;
+  };
+  const moveTooltip = event => {
+    if (!tooltip) return;
+    const margin = 14;
+    const rect = tooltip.getBoundingClientRect();
+    let left = event.clientX + margin;
+    let top = event.clientY + margin;
+    if (left + rect.width > window.innerWidth - 8) left = Math.max(8, event.clientX - rect.width - margin);
+    if (top + rect.height > window.innerHeight - 8) top = Math.max(8, event.clientY - rect.height - margin);
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+  };
+  const showTooltip = (element, event) => {
+    const title = element.getAttribute('data-cpa-usage-title') || element.getAttribute('title') || '';
+    if (!title) return;
+    const tip = ensureTooltip();
+    tip.textContent = title;
+    tip.style.display = 'block';
+    moveTooltip(event);
+  };
+  const hideTooltip = () => {
+    if (tooltip) tooltip.style.display = 'none';
+  };
+  const apply = async () => {
+    await loadDetails();
+    if (!state.providers.length) return;
+    const candidates = Array.from(document.querySelectorAll('span,strong,b,em,small,div,p'));
+    for (const element of candidates) {
+      if (element.closest('#cpaReqLogPanel')) continue;
+      const text = String(element.textContent || '').trim();
+      if (text.length > 56) continue;
+      const hasSuccess = /成功\s*[:：]?\s*\d+/.test(text);
+      const hasFailure = /失败\s*[:：]?\s*\d+/.test(text);
+      if (!hasSuccess && !hasFailure) continue;
+      const provider = cpaProviderUsageProviderForElement(element, state.providers);
+      if (!provider) {
+        clearUsageTitle(element);
+        continue;
+      }
+      const titles = [];
+      if (hasSuccess) {
+        const title = successTitleFor(provider);
+        if (title) titles.push(title);
+      }
+      if (hasFailure) {
+        const title = failureTitleFor(provider);
+        if (title) titles.push(title);
+      }
+      const title = titles.join('\n\n');
+      if (!title) {
+        clearUsageTitle(element);
+        continue;
+      }
+      element.classList.add('cpaProviderUsageHover');
+      element.setAttribute('data-cpa-usage-title', title);
+      element.setAttribute('title', title);
+    }
+  };
+  const style = document.createElement('style');
+  style.textContent = `.cpaProviderUsageHover{cursor:default!important;text-decoration:none!important;text-underline-offset:0}#cpaProviderUsageTip{position:fixed;z-index:2147483600;display:none;max-width:min(560px,calc(100vw - 32px));white-space:pre-wrap;word-break:break-word;background:var(--bg-secondary,#fff);color:var(--text-primary,#1f2937);border:1px solid var(--border-color,#d1d5db);box-shadow:0 18px 48px #00000030;border-radius:12px;padding:10px 12px;font-size:12px;line-height:1.55;pointer-events:none}`;
+  document.head.appendChild(style);
+  document.addEventListener('mouseover', event => {
+    const target = event.target instanceof Element ? event.target.closest('.cpaProviderUsageHover') : null;
+    if (target) showTooltip(target, event);
+  }, true);
+  document.addEventListener('mousemove', event => {
+    if (tooltip && tooltip.style.display !== 'none') moveTooltip(event);
+  }, true);
+  document.addEventListener('mouseout', event => {
+    const target = event.target instanceof Element ? event.target.closest('.cpaProviderUsageHover') : null;
+    if (target && (!event.relatedTarget || !target.contains(event.relatedTarget))) hideTooltip();
+  }, true);
+  apply();
+  window.setInterval(apply, 5000);
+  const observer = new MutationObserver(() => { void apply(); });
+  observer.observe(document.body, {childList:true, subtree:true});
+}
+
+cpaInstallProviderUsageDetailsPatch();
+
 function aXRequestLogs(){
   const rootRef = (0,y.useRef)(null);
   (0,y.useEffect)(() => {
     const root = rootRef.current;
     if (!root) return;
     const style = document.createElement('style');
-    style.textContent = `#cpaReqLogPanel{border:1px solid var(--border-color);border-radius:12px;background:var(--bg-secondary);box-shadow:var(--shadow);display:none;flex-direction:column;min-height:0;height:calc(100vh - 220px);max-height:calc(100vh - 220px);overflow:hidden}#cpaReqLogPanel *{box-sizing:border-box}#cpaReqLogHead{display:flex;align-items:center;gap:12px;padding:14px 16px;background:var(--bg-primary);border-bottom:1px solid var(--border-color);flex:0 0 auto}#cpaReqLogHead h2{font-size:17px;margin:0;font-weight:800;color:var(--text-primary)}#cpaReqLogHead .sub{font-size:12px;color:var(--text-secondary)}#cpaReqLogHead button,#cpaReqLogTable button{border-radius:8px;padding:6px 8px;font-weight:700;cursor:pointer;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border-color);white-space:nowrap}#cpaReqLogHead button:hover,#cpaReqLogTable button:hover{border-color:var(--primary-color);background:var(--bg-hover)}#cpaReqLogHead .actions{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}#cpaReqLogBody{display:grid;grid-template-columns:minmax(0,1fr);min-height:0;flex:1 1 auto;overflow:hidden}#cpaReqLogPanel.has-detail #cpaReqLogBody{grid-template-columns:minmax(720px,.72fr) minmax(560px,1.28fr)}#cpaReqLogTableWrap{overflow:auto;min-height:0;height:100%;overscroll-behavior:contain}#cpaReqLogPanel.has-detail #cpaReqLogTableWrap{border-right:1px solid var(--border-color)}#cpaReqLogTable{width:100%;min-width:720px;border-collapse:collapse;font-size:12px;table-layout:fixed}#cpaReqLogTable th{position:sticky;top:0;z-index:1;background:var(--bg-primary);color:var(--text-secondary);text-align:left;padding:8px 6px;border-bottom:1px solid var(--border-color);white-space:nowrap}#cpaReqLogTable td{vertical-align:middle;padding:8px 6px;border-bottom:1px solid var(--border-color);color:var(--text-primary);overflow:hidden}#cpaReqLogTable tr:hover{background:color-mix(in srgb, var(--primary-color) 6%, transparent)}#cpaReqLogTable .cpaSelected{background:color-mix(in srgb, var(--primary-color) 9%, transparent)}#cpaReqLogTable col.time{width:138px}#cpaReqLogTable col.path{width:118px}#cpaReqLogTable col.ip{width:92px}#cpaReqLogTable col.model{width:64px}#cpaReqLogTable col.status{width:62px}#cpaReqLogTable col.tools{width:112px}#cpaReqLogTable col.system{width:126px}#cpaReqLogTable col.prompt{width:132px}#cpaReqLogTable col.result{width:86px}#cpaReqLogTable col.action{width:58px}#cpaReqLogDetail{display:none;overflow:auto;background:var(--bg-secondary);padding:16px;min-height:0;height:100%;overscroll-behavior:contain}#cpaReqLogPanel.has-detail #cpaReqLogDetail{display:block}#cpaReqLogDetail h3{margin:0 0 10px;font-size:16px;color:var(--text-primary)}#cpaReqLogDetail .meta{color:var(--text-secondary);font-size:12px;margin-bottom:12px;line-height:1.5}#cpaReqLogDetail h4{margin:18px 0 8px;font-size:13px;color:var(--text-primary)}#cpaReqLogDetail pre{margin:0;background:var(--bg-primary);color:var(--text-primary);border:1px solid var(--border-color);border-radius:10px;padding:12px;white-space:pre-wrap;word-break:break-word;max-height:none;overflow:visible;font-size:12px;line-height:1.45}.cpaDetailBlock{margin-bottom:14px}.cpaDetailEmpty{color:var(--text-tertiary);font-size:12px}.cpaChipLine{display:flex;flex-wrap:wrap;gap:4px}.cpaChip{display:inline-flex;max-width:100%;border:1px solid var(--border-color);border-radius:999px;padding:2px 6px;background:var(--bg-primary);color:var(--text-secondary);font-size:11px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#cpaReqLogMsg{padding:10px 16px;color:var(--text-secondary);background:var(--bg-primary);border-top:1px solid var(--border-color);font-size:12px;flex:0 0 auto}#cpaReqLogControls{display:flex;align-items:center;gap:10px;padding:10px 16px;background:var(--bg-primary);border-bottom:1px solid var(--border-color);flex-wrap:wrap;flex:0 0 auto}#cpaReqLogSearch{width:min(360px,100%);border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:8px;padding:8px 10px}#cpaReqLogControls .spacer{flex:1}#cpaReqLogControls .pageInfo{color:var(--text-secondary);font-size:12px;white-space:nowrap}#cpaReqLogControls label{display:inline-flex;align-items:center;gap:6px;color:var(--text-secondary);font-size:12px;white-space:nowrap}#cpaReqLogControls button{border-radius:8px;padding:7px 10px;font-weight:700;cursor:pointer;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border-color);white-space:nowrap}#cpaReqLogControls button:hover{border-color:var(--primary-color);background:var(--bg-hover)}#cpaReqLogControls button:disabled,#cpaReqLogHead button:disabled,#cpaReqLogTable button:disabled{opacity:.55;cursor:not-allowed}.cpaMono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,Liberation Mono,Courier New,monospace}.cpaOneLine{display:block;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.cpaClip{display:block;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-secondary)}.cpaOk{color:var(--success-badge-text);font-weight:800}.cpaBad{color:var(--failure-badge-text);font-weight:800}.cpaSource{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-secondary)}.cpaMuted{color:var(--text-tertiary)}.cpaSubLine{display:block;margin-top:2px;color:var(--text-tertiary);font-size:10px;line-height:1.1}@supports (height:100dvh){#cpaReqLogPanel{height:calc(100dvh - 220px);max-height:calc(100dvh - 220px)}}@media(max-width:980px){#cpaReqLogPanel.has-detail #cpaReqLogBody{grid-template-columns:1fr}#cpaReqLogPanel.has-detail #cpaReqLogTableWrap{border-right:0;border-bottom:1px solid var(--border-color)}#cpaReqLogDetail{min-height:0}}`;
+    style.textContent = `#cpaReqLogPanel{border:1px solid var(--border-color);border-radius:12px;background:var(--bg-secondary);box-shadow:var(--shadow);display:none;flex-direction:column;min-height:0;height:calc(100vh - 220px);max-height:calc(100vh - 220px);overflow:hidden}#cpaReqLogPanel *,#cpaReqLogDetail *{box-sizing:border-box}#cpaReqLogHead{display:flex;align-items:center;gap:12px;padding:14px 16px;background:var(--bg-primary);border-bottom:1px solid var(--border-color);flex:0 0 auto}#cpaReqLogHead h2{font-size:17px;margin:0;font-weight:800;color:var(--text-primary)}#cpaReqLogHead .sub{font-size:12px;color:var(--text-secondary)}#cpaReqLogHead button,#cpaReqLogTable button{border-radius:8px;padding:6px 8px;font-weight:700;cursor:pointer;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border-color);white-space:nowrap}#cpaReqLogHead button:hover,#cpaReqLogTable button:hover{border-color:var(--primary-color);background:var(--bg-hover)}#cpaReqLogHead .actions{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}#cpaReqLogBody{display:grid;grid-template-columns:minmax(0,1fr);min-height:0;flex:1 1 auto;overflow:hidden}#cpaReqLogPanel.has-detail #cpaReqLogBody{grid-template-columns:minmax(0,1fr)}#cpaReqLogTableWrap{overflow:auto;min-height:0;height:100%;overscroll-behavior:contain}#cpaReqLogPanel.has-detail #cpaReqLogTableWrap{border-right:0}#cpaReqLogTable{width:100%;min-width:840px;border-collapse:collapse;font-size:12px;table-layout:fixed}#cpaReqLogTable th{position:sticky;top:0;z-index:1;background:var(--bg-primary);color:var(--text-secondary);text-align:left;padding:8px 6px;border-bottom:1px solid var(--border-color);white-space:nowrap}#cpaReqLogTable td{vertical-align:middle;padding:8px 6px;border-bottom:1px solid var(--border-color);color:var(--text-primary);overflow:hidden}#cpaReqLogTable tr:hover{background:color-mix(in srgb, var(--primary-color) 6%, transparent)}#cpaReqLogTable .cpaSelected{background:color-mix(in srgb, var(--primary-color) 9%, transparent)}#cpaReqLogTable col.time{width:138px}#cpaReqLogTable col.path{width:112px}#cpaReqLogTable col.ip{width:88px}#cpaReqLogTable col.model{width:132px}#cpaReqLogTable col.status{width:60px}#cpaReqLogTable col.tools{width:86px}#cpaReqLogTable col.system{width:108px}#cpaReqLogTable col.prompt{width:112px}#cpaReqLogTable col.result{width:80px}#cpaReqLogTable col.action{width:58px}#cpaReqLogDetail{display:none;position:fixed;inset:0;z-index:2147483000;overflow:hidden;background:color-mix(in srgb, #1f1b16 36%, transparent);padding:28px 42px;min-width:0;min-height:0;overscroll-behavior:none;backdrop-filter:blur(2px);cursor:default!important}#cpaReqLogDetail.cpaOpen{display:flex;align-items:flex-start;justify-content:center}.cpaReqLogDetailCard{width:min(1180px,calc(100vw - 84px));max-height:calc(100vh - 56px);max-height:calc(100dvh - 56px);overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scroll-behavior:auto;background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:18px;box-shadow:0 28px 80px #00000040;padding:22px;margin:0 auto}#cpaReqLogDetail h3{margin:0 42px 10px 0;font-size:16px;color:var(--text-primary)}.cpaReqLogDetailClose{position:sticky;top:0;float:right;z-index:2;border-radius:999px;padding:4px 9px;font-weight:800;cursor:pointer;background:var(--bg-primary);color:var(--text-primary);border:1px solid var(--border-color)}.cpaReqLogDetailClose:hover{border-color:var(--primary-color);background:var(--bg-hover)}#cpaReqLogDetail .meta{color:var(--text-secondary);font-size:12px;margin-bottom:12px;line-height:1.5}#cpaReqLogDetail h4{margin:18px 0 8px;font-size:13px;color:var(--text-primary)}#cpaReqLogDetail pre{margin:0;background:var(--bg-primary);color:var(--text-primary);border:1px solid var(--border-color);border-radius:10px;padding:12px;white-space:pre-wrap;word-break:break-word;max-height:none;overflow:visible;font-size:12px;line-height:1.45}.cpaDetailBlock{margin-bottom:14px}.cpaDetailEmpty{color:var(--text-tertiary);font-size:12px}.cpaChipLine{display:flex;flex-wrap:wrap;gap:4px}.cpaChip{display:inline-flex;max-width:100%;border:1px solid var(--border-color);border-radius:999px;padding:2px 6px;background:var(--bg-primary);color:var(--text-secondary);font-size:11px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#cpaReqLogMsg{padding:10px 16px;color:var(--text-secondary);background:var(--bg-primary);border-top:1px solid var(--border-color);font-size:12px;flex:0 0 auto}#cpaReqLogControls{display:flex;align-items:center;gap:10px;padding:10px 16px;background:var(--bg-primary);border-bottom:1px solid var(--border-color);flex-wrap:wrap;flex:0 0 auto}#cpaReqLogSearch{width:min(360px,100%);border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:8px;padding:8px 10px}#cpaReqLogControls .spacer{flex:1}#cpaReqLogControls .pageInfo{color:var(--text-secondary);font-size:12px;white-space:nowrap}#cpaReqLogControls label{display:inline-flex;align-items:center;gap:6px;color:var(--text-secondary);font-size:12px;white-space:nowrap}#cpaReqLogControls button{border-radius:8px;padding:7px 10px;font-weight:700;cursor:pointer;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border-color);white-space:nowrap}#cpaReqLogControls button:hover{border-color:var(--primary-color);background:var(--bg-hover)}#cpaReqLogControls button:disabled,#cpaReqLogHead button:disabled,#cpaReqLogTable button:disabled{opacity:.55;cursor:not-allowed}.cpaMono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,Liberation Mono,Courier New,monospace}.cpaOneLine{display:block;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.cpaClip{display:block;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-secondary)}.cpaOk{color:var(--success-badge-text);font-weight:800}.cpaBad{color:var(--failure-badge-text);font-weight:800}.cpaSource{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-secondary)}.cpaMuted{color:var(--text-tertiary)}.cpaSubLine{display:block;margin-top:2px;color:var(--text-tertiary);font-size:10px;line-height:1.1}.cpaProviderFailureHover{cursor:default!important;text-decoration:none!important}@supports (height:100dvh){#cpaReqLogPanel{height:calc(100dvh - 220px);max-height:calc(100dvh - 220px)}}@media(max-width:980px){#cpaReqLogPanel.has-detail #cpaReqLogBody{grid-template-columns:1fr}#cpaReqLogPanel.has-detail #cpaReqLogTableWrap{border-right:0;border-bottom:1px solid var(--border-color)}#cpaReqLogDetail{min-height:0;padding:20px}.cpaReqLogDetailCard{width:100%;max-height:calc(100vh - 40px);max-height:calc(100dvh - 40px)}}`;
     document.head.appendChild(style);
 
     const panel = document.createElement('div');
     panel.id = 'cpaReqLogPanel';
-    panel.innerHTML = `<div id="cpaReqLogHead"><div><h2>请求日志</h2><div class="sub">默认显示最近 7 天；可搜时间、模型、状态码、IP、提示词、输出、错误；点“预览”看完整内容</div></div><div class="actions"><button id="cpaReqLogRefresh">刷新</button><button id="cpaReqLogClose">返回日志</button></div></div><div id="cpaReqLogControls"><input id="cpaReqLogSearch" type="search" placeholder="搜索时间 / 路径 / 模型 / 状态码 / IP / MCP / Skill / 系统提示词 / 提示词 / 输出 / 错误"><label><input id="cpaReqLogAuto" type="checkbox">自动刷新</label><span class="spacer"></span><label>导出页数 <input id="cpaReqLogExportPages" type="number" min="1" max="100" value="1" style="width:64px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:8px;padding:6px 8px"></label><button id="cpaReqLogExportCsv">导出CSV</button><button id="cpaReqLogExportJsonl">导出JSONL</button><span id="cpaReqLogPageInfo" class="pageInfo"></span><button id="cpaReqLogPrev">上一页</button><button id="cpaReqLogNext">下一页</button></div><div id="cpaReqLogBody"><div id="cpaReqLogTableWrap"><table id="cpaReqLogTable"><colgroup><col class="time"><col class="path"><col class="ip"><col class="model"><col class="status"><col class="tools"><col class="system"><col class="prompt"><col class="result"><col class="action"></colgroup><thead><tr><th>时间</th><th>路径/方法</th><th>来源 IP</th><th>模型</th><th>状态</th><th>MCP/Skill</th><th>系统提示词</th><th>提示词摘要</th><th>错误/输出</th><th></th></tr></thead><tbody></tbody></table></div><div id="cpaReqLogDetail"></div></div><div id="cpaReqLogMsg"></div>`;
+    panel.innerHTML = `<div id="cpaReqLogHead"><div><h2>请求日志</h2><div class="sub">默认显示最近 7 天；可搜时间、模型、渠道模型、状态码、IP、实际调用工具、提示词、输出、错误；点“预览”看完整内容</div></div><div class="actions"><button id="cpaReqLogRefresh">刷新</button><button id="cpaReqLogClose">返回日志</button></div></div><div id="cpaReqLogControls"><input id="cpaReqLogSearch" type="search" placeholder="搜索时间 / 路径 / 模型 / 渠道模型 / 状态码 / IP / MCP / Skill / 系统提示词 / 提示词 / 输出 / 错误"><label><input id="cpaReqLogAuto" type="checkbox" checked>自动刷新</label><span class="spacer"></span><label>导出页数 <input id="cpaReqLogExportPages" type="number" min="1" max="100" value="1" style="width:64px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);border-radius:8px;padding:6px 8px"></label><button id="cpaReqLogExportCsv">导出CSV</button><button id="cpaReqLogExportJsonl">导出JSONL</button><span id="cpaReqLogPageInfo" class="pageInfo"></span><button id="cpaReqLogPrev">上一页</button><button id="cpaReqLogNext">下一页</button></div><div id="cpaReqLogBody"><div id="cpaReqLogTableWrap"><table id="cpaReqLogTable"><colgroup><col class="time"><col class="path"><col class="ip"><col class="model"><col class="status"><col class="tools"><col class="system"><col class="prompt"><col class="result"><col class="action"></colgroup><thead><tr><th>时间</th><th>路径/方法</th><th>来源 IP</th><th>模型</th><th>状态</th><th>MCP/Skill</th><th>系统提示词</th><th>提示词摘要</th><th>错误/输出</th><th></th></tr></thead><tbody></tbody></table></div><div id="cpaReqLogDetail"></div></div><div id="cpaReqLogMsg"></div>`;
 
     const tabBar = root.querySelector(`.${$.tabBar}`);
     const content = root.querySelector(`.${$.content}`);
@@ -270,6 +511,7 @@ function aXRequestLogs(){
 
     const tbody = panel.querySelector('#cpaReqLogTable tbody');
     const detail = panel.querySelector('#cpaReqLogDetail');
+    document.body.appendChild(detail);
     const msg = panel.querySelector('#cpaReqLogMsg');
     const refreshBtn = panel.querySelector('#cpaReqLogRefresh');
     const closeBtn = panel.querySelector('#cpaReqLogClose');
@@ -299,6 +541,7 @@ function aXRequestLogs(){
       return response.json();
     };
     const safeArray = value => Array.isArray(value) ? value : [];
+    const detailContent = () => detail.querySelector('.cpaReqLogDetailCard') || detail;
     const addTextBlock = (label, value) => {
       const wrap = document.createElement('div');
       wrap.className = 'cpaDetailBlock';
@@ -315,7 +558,7 @@ function aXRequestLogs(){
         empty.textContent = '无';
         wrap.appendChild(empty);
       }
-      detail.appendChild(wrap);
+      detailContent().appendChild(wrap);
     };
     const addListBlock = (label, values) => {
       const wrap = document.createElement('div');
@@ -334,22 +577,45 @@ function aXRequestLogs(){
         pre.textContent = list.join('\n\n');
         wrap.appendChild(pre);
       }
-      detail.appendChild(wrap);
+      detailContent().appendChild(wrap);
     };
-    const formatMCPs = req => safeArray(req && req.mcps).map(mcp => {
-      const tools = safeArray(mcp.tools).map(tool => tool.name || tool.display_name).filter(Boolean);
-      const head = `${mcp.name || 'unknown'}${tools.length ? `（${tools.length} 个函数：${tools.join('、')}）` : ''}`;
-      return [head, mcp.description || ''].filter(Boolean).join('\n');
-    });
-    const formatSkills = req => safeArray(req && req.skills).map(skill => [
-      skill.name || 'unknown',
-      skill.description || '',
-      skill.path ? `path: ${skill.path}` : '',
-      skill.prompt || '',
-    ].filter(Boolean).join('\n'));
+    const calledToolNames = req => new Set(safeArray(req && req.called_tools).map(tool => String(tool.name || '').trim()).filter(Boolean));
+    const compactLine = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const joinedLines = lines => lines.map(line => String(line || '').trim()).filter(Boolean).join('\n');
+    const formatMCPs = req => {
+      const called = calledToolNames(req);
+      return safeArray(req && req.mcps).map(mcp => {
+        const tools = safeArray(mcp.tools);
+        const usedTools = tools.filter(tool => called.has(tool.name));
+        const usedNames = usedTools.map(tool => tool.name || tool.display_name).filter(Boolean);
+        const head = `${mcp.name || 'unknown'}${usedNames.length ? `（本次调用：${usedNames.join('、')}）` : `（可用 ${tools.length} 个函数）`}`;
+        const toolLines = tools.slice(0, 24).map(tool => {
+          const name = tool.name || tool.display_name || 'unknown';
+          const desc = compactLine(tool.description || tool.summary);
+          return desc ? `- ${name}: ${desc}` : `- ${name}`;
+        });
+        if (tools.length > 24) toolLines.push(`... 还有 ${tools.length - 24} 个函数`);
+        return joinedLines([head, mcp.description || '', toolLines.length ? `工具列表:\n${toolLines.join('\n')}` : '']);
+      }).filter(Boolean);
+    };
+    const formatSkills = req => {
+      const called = Array.from(calledToolNames(req)).map(name => name.toLowerCase());
+      return safeArray(req && req.skills).map(skill => {
+        const name = String(skill.name || '').toLowerCase();
+        const used = name && called.some(toolName => toolName.includes(name) || name.includes(toolName));
+        const prompt = String(skill.prompt || '').trim();
+        const expandedPrompt = prompt.includes('\n') ? prompt : '';
+        return joinedLines([
+          `${skill.name || 'unknown'}${used ? '（本次调用）' : '（可用）'}`,
+          skill.description || '',
+          skill.path ? `path: ${skill.path}` : '',
+          expandedPrompt ? `提示词文本:\n${expandedPrompt}` : '',
+        ]);
+      }).filter(Boolean);
+    };
     const formatCalledTools = req => safeArray(req && req.called_tools).map(tool => [
       tool.name || tool.display_name || 'unknown',
-      tool.summary || '',
+      tool.summary || tool.description || tool.type || '',
     ].filter(Boolean).join(' · '));
 
     let requestActive = false;
@@ -390,37 +656,53 @@ function aXRequestLogs(){
 
     const renderDetail = () => {
       const req = currentSelected || currentItems.find(item => item.id === currentSelectedId) || null;
+      const previousScrollTop = detail.querySelector('.cpaReqLogDetailCard')?.scrollTop || 0;
       detail.innerHTML = '';
       panel.classList.toggle('has-detail', !!currentSelectedId);
+      detail.classList.toggle('cpaOpen', !!currentSelectedId);
       if (!currentSelectedId) return;
+      const card = document.createElement('div');
+      card.className = 'cpaReqLogDetailCard';
+      detail.appendChild(card);
+      const close = document.createElement('button');
+      close.type = 'button';
+      close.className = 'cpaReqLogDetailClose';
+      close.textContent = '×';
+      close.onclick = event => {
+        event.preventDefault();
+        event.stopPropagation();
+        closeDetail();
+      };
+      card.appendChild(close);
       if (detailError) {
         const err = document.createElement('div');
         err.className = 'error-box';
         err.style.margin = '0 0 12px';
         err.textContent = detailError;
-        detail.appendChild(err);
+        card.appendChild(err);
       }
       const title = document.createElement('h3');
       title.textContent = req ? (req.success ? '成功请求' : '失败请求') : '请求详情';
-      detail.appendChild(title);
+      card.appendChild(title);
       const meta = document.createElement('div');
       meta.className = 'meta';
-      meta.textContent = req ? `${req.timestamp || ''} · ${req.method || ''} ${req.url || ''} · ${req.model || ''} · ${req.ip || ''} ${req.ip_location || ''}` : '加载请求详情';
-      detail.appendChild(meta);
+      meta.textContent = req ? `${req.timestamp || ''} · ${req.method || ''} ${req.url || ''} · ${req.model || ''}${req.channel_model ? ` · 渠道 ${req.channel_model}` : ''} · ${req.ip || ''} ${req.ip_location || ''}` : '加载请求详情';
+      card.appendChild(meta);
       if (detailLoading) {
         const loading = document.createElement('div');
         loading.className = 'hint';
         loading.textContent = '加载中...';
-        detail.appendChild(loading);
+        card.appendChild(loading);
         return;
       }
       addTextBlock('完整用户提示词', req && (req.prompt || req.prompt_preview) || '');
       addTextBlock('完整输出', req && (req.output || req.output_preview) || '');
       addTextBlock('完整错误', req && (req.error || req.error_preview) || '');
-      addListBlock('MCP 功能介绍', formatMCPs(req));
-      addListBlock('Skill 功能介绍和提示词', formatSkills(req));
       addListBlock('实际调用工具', formatCalledTools(req));
+      addListBlock('MCP 功能介绍（可用）', formatMCPs(req));
+      addListBlock('Skill 功能介绍和提示词（可用/渐进式）', formatSkills(req));
       addTextBlock('系统提示词 / instructions', req && (req.system_prompt || req.system_prompt_preview) || '');
+      if (previousScrollTop) card.scrollTop = previousScrollTop;
     };
 
     const closeDetail = () => {
@@ -451,15 +733,17 @@ function aXRequestLogs(){
         const tr = document.createElement('tr');
         if (item.id === currentSelectedId) tr.className = 'cpaSelected';
         const brief = item.error_preview || item.output_preview || '';
+        const channel = item.channel_model || item.upstream_model || item.provider || '';
+        const calledTools = item.called_tools_preview || '';
         const rowNumber = currentOffset + index + 1;
         const displayTime = formatTimestamp(item.timestamp);
         tr.innerHTML = `
           <td class="cpaMono"><span class="cpaOneLine" title="${esc(item.timestamp || '')}">${esc(displayTime)}</span><span class="cpaSubLine" title="${esc(item.id || '')}">#${rowNumber} · ${esc(item.id || '')}</span></td>
           <td class="cpaMono"><span class="cpaOneLine" title="${esc(`${item.method || ''} ${item.url || ''}`)}">${esc(item.method || '')} ${esc(item.url || '')}</span></td>
           <td><span class="cpaSource ${item.ip ? '' : 'cpaMuted'}" title="${esc([item.ip || '', item.ip_location || ''].filter(Boolean).join(' · ') || '未记录 IP')}">${esc([item.ip || '', item.ip_location || ''].filter(Boolean).join(' · ') || '未记录')}</span></td>
-          <td><span class="cpaOneLine" title="${esc(item.model || '')}">${esc(item.model || '')}</span></td>
+          <td><span class="cpaOneLine" title="${esc(item.model || '')}">${esc(item.model || '')}</span><span class="cpaSubLine ${channel ? '' : 'cpaMuted'}" title="${esc(channel || '渠道未记录')}">${esc(channel ? `渠道：${channel}` : '渠道未记录')}</span></td>
           <td class="${item.success ? 'cpaOk' : 'cpaBad'}"><span class="cpaOneLine">${item.success ? '成功' : '失败'} ${esc(item.status || '')}</span></td>
-          <td><span class="cpaClip" title="${esc(item.tool_preview || item.called_tools_preview || '')}">${esc(item.tool_preview || item.called_tools_preview || '')}</span></td>
+          <td><span class="cpaClip" title="${esc(calledTools)}">${esc(calledTools)}</span></td>
           <td><span class="cpaClip" title="${esc(item.system_prompt_preview || '')}">${esc(item.system_prompt_preview || '')}</span></td>
           <td><span class="cpaClip" title="${esc(item.prompt_preview || '')}">${esc(item.prompt_preview || '')}</span></td>
           <td><span class="cpaClip" title="${esc(brief)}">${esc(brief)}</span></td>
@@ -534,6 +818,7 @@ function aXRequestLogs(){
 
     async function loadRequests(reset = false) {
       if (!requestActive) return;
+      const keepDetailOpen = !!currentSelectedId && !reset;
       const key = getKey();
       if (!key) {
         requestError = '请先登录管理页';
@@ -543,14 +828,14 @@ function aXRequestLogs(){
       }
       requestLoading = true;
       requestError = '';
-      detailError = '';
+      if (!keepDetailOpen) detailError = '';
       if (reset) {
         currentPage = 0;
         closeDetail();
       }
       currentOffset = currentPage * pageSize;
       renderList();
-      renderDetail();
+      if (!keepDetailOpen) renderDetail();
       updateStatus('加载中...');
       try {
         const params = new URLSearchParams({ limit: String(pageSize), offset: String(currentOffset) });
@@ -570,7 +855,7 @@ function aXRequestLogs(){
         requestLoading = false;
         updateStatus(requestError || `已显示 ${currentItems.length} / ${currentTotal} 条`);
         renderList();
-        renderDetail();
+        if (!keepDetailOpen) renderDetail();
       }
     }
 
@@ -584,6 +869,46 @@ function aXRequestLogs(){
       } else {
         setActive(false);
       }
+    };
+
+    const onDocumentPointerDown = event => {
+      if (!requestActive || !currentSelectedId) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target) return;
+      if (target.closest('.cpaReqLogDetailCard')) return;
+      if (target.closest('#cpaReqLogDetail')) {
+        closeDetail();
+        return;
+      }
+      if (target.closest('.cpaDetailBtn')) return;
+      closeDetail();
+    };
+
+    const onDocumentKeyDown = event => {
+      if (!requestActive || !currentSelectedId) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeDetail();
+      }
+    };
+
+    const onDetailBackdropClick = event => {
+      if (!requestActive || !currentSelectedId) return;
+      if (event.target === detail) closeDetail();
+    };
+
+    const onDetailWheel = event => {
+      if (!requestActive || !currentSelectedId) return;
+      const target = event.target instanceof Element ? event.target : null;
+      const card = target && target.closest('.cpaReqLogDetailCard');
+      if (!card) {
+        event.preventDefault();
+        return;
+      }
+      const delta = event.deltaY || 0;
+      const atTop = card.scrollTop <= 0;
+      const atBottom = Math.ceil(card.scrollTop + card.clientHeight) >= card.scrollHeight;
+      if ((delta < 0 && atTop) || (delta > 0 && atBottom)) event.preventDefault();
     };
 
     const scheduleSearch = (() => {
@@ -608,6 +933,11 @@ function aXRequestLogs(){
       }
     };
     tabBar.addEventListener('click', onTabBarClick, true);
+    document.addEventListener('pointerdown', onDocumentPointerDown, true);
+    document.addEventListener('keydown', onDocumentKeyDown, true);
+    window.addEventListener('keydown', onDocumentKeyDown, true);
+    detail.addEventListener('click', onDetailBackdropClick);
+    detail.addEventListener('wheel', onDetailWheel, {passive:false});
     refreshBtn.onclick = () => loadRequests(true);
     prevBtn.onclick = () => {
       if (!requestLoading && currentPage > 0) {
@@ -629,6 +959,7 @@ function aXRequestLogs(){
     exportJsonlBtn.onclick = () => { void exportRequests('jsonl'); };
     closeBtn.onclick = () => setActive(false);
     requestButton.onclick = () => setActive(true);
+    syncAutoRefresh();
     setActive(true);
     renderList();
     renderDetail();
@@ -637,6 +968,12 @@ function aXRequestLogs(){
     return () => {
       if (autoRefreshTimer) window.clearInterval(autoRefreshTimer);
       tabBar.removeEventListener('click', onTabBarClick, true);
+      document.removeEventListener('pointerdown', onDocumentPointerDown, true);
+      document.removeEventListener('keydown', onDocumentKeyDown, true);
+      window.removeEventListener('keydown', onDocumentKeyDown, true);
+      detail.removeEventListener('click', onDetailBackdropClick);
+      detail.removeEventListener('wheel', onDetailWheel);
+      detail.remove();
       panel.remove();
       style.remove();
       requestButton.remove();

@@ -417,7 +417,7 @@ function cpaInstallProviderUsageDetailsPatch(){
     tooltip.style.top = `${top}px`;
   };
   const showTooltip = (element, event) => {
-    const title = element.getAttribute('data-cpa-usage-title') || element.getAttribute('title') || '';
+    const title = element.getAttribute('data-cpa-usage-title') || '';
     if (!title) return;
     const tip = ensureTooltip();
     tip.textContent = title;
@@ -459,7 +459,6 @@ function cpaInstallProviderUsageDetailsPatch(){
       }
       element.classList.add('cpaProviderUsageHover');
       element.setAttribute('data-cpa-usage-title', title);
-      element.setAttribute('title', title);
     }
   };
   const style = document.createElement('style');

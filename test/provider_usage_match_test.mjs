@@ -31,6 +31,8 @@ class FakeElement {
 }
 
 const source = fs.readFileSync(new URL('../static/management.html', import.meta.url), 'utf8');
+assert.equal(source.includes("setAttribute('title', title)"), false);
+assert.equal(source.includes("getAttribute('data-cpa-usage-title') || element.getAttribute('title')"), false);
 const fnSource = extractFunction(source, 'cpaProviderUsageProviderForElement');
 const context = {globalThis: {}};
 vm.runInNewContext(`${fnSource}; globalThis.pick = cpaProviderUsageProviderForElement;`, context);

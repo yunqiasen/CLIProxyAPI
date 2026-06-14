@@ -7,11 +7,32 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 
 ## Branch Workflow
 - This repository is maintained as a fork of `router-for-me/CLIProxyAPI`.
+- Primary local workspace: `/home/div/1_Project_dir/AI/CLIProxyAPI`.
+- The old `/home/div/1_Project_dir/AI/CLIProxyAPI-CPA-fork` symlink was removed; do not recreate or use it.
+- Fork remote: `origin` -> `https://github.com/yunqiasen/CLIProxyAPI.git`.
+- Upstream remote: `upstream` -> `https://github.com/router-for-me/CLIProxyAPI.git`.
 - `main` is the upstream sync line.
 - `CPA-fork` is the team mainline branch for daily development.
 - Land upstream updates in `main` first, review them, then merge the needed changes into `CPA-fork`.
 - Create feature branches from `CPA-fork` unless the work is specifically for upstream sync.
+- Push daily fork work to `origin/CPA-fork`; do not push fork-only work to upstream.
 - Keep `README.md` and `README_CN.md` aligned when editing workflow docs.
+
+## CPA Fork Customizations
+- `static/management.html` is the deployed single-file management UI bundle. It is generated/minified; prefer changing the web UI source, rebuilding, then copying the built HTML into this file.
+- Keep the custom request logs page at `/logs`. The built bundle must include `function aXRequestLogs(){`, route `{path:\`/logs\`,element:(0,R.jsx)(aXRequestLogs,{})}`, and calls to `/v0/management/request-logs`.
+- Keep request-log data collection separate from the raw text logs. Raw logs must not be replaced by parsed/exported request-log data.
+- The AI providers page uses the newer upstream provider layout, but must retain fork behavior: provider success/failure totals, hover details grouped by model/status/error/count, provider-specific matching, and no duplicate native tooltip.
+- AI provider model chips must show the model alias first because that is the API-facing model name. Fall back to the raw model name only when alias is empty. Search/filter must still match both alias and raw model name.
+- Editing an AI provider must allow revealing existing API keys with the eye button; do not reintroduce the upstream bug where the key stays hidden.
+- Plugin management must keep upstream plugin deletion UI: delete button, confirmation dialog, and restart-required notice after deletion.
+- Quota management must keep the fork behavior: current-page refresh is separate from true background refresh-all with bounded concurrency.
+- Auth files credential download must keep ZIP export for selected credentials instead of triggering one browser download per credential.
+
+## Management UI Verification
+- After changing `static/management.html`, run `node test/provider_usage_match_test.mjs`.
+- If the management service is running locally, verify the served page matches the workspace file with `curl -sS --max-time 8 http://100.126.43.55:8317/management.html -o /tmp/live-management.html && sha256sum /tmp/live-management.html static/management.html`.
+- For frontend-only management UI changes, preserve the regression tokens in `test/provider_usage_match_test.mjs` instead of removing the test to make a build pass.
 
 ## Commands
 ```bash

@@ -119,6 +119,7 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 - 上游更新先进入 `main`，再按需把功能或修复合并到 `CPA-fork`。
 - 新功能分支默认从 `CPA-fork` 切出，除非这次工作就是同步上游。
 - 如果使用个人 GitHub fork，建议把 `origin` 指向自己的 fork，把 `upstream` 指向 `router-for-me/CLIProxyAPI`。
+- 日常二开内容推送到 `origin/CPA-fork`，不要把 fork 专用改动推到上游。
 
 ## 谁与我们在一起？
 

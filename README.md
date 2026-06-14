@@ -119,6 +119,7 @@ This repository is maintained as a fork of `router-for-me/CLIProxyAPI`.
 - Merge upstream changes into `main` first, review them, then merge the needed work into `CPA-fork`.
 - Create feature branches from `CPA-fork` unless the change is specifically for upstream sync.
 - If you work from a personal GitHub fork, keep `origin` pointed at your fork and use `upstream` for `router-for-me/CLIProxyAPI`.
+- Daily fork work should be pushed to `origin/CPA-fork`; do not push fork-only changes to upstream.
 
 ## Who is with us?
 

@@ -32,14 +32,14 @@ var aiAPIPrefixes = []string{
 const (
 	skipGinLogKey  = "__gin_skip_request_logging__"
 	creditsUsedKey = "__antigravity_credits_used__"
+	modelNameKey   = "__request_model_name__"
 )
 
 // GinLogrusLogger returns a Gin middleware handler that logs HTTP requests and responses
 // using logrus. It captures request details including method, path, status code, latency,
-// client IP, and any error messages. Request ID is only added for AI API requests.
+// client IP, model name (if available), and any error messages.
 //
-// Output format (AI API): [2025-12-23 20:14:10] [info ] | a1b2c3d4 | 200 |       23.559s | ...
-// Output format (others): [2025-12-23 20:14:10] [info ] | -------- | 200 |       23.559s | ...
+// Output format: [2025-12-23 20:14:10] [info ] a1b2c3d4 200 23.559s 116.26.12.138 POST "/v1/responses" [model: claude-sonnet-4-6]
 //
 // Returns:
 //   - gin.HandlerFunc: A middleware handler for request logging
@@ -83,12 +83,21 @@ func GinLogrusLogger() gin.HandlerFunc {
 		if requestID == "" {
 			requestID = "--------"
 		}
-		logLine := fmt.Sprintf("%3d | %13v | %15s | %-7s \"%s\"", statusCode, latency, clientIP, method, path)
+
+		// Build log line without vertical bars
+		logLine := fmt.Sprintf("%s %3d %13v %15s %-7s \"%s\"", 
+			requestID, statusCode, latency, clientIP, method, path)
+
+		// Add model name if available
+		if modelName := getModelName(c); modelName != "" {
+			logLine += fmt.Sprintf(" [model: %s]", modelName)
+		}
+
 		if creditsUsed(c) {
 			logLine += " [credits]"
 		}
 		if errorMessage != "" {
-			logLine = logLine + " | " + errorMessage
+			logLine = logLine + " " + errorMessage
 		}
 
 		entry := log.WithField("request_id", requestID)
@@ -101,6 +110,37 @@ func GinLogrusLogger() gin.HandlerFunc {
 		default:
 			entry.Info(logLine)
 		}
+	}
+}
+
+// getModelName extracts the model name from the gin context or request headers
+func getModelName(c *gin.Context) string {
+	// Try to get from context first (set by handler)
+	if val, exists := c.Get(modelNameKey); exists {
+		if model, ok := val.(string); ok && model != "" {
+			return model
+		}
+	}
+
+	// Try to extract from common headers
+	headers := []string{
+		"X-Model",
+		"X-Request-Model",
+		"X-Upstream-Model",
+	}
+	for _, header := range headers {
+		if model := c.GetHeader(header); model != "" {
+			return model
+		}
+	}
+
+	return ""
+}
+
+// SetModelName stores the model name in gin context for logging
+func SetModelName(c *gin.Context, modelName string) {
+	if c != nil && modelName != "" {
+		c.Set(modelNameKey, modelName)
 	}
 }
 

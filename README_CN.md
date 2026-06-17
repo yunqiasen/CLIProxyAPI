@@ -122,6 +122,7 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 - 新功能分支默认从 `CPA-fork` 切出，除非这次工作就是同步上游。
 - 如果使用个人 GitHub fork，建议把 `origin` 指向自己的 fork，把 `upstream` 指向 `router-for-me/CLIProxyAPI`。
 - 日常二开内容推送到 `origin/CPA-fork`，不要把 fork 专用改动推到上游。
+- 二开的管理 UI 维护在 `yunqiasen/Cli-Proxy-API-Management-Center` 的 `CPA-fork` 分支。其他服务器用 Docker 部署本 fork 时仍按正常 `/management.html` 使用；后端默认会从这个 UI fork 的 release 下载最新 `management.html`。
 
 ## 谁与我们在一起？
 

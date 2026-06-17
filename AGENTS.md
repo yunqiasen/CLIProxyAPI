@@ -19,6 +19,9 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 - Keep `README.md` and `README_CN.md` aligned when editing workflow docs.
 
 ## CPA Fork Customizations
+- Management UI source is maintained separately at `/home/div/1_Project_dir/AI/Cli-Proxy-API-Management-Center` on branch `CPA-fork`.
+- CPA fork deployments must load the management panel from `https://github.com/yunqiasen/Cli-Proxy-API-Management-Center`, not the upstream UI repository. Keep `internal/config.DefaultPanelGitHubRepository`, `internal/managementasset.defaultManagementReleaseURL`, and `config.example.yaml` aligned with that fork.
+- Other servers should be able to deploy this CPA fork normally with Docker and automatically receive the forked UI through the management panel release download. Do not require manual copying of `static/management.html` for normal server installs.
 - `static/management.html` is the deployed single-file management UI bundle. It is generated/minified; prefer changing the web UI source, rebuilding, then copying the built HTML into this file.
 - Keep the custom request logs page at `/logs`. The built bundle must include `function aXRequestLogs(){`, route `{path:\`/logs\`,element:(0,R.jsx)(aXRequestLogs,{})}`, and calls to `/v0/management/request-logs`.
 - Keep request-log data collection separate from the raw text logs. Raw logs must not be replaced by parsed/exported request-log data.

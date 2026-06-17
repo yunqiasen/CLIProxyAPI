@@ -121,6 +121,7 @@ This repository is maintained as a fork of `router-for-me/CLIProxyAPI`.
 - Create feature branches from `CPA-fork` unless the change is specifically for upstream sync.
 - If you work from a personal GitHub fork, keep `origin` pointed at your fork and use `upstream` for `router-for-me/CLIProxyAPI`.
 - Daily fork work should be pushed to `origin/CPA-fork`; do not push fork-only changes to upstream.
+- The forked management UI is maintained in `yunqiasen/Cli-Proxy-API-Management-Center` on the `CPA-fork` branch. Docker deployments of this fork should use the normal `/management.html` flow; the backend defaults to downloading the latest `management.html` release from that fork.
 
 ## Who is with us?
 

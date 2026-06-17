@@ -19,7 +19,6 @@ import (
 
 func TestDownloadAuthFile_ReturnsFile(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
 
 	authDir := t.TempDir()
 	fileName := "download-user.json"
@@ -45,7 +44,6 @@ func TestDownloadAuthFile_ReturnsFile(t *testing.T) {
 
 func TestDownloadAuthFile_RejectsPathSeparators(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
 

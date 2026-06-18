@@ -14,19 +14,19 @@ const mustContain = [
   'delete_restart_required',
   'quota-refresh-jobs',
   'download-zip',
-  '/v0/management/request-logs',
-  'function aXRequestLogs(){',
-  '{path:`/logs`,element:(0,R.jsx)(aXRequestLogs,{})}',
-  'Dp.getState().managementKey',
+  '/request-logs',
+  '刷新列表',
+  '自动刷新',
+  '完整 MCP 功能介绍',
+  'Skill 功能介绍和提示词',
+  '全部可用工具',
   'usageTooltip',
-  'data-cpa-usage-title',
-  'data-cpa-usage-tooltip',
-  'max-width:min(760px',
-  'white-space:pre;',
+  'usageTooltipPortal',
+  'closeOnOverlayClick',
+  'max-width:min(760px,100vw - 40px)',
   'overflow:auto',
   'width:max-content',
-  'translateX(-100%)',
-  'data-placement',
+  'translate(-100%)',
 ];
 
 for (const token of mustContain) {
@@ -40,6 +40,9 @@ const mustNotContain = [
   '{path:`/logs`,element:(0,R.jsx)(L$,{})}',
   'Zf.getState().managementKey',
   'cpaDownloadBlob',
+  'cpa-fork-regression-tokens',
+  'data-cpa-usage-tooltip',
+  'function aXRequestLogs(){',
 ];
 
 for (const token of mustNotContain) {

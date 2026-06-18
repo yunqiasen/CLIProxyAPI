@@ -30,8 +30,9 @@ var aiAPIPrefixes = []string{
 }
 
 const (
-	skipGinLogKey  = "__gin_skip_request_logging__"
-	creditsUsedKey = "__antigravity_credits_used__"
+	skipGinLogKey   = "__gin_skip_request_logging__"
+	creditsUsedKey  = "__antigravity_credits_used__"
+	requestModelKey = "__cpa_request_model__"
 )
 
 // GinLogrusLogger returns a Gin middleware handler that logs HTTP requests and responses
@@ -78,12 +79,16 @@ func GinLogrusLogger() gin.HandlerFunc {
 		statusCode := c.Writer.Status()
 		clientIP := c.ClientIP()
 		method := c.Request.Method
+		requestModel := GetGinRequestModel(c)
 		errorMessage := c.Errors.ByType(gin.ErrorTypePrivate).String()
 
 		if requestID == "" {
 			requestID = "--------"
 		}
 		logLine := fmt.Sprintf("%3d | %13v | %15s | %-7s \"%s\"", statusCode, latency, clientIP, method, path)
+		if requestModel != "" {
+			logLine += " | model=" + requestModel
+		}
 		if creditsUsed(c) {
 			logLine += " [credits]"
 		}
@@ -144,6 +149,52 @@ func SkipGinRequestLogging(c *gin.Context) {
 		return
 	}
 	c.Set(skipGinLogKey, true)
+}
+
+// SetGinRequestModel stores the client-requested model for the access log line.
+func SetGinRequestModel(c *gin.Context, model string) {
+	if c == nil {
+		return
+	}
+	model = sanitizeLogToken(model, 160)
+	if model == "" {
+		return
+	}
+	c.Set(requestModelKey, model)
+}
+
+// GetGinRequestModel returns the request model stored on the Gin context.
+func GetGinRequestModel(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	val, exists := c.Get(requestModelKey)
+	if !exists {
+		return ""
+	}
+	model, ok := val.(string)
+	if !ok {
+		return ""
+	}
+	return sanitizeLogToken(model, 160)
+}
+
+func sanitizeLogToken(value string, maxLen int) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 || r == '|' || r == '"' || r == '\'' {
+			return -1
+		}
+		return r
+	}, value)
+	value = strings.Join(strings.Fields(value), "")
+	if maxLen > 0 && len(value) > maxLen {
+		value = value[:maxLen]
+	}
+	return value
 }
 
 func shouldSkipGinRequestLogging(c *gin.Context) bool {

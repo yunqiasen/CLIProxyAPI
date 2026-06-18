@@ -14,12 +14,20 @@ const mustContain = [
   'delete_restart_required',
   'quota-refresh-jobs',
   'download-zip',
+  'source_errors',
+  '已显示本地已安装插件',
+  '/logs',
   '/request-logs',
   '刷新列表',
   '自动刷新',
+  'previewPane',
   '完整 MCP 功能介绍',
   'Skill 功能介绍和提示词',
   '全部可用工具',
+  '排除模型',
+  '优先级',
+  'missing_account_id',
+  'Chatgpt-Account-Id',
   'usageTooltip',
   'usageTooltipPortal',
   'closeOnOverlayClick',
@@ -42,7 +50,6 @@ const mustNotContain = [
   'cpaDownloadBlob',
   'cpa-fork-regression-tokens',
   'data-cpa-usage-tooltip',
-  'function aXRequestLogs(){',
 ];
 
 for (const token of mustNotContain) {

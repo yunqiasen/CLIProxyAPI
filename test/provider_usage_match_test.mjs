@@ -39,10 +39,10 @@ const mustContain = [
   'usageTooltip',
   'usageTooltipPortal',
   'closeOnOverlayClick',
-  'max-width:min(760px,100vw - 40px)',
+  'max-width:min(560px,100vw - 24px)',
+  'data-placement',
   'overflow:auto',
   'width:max-content',
-  'translate(-100%)',
 ];
 
 for (const token of mustContain) {

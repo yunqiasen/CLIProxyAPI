@@ -291,6 +291,73 @@ func TestInstallUsesLatestReleaseVersion(t *testing.T) {
 	}
 }
 
+func TestInstallFallsBackToRegistryVersionWhenLatestReleaseAPIUnavailable(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	archiveData := makeZip(t, map[string]string{"sample-provider.dylib": "library-data"})
+	archiveName := "sample-provider_0.1.0_darwin_arm64.zip"
+	checksum := sha256.Sum256(archiveData)
+	client := Client{HTTPClient: mapHTTPDoer{
+		"https://github.com/author-name/cliproxy-sample-provider-plugin/releases/download/v0.1.0/" + archiveName: archiveData,
+		"https://github.com/author-name/cliproxy-sample-provider-plugin/releases/download/v0.1.0/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
+	}}
+
+	result, errInstall := client.Install(context.Background(), testPlugin(), InstallOptions{
+		PluginsDir: root,
+		GOOS:       "darwin",
+		GOARCH:     "arm64",
+	})
+	if errInstall != nil {
+		t.Fatalf("Install() error = %v", errInstall)
+	}
+	if result.Version != "0.1.0" {
+		t.Fatalf("Version = %q, want registry version 0.1.0", result.Version)
+	}
+	data, errRead := os.ReadFile(filepath.Join(root, "darwin", "arm64", "sample-provider.dylib"))
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	if string(data) != "library-data" {
+		t.Fatalf("installed data = %q", data)
+	}
+}
+
+func TestInstallFallsBackToLatestReleaseWebPageWhenRegistryVersionMissing(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	archiveData := makeZip(t, map[string]string{"sample-provider.dylib": "library-data"})
+	archiveName := "sample-provider_0.2.0_darwin_arm64.zip"
+	checksum := sha256.Sum256(archiveData)
+	plugin := testPlugin()
+	plugin.Version = ""
+	client := Client{HTTPClient: latestWebFallbackHTTPDoer{
+		archiveName: archiveName,
+		archiveData: archiveData,
+		checksum:    hex.EncodeToString(checksum[:]),
+	}}
+
+	result, errInstall := client.Install(context.Background(), plugin, InstallOptions{
+		PluginsDir: root,
+		GOOS:       "darwin",
+		GOARCH:     "arm64",
+	})
+	if errInstall != nil {
+		t.Fatalf("Install() error = %v", errInstall)
+	}
+	if result.Version != "0.2.0" {
+		t.Fatalf("Version = %q, want web latest version 0.2.0", result.Version)
+	}
+	data, errRead := os.ReadFile(filepath.Join(root, "darwin", "arm64", "sample-provider.dylib"))
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	if string(data) != "library-data" {
+		t.Fatalf("installed data = %q", data)
+	}
+}
+
 func TestInstallRejectsInvalidLatestReleaseTag(t *testing.T) {
 	t.Parallel()
 
@@ -354,6 +421,45 @@ func (c mapHTTPDoer) Do(req *http.Request) (*http.Response, error) {
 		Header:     make(http.Header),
 		Request:    req,
 	}, nil
+}
+
+type latestWebFallbackHTTPDoer struct {
+	archiveName string
+	archiveData []byte
+	checksum    string
+}
+
+func (d latestWebFallbackHTTPDoer) Do(req *http.Request) (*http.Response, error) {
+	switch req.URL.String() {
+	case "https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest":
+		return testHTTPResponse(req, http.StatusForbidden, nil, `rate limited`), nil
+	case "https://github.com/author-name/cliproxy-sample-provider-plugin/releases/latest":
+		header := make(http.Header)
+		header.Set("Location", "https://github.com/author-name/cliproxy-sample-provider-plugin/releases/tag/v0.2.0")
+		return testHTTPResponse(req, http.StatusFound, header, ``), nil
+	case "https://github.com/author-name/cliproxy-sample-provider-plugin/releases/download/v0.2.0/" + d.archiveName:
+		return testHTTPBytesResponse(req, http.StatusOK, nil, d.archiveData), nil
+	case "https://github.com/author-name/cliproxy-sample-provider-plugin/releases/download/v0.2.0/checksums.txt":
+		return testHTTPResponse(req, http.StatusOK, nil, d.checksum+"  "+d.archiveName+"\n"), nil
+	default:
+		return testHTTPResponse(req, http.StatusNotFound, nil, "not found"), nil
+	}
+}
+
+func testHTTPResponse(req *http.Request, statusCode int, header http.Header, body string) *http.Response {
+	return testHTTPBytesResponse(req, statusCode, header, []byte(body))
+}
+
+func testHTTPBytesResponse(req *http.Request, statusCode int, header http.Header, body []byte) *http.Response {
+	if header == nil {
+		header = make(http.Header)
+	}
+	return &http.Response{
+		StatusCode: statusCode,
+		Body:       io.NopCloser(bytes.NewReader(body)),
+		Header:     header,
+		Request:    req,
+	}
 }
 
 func testPlugin() Plugin {

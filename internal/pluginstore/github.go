@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -70,6 +71,88 @@ func (c Client) FetchLatestRelease(ctx context.Context, plugin Plugin) (Release,
 		return Release{}, fmt.Errorf("decode release: %w", errDecode)
 	}
 	return release, nil
+}
+
+func (c Client) fetchLatestReleaseFromWeb(ctx context.Context, plugin Plugin, goos, goarch string) (Release, error) {
+	owner, repo, errRepository := GitHubRepositoryParts(plugin.Repository)
+	if errRepository != nil {
+		return Release{}, errRepository
+	}
+	latestURL := fmt.Sprintf(
+		"https://github.com/%s/%s/releases/latest",
+		url.PathEscape(owner),
+		url.PathEscape(repo),
+	)
+	req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, latestURL, nil)
+	if errRequest != nil {
+		return Release{}, errRequest
+	}
+	req.Header.Set("Accept", "text/html")
+	req.Header.Set("User-Agent", c.userAgent())
+	resp, errDo := c.httpClient().Do(req)
+	if errDo != nil {
+		return Release{}, errDo
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return Release{}, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	tag := releaseTagFromURL(resp.Header.Get("Location"))
+	if tag == "" && resp.Request != nil && resp.Request.URL != nil {
+		tag = releaseTagFromURL(resp.Request.URL.String())
+	}
+	if tag == "" {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+		tag = releaseTagFromHTML(string(body))
+	}
+	if tag == "" {
+		return Release{}, fmt.Errorf("latest release tag not found")
+	}
+	return releaseForPluginVersion(plugin, tag, goos, goarch)
+}
+
+func releaseTagFromURL(rawURL string) string {
+	parsed, errParse := url.Parse(strings.TrimSpace(rawURL))
+	if errParse != nil {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	for i := 0; i+2 < len(parts); i++ {
+		if parts[i] != "releases" || parts[i+1] != "tag" {
+			continue
+		}
+		tag, errUnescape := url.PathUnescape(parts[i+2])
+		if errUnescape != nil {
+			return parts[i+2]
+		}
+		return tag
+	}
+	return ""
+}
+
+func releaseTagFromHTML(body string) string {
+	marker := "/releases/tag/"
+	index := strings.Index(body, marker)
+	if index < 0 {
+		return ""
+	}
+	start := index + len(marker)
+	end := start
+	for end < len(body) {
+		switch body[end] {
+		case '"', '\'', '<', '>', '?', '#':
+			goto found
+		}
+		end++
+	}
+found:
+	tag, errUnescape := url.PathUnescape(strings.TrimSpace(body[start:end]))
+	if errUnescape != nil {
+		return strings.TrimSpace(body[start:end])
+	}
+	return tag
 }
 
 // ReleaseVersion derives the plugin version from the release tag, stripping a

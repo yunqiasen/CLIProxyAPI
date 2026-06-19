@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -51,7 +52,14 @@ func (c Client) Install(ctx context.Context, plugin Plugin, options InstallOptio
 	}
 	release, errRelease := c.FetchLatestRelease(ctx, plugin)
 	if errRelease != nil {
-		return InstallResult{}, errRelease
+		fallbackRelease, errFallback := c.fetchLatestReleaseFromWeb(ctx, plugin, options.GOOS, options.GOARCH)
+		if errFallback != nil {
+			fallbackRelease, errFallback = registryVersionRelease(plugin, options.GOOS, options.GOARCH)
+			if errFallback != nil {
+				return InstallResult{}, errRelease
+			}
+		}
+		release = fallbackRelease
 	}
 	latestVersion, errVersion := ReleaseVersion(release)
 	if errVersion != nil {
@@ -78,6 +86,37 @@ func (c Client) Install(ctx context.Context, plugin Plugin, options InstallOptio
 		return InstallResult{}, errVerify
 	}
 	return InstallArchive(archiveData, plugin, options)
+}
+
+func registryVersionRelease(plugin Plugin, goos, goarch string) (Release, error) {
+	version := normalizeVersion(plugin.Version)
+	return releaseForPluginVersion(plugin, version, goos, goarch)
+}
+
+func releaseForPluginVersion(plugin Plugin, version, goos, goarch string) (Release, error) {
+	version = normalizeVersion(version)
+	if !validPluginVersion(version) {
+		return Release{}, fmt.Errorf("invalid plugin version %q", version)
+	}
+	owner, repo, errRepository := GitHubRepositoryParts(plugin.Repository)
+	if errRepository != nil {
+		return Release{}, errRepository
+	}
+	archiveName := ArchiveName(plugin.ID, version, goos, goarch)
+	tag := "v" + version
+	baseURL := fmt.Sprintf(
+		"https://github.com/%s/%s/releases/download/%s",
+		url.PathEscape(owner),
+		url.PathEscape(repo),
+		url.PathEscape(tag),
+	)
+	return Release{
+		TagName: tag,
+		Assets: []ReleaseAsset{
+			{Name: archiveName, BrowserDownloadURL: baseURL + "/" + url.PathEscape(archiveName)},
+			{Name: "checksums.txt", BrowserDownloadURL: baseURL + "/checksums.txt"},
+		},
+	}, nil
 }
 
 func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (InstallResult, error) {

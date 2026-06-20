@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -89,6 +90,41 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"latest-version": version})
+}
+
+// PostManagementPanelUpdate forces a management.html update from the configured panel repository.
+func (h *Handler) PostManagementPanelUpdate(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler_not_initialized"})
+		return
+	}
+
+	h.mu.Lock()
+	cfg := h.cfg
+	configFilePath := h.configFilePath
+	h.mu.Unlock()
+
+	if cfg == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "config_not_loaded"})
+		return
+	}
+	if cfg.RemoteManagement.DisableControlPanel {
+		c.JSON(http.StatusConflict, gin.H{"error": "control_panel_disabled"})
+		return
+	}
+
+	staticDir := managementasset.StaticDir(configFilePath)
+	if strings.TrimSpace(staticDir) == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "static_dir_unavailable"})
+		return
+	}
+
+	if !managementasset.ForceLatestManagementHTML(c.Request.Context(), staticDir, cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "panel_update_failed"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "management panel updated"})
 }
 
 func WriteConfig(path string, data []byte) error {

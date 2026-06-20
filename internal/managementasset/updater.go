@@ -27,7 +27,7 @@ import (
 
 const (
 	defaultManagementReleaseURL  = "https://api.github.com/repos/yunqiasen/Cli-Proxy-API-Management-Center/releases/latest"
-	defaultManagementFallbackURL = "https://cpamc.router-for.me/"
+	defaultManagementFallbackURL = "https://github.com/yunqiasen/Cli-Proxy-API-Management-Center/releases/latest/download/management.html"
 	managementAssetName          = "management.html"
 	httpUserAgent                = "CLIProxyAPI-management-updater"
 	managementSyncMinInterval    = 30 * time.Second
@@ -189,6 +189,15 @@ func FilePath(configFilePath string) string {
 // EnsureLatestManagementHTML checks the latest management.html asset and updates the local copy when needed.
 // It coalesces concurrent sync attempts and returns whether the asset exists after the sync attempt.
 func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string) bool {
+	return ensureLatestManagementHTML(ctx, staticDir, proxyURL, panelRepository, false)
+}
+
+// ForceLatestManagementHTML checks and updates management.html immediately, bypassing the periodic throttle.
+func ForceLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string) bool {
+	return ensureLatestManagementHTML(ctx, staticDir, proxyURL, panelRepository, true)
+}
+
+func ensureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string, force bool) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -204,7 +213,7 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 		lastUpdateCheckMu.Lock()
 		now := time.Now()
 		timeSinceLastAttempt := now.Sub(lastUpdateCheckTime)
-		if !lastUpdateCheckTime.IsZero() && timeSinceLastAttempt < managementSyncMinInterval {
+		if !force && !lastUpdateCheckTime.IsZero() && timeSinceLastAttempt < managementSyncMinInterval {
 			lastUpdateCheckMu.Unlock()
 			log.Debugf(
 				"management asset sync skipped by throttle: last attempt %v ago (interval %v)",

@@ -17,6 +17,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
+func requestLogTestTimestamp(offset time.Duration) (string, string) {
+	ts := time.Now().Add(-time.Hour + offset).In(time.FixedZone("UTC+8", 8*60*60))
+	return ts.Format("2006-01-02T150405"), ts.Format(time.RFC3339)
+}
+
 func TestExtractResponseTextFiltersResponsesToolDeltas(t *testing.T) {
 	response := strings.Join([]string{
 		"Status: 200",
@@ -167,10 +172,11 @@ func TestExtractCalledToolsFromResponsesSSE(t *testing.T) {
 
 func TestParseRequestLogExtractsUpstreamChannelAndCalledToolsOnly(t *testing.T) {
 	logsDir := t.TempDir()
-	logPath := filepath.Join(logsDir, "v1-responses-2026-06-12T233555-channelid.log")
+	stamp, timestamp := requestLogTestTimestamp(0)
+	logPath := filepath.Join(logsDir, fmt.Sprintf("v1-responses-%s-channelid.log", stamp))
 	content := strings.Join([]string{
 		"=== REQUEST INFO ===",
-		"Timestamp: 2026-06-12T23:35:55+08:00",
+		"Timestamp: " + timestamp,
 		"URL: /v1/responses",
 		"Method: POST",
 		"",
@@ -178,7 +184,7 @@ func TestParseRequestLogExtractsUpstreamChannelAndCalledToolsOnly(t *testing.T) 
 		`{"model":"cpa-gpt5","tools":[{"type":"function","name":"mcp__context7__query_docs","description":"Context7 docs lookup."},{"type":"function","name":"mcp__node_repl","description":"Node REPL runner."}],"input":[{"role":"user","content":[{"type":"input_text","text":"用户提示词"}]}]}`,
 		"",
 		"=== API REQUEST 1 ===",
-		"Timestamp: 2026-06-12T23:35:55+08:00",
+		"Timestamp: " + timestamp,
 		"Upstream URL: https://integrate.api.nvidia.com/v1/chat/completions",
 		"HTTP Method: POST",
 		"Auth: provider=英伟达, auth_id=openai-compatibility:英伟达:abc123, label=英伟达, type=api_key value=nvap...test",
@@ -231,10 +237,11 @@ func TestParseRequestLogExtractsUpstreamChannelAndCalledToolsOnly(t *testing.T) 
 
 func TestRequestLogStoreListDetailAndExport(t *testing.T) {
 	logsDir := t.TempDir()
-	logPath := filepath.Join(logsDir, "v1-responses-2026-06-09T185805-testid.log")
+	stamp, timestamp := requestLogTestTimestamp(0)
+	logPath := filepath.Join(logsDir, fmt.Sprintf("v1-responses-%s-testid.log", stamp))
 	content := strings.Join([]string{
 		"=== REQUEST INFO ===",
-		"Timestamp: 2026-06-09T18:58:05+08:00",
+		"Timestamp: " + timestamp,
 		"URL: /v1/responses",
 		"Method: POST",
 		"",
@@ -338,10 +345,11 @@ func TestRequestLogStoreFailureDetailsDeduplicatesByProviderModelAndError(t *tes
 
 func TestRequestLogStoreHandlesLegacyNullRowsAndRefreshesThem(t *testing.T) {
 	logsDir := t.TempDir()
-	logPath := filepath.Join(logsDir, "v1-responses-2026-06-09T185805-legacyid.log")
+	stamp, timestamp := requestLogTestTimestamp(0)
+	logPath := filepath.Join(logsDir, fmt.Sprintf("v1-responses-%s-legacyid.log", stamp))
 	content := strings.Join([]string{
 		"=== REQUEST INFO ===",
-		"Timestamp: 2026-06-09T18:58:05+08:00",
+		"Timestamp: " + timestamp,
 		"URL: /v1/responses",
 		"Method: POST",
 		"",
@@ -368,7 +376,7 @@ func TestRequestLogStoreHandlesLegacyNullRowsAndRefreshesThem(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer store.close()
-	_, err = store.db.ExecContext(context.Background(), `INSERT INTO request_log_entries (id, name, raw_log_path, size, modified, timestamp_text, timestamp_unix, model, status, success, has_error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, "legacyid", filepath.Base(logPath), logPath, info.Size(), info.ModTime().Unix(), "2026-06-09T18:58:05+08:00", info.ModTime().Unix(), "gpt-legacy", 200, 1, 0, time.Now().Unix(), time.Now().Unix())
+	_, err = store.db.ExecContext(context.Background(), `INSERT INTO request_log_entries (id, name, raw_log_path, size, modified, timestamp_text, timestamp_unix, model, status, success, has_error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, "legacyid", filepath.Base(logPath), logPath, info.Size(), info.ModTime().Unix(), timestamp, info.ModTime().Unix(), "gpt-legacy", 200, 1, 0, time.Now().Unix(), time.Now().Unix())
 	if err != nil {
 		t.Fatalf("insert legacy row: %v", err)
 	}
@@ -481,11 +489,11 @@ CREATE TABLE request_log_entries (
 
 func TestRequestLogStoreFailureDetailsDeduplicateByProviderModelAndError(t *testing.T) {
 	logsDir := t.TempDir()
-	writeFailureLog := func(name string, errMessage string) {
+	writeFailureLog := func(name string, timestamp string, errMessage string) {
 		t.Helper()
 		content := strings.Join([]string{
 			"=== REQUEST INFO ===",
-			"Timestamp: 2026-06-12T23:35:55+08:00",
+			"Timestamp: " + timestamp,
 			"URL: /v1/responses",
 			"Method: POST",
 			"",
@@ -516,9 +524,12 @@ func TestRequestLogStoreFailureDetailsDeduplicateByProviderModelAndError(t *test
 			t.Fatalf("write log: %v", err)
 		}
 	}
-	writeFailureLog("v1-responses-2026-06-12T233555-fail001.log", "quota exceeded")
-	writeFailureLog("v1-responses-2026-06-12T233556-fail002.log", "quota exceeded")
-	writeFailureLog("v1-responses-2026-06-12T233557-fail003.log", "rate limited")
+	stamp1, timestamp1 := requestLogTestTimestamp(0)
+	stamp2, timestamp2 := requestLogTestTimestamp(time.Second)
+	stamp3, timestamp3 := requestLogTestTimestamp(2 * time.Second)
+	writeFailureLog(fmt.Sprintf("v1-responses-%s-fail001.log", stamp1), timestamp1, "quota exceeded")
+	writeFailureLog(fmt.Sprintf("v1-responses-%s-fail002.log", stamp2), timestamp2, "quota exceeded")
+	writeFailureLog(fmt.Sprintf("v1-responses-%s-fail003.log", stamp3), timestamp3, "rate limited")
 
 	store, err := openRequestLogStore(logsDir)
 	if err != nil {

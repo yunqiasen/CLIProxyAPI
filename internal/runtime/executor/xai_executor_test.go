@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -156,6 +157,100 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 		if include.String() == "reasoning.encrypted_content" {
 			t.Fatalf("xai request must not ask for encrypted reasoning content: %s", string(gotBody))
 		}
+	}
+}
+
+func TestXAIExecutorComposerSessionIsolation(t *testing.T) {
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+
+	tests := []struct {
+		name          string
+		model         string
+		payload       []byte
+		wantGenerated bool
+		wantSession   string
+	}{
+		{
+			name:          "composer_generates_fresh_session",
+			model:         "grok-composer-2.5-fast",
+			payload:       []byte(`{"model":"grok-composer-2.5-fast","input":"hello"}`),
+			wantGenerated: true,
+		},
+		{
+			name:    "grok_build_stays_stateless_without_session",
+			model:   "grok-build-0.1",
+			payload: []byte(`{"model":"grok-build-0.1","input":"hello"}`),
+		},
+		{
+			name:        "explicit_prompt_cache_key_is_preserved",
+			model:       "grok-composer-2.5-fast",
+			payload:     []byte(`{"model":"grok-composer-2.5-fast","prompt_cache_key":"client-session","input":"hello"}`),
+			wantSession: "client-session",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+				Model:   tt.model,
+				Payload: tt.payload,
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatOpenAIResponse,
+				Stream:       true,
+			}, true)
+			if err != nil {
+				t.Fatalf("prepareResponsesRequest() error = %v", err)
+			}
+
+			gotSession := prepared.sessionID
+			gotPromptCacheKey := gjson.GetBytes(prepared.body, "prompt_cache_key").String()
+			httpReq, errRequest := http.NewRequest(http.MethodPost, "https://example.test/responses", bytes.NewReader(prepared.body))
+			if errRequest != nil {
+				t.Fatalf("NewRequest() error = %v", errRequest)
+			}
+			applyXAIHeaders(httpReq, auth, "xai-token", true, gotSession)
+			gotGrokConvID := httpReq.Header.Get("x-grok-conv-id")
+
+			if tt.wantGenerated {
+				if _, errParse := uuid.Parse(gotSession); errParse != nil {
+					t.Fatalf("generated sessionID = %q, want UUID; body=%s", gotSession, string(prepared.body))
+				}
+				if gotPromptCacheKey != gotSession {
+					t.Fatalf("prompt_cache_key = %q, want sessionID %q; body=%s", gotPromptCacheKey, gotSession, string(prepared.body))
+				}
+				if gotGrokConvID != gotSession {
+					t.Fatalf("x-grok-conv-id = %q, want sessionID %q", gotGrokConvID, gotSession)
+				}
+				return
+			}
+
+			if tt.wantSession != "" {
+				if gotSession != tt.wantSession {
+					t.Fatalf("sessionID = %q, want %q", gotSession, tt.wantSession)
+				}
+				if gotPromptCacheKey != tt.wantSession {
+					t.Fatalf("prompt_cache_key = %q, want %q; body=%s", gotPromptCacheKey, tt.wantSession, string(prepared.body))
+				}
+				if gotGrokConvID != tt.wantSession {
+					t.Fatalf("x-grok-conv-id = %q, want %q", gotGrokConvID, tt.wantSession)
+				}
+				return
+			}
+
+			if gotSession != "" {
+				t.Fatalf("sessionID = %q, want empty", gotSession)
+			}
+			if gotPromptCacheKey != "" {
+				t.Fatalf("prompt_cache_key = %q, want empty; body=%s", gotPromptCacheKey, string(prepared.body))
+			}
+			if gotGrokConvID != "" {
+				t.Fatalf("x-grok-conv-id = %q, want empty", gotGrokConvID)
+			}
+		})
 	}
 }
 
@@ -468,6 +563,119 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorExecuteStreamNormalizesReasoningTextEvents(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.output_item.added\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"status\":\"in_progress\",\"summary\":[]}}\n\n"))
+		_, _ = w.Write([]byte("event: response.content_part.added\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.content_part.added\",\"sequence_number\":2,\"item_id\":\"rs_1\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"reasoning_text\",\"text\":\"\"}}\n\n"))
+		_, _ = w.Write([]byte("event: response.reasoning_text.delta\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.reasoning_text.delta\",\"sequence_number\":3,\"item_id\":\"rs_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"thinking\"}\n\n"))
+		_, _ = w.Write([]byte("event: response.reasoning_text.done\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.reasoning_text.done\",\"sequence_number\":4,\"item_id\":\"rs_1\",\"output_index\":0,\"content_index\":0,\"text\":\"thinking\"}\n\n"))
+		_, _ = w.Write([]byte("event: response.output_item.done\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"sequence_number\":5,\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"status\":\"completed\",\"summary\":[],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"thinking\"}]}}\n\n"))
+		_, _ = w.Write([]byte("event: response.completed\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"sequence_number\":6,\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","input":"hello"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatCodex,
+		Stream:         true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var streamed bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		streamed.Write(chunk.Payload)
+	}
+	output := streamed.String()
+	if strings.Contains(output, "reasoning_text") {
+		t.Fatalf("stream contains xAI reasoning_text shape: %s", output)
+	}
+	for _, want := range []string{
+		"event: response.reasoning_summary_part.added",
+		"event: response.reasoning_summary_text.delta",
+		"event: response.reasoning_summary_text.done",
+		"event: response.reasoning_summary_part.done",
+		`"type":"response.reasoning_summary_part.added"`,
+		`"type":"response.reasoning_summary_text.delta"`,
+		`"type":"response.reasoning_summary_text.done"`,
+		`"type":"response.reasoning_summary_part.done"`,
+		`"part":{"type":"summary_text","text":"thinking"}`,
+		`"summary_index":0`,
+		`"summary":[{"type":"summary_text","text":"thinking"}]`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("stream missing %q: %s", want, output)
+		}
+	}
+	textDoneIndex := strings.Index(output, `"type":"response.reasoning_summary_text.done"`)
+	partDoneIndex := strings.Index(output, `"type":"response.reasoning_summary_part.done"`)
+	if textDoneIndex < 0 || partDoneIndex < 0 || textDoneIndex > partDoneIndex {
+		t.Fatalf("reasoning done events are out of order: %s", output)
+	}
+}
+
+func TestXAIExecutorExecuteNormalizesReasoningOutputForNonStreamTranslation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"status\":\"completed\",\"summary\":[],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"thinking\"}]}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","input":"hello"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatCodex,
+		Stream:         false,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if strings.Contains(string(resp.Payload), "reasoning_text") {
+		t.Fatalf("payload contains xAI reasoning_text shape: %s", string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "response.output.0.summary.0.type").String(); got != "summary_text" {
+		t.Fatalf("response.output.0.summary.0.type = %q, want summary_text; payload=%s", got, string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "response.output.0.summary.0.text").String(); got != "thinking" {
+		t.Fatalf("response.output.0.summary.0.text = %q, want thinking; payload=%s", got, string(resp.Payload))
+	}
+	if gjson.GetBytes(resp.Payload, "response.output.0.content").Exists() {
+		t.Fatalf("reasoning output content exists, want summary only: %s", string(resp.Payload))
+	}
+}
+
 func TestXAIExecutorExecuteImagesUsesImagesEndpoint(t *testing.T) {
 	var gotPath string
 	var gotAuth string
@@ -777,5 +985,43 @@ func TestNormalizeXAIToolChoiceForTools_NoOpWhenBothAbsent(t *testing.T) {
 
 	if gjson.GetBytes(out, "tool_choice").Exists() {
 		t.Fatalf("tool_choice should not appear: %s", string(out))
+	}
+}
+
+func TestXAIExecutorComposerReusesClaudeCodeSession(t *testing.T) {
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	payload := []byte(`{"model":"grok-composer-2.5-fast","metadata":{"user_id":"{\"session_id\":\"cache-session-1\"}"},"input":"hello"}`)
+	req := cliproxyexecutor.Request{Model: "grok-composer-2.5-fast", Payload: payload}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Stream: true}
+
+	first, err := exec.prepareResponsesRequest(context.Background(), req, opts, true)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest first error: %v", err)
+	}
+	second, err := exec.prepareResponsesRequest(context.Background(), req, opts, true)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest second error: %v", err)
+	}
+
+	firstKey := gjson.GetBytes(first.body, "prompt_cache_key").String()
+	secondKey := gjson.GetBytes(second.body, "prompt_cache_key").String()
+	if firstKey == "" {
+		t.Fatalf("first prompt_cache_key is empty; body=%s", string(first.body))
+	}
+	if secondKey != firstKey {
+		t.Fatalf("same Claude Code session produced different prompt_cache_key: first=%q second=%q", firstKey, secondKey)
+	}
+
+	httpReq, errRequest := http.NewRequest(http.MethodPost, "https://example.test/responses", bytes.NewReader(first.body))
+	if errRequest != nil {
+		t.Fatalf("NewRequest() error = %v", errRequest)
+	}
+	applyXAIHeaders(httpReq, auth, "xai-token", true, first.sessionID)
+	if got := httpReq.Header.Get("x-grok-conv-id"); got != firstKey {
+		t.Fatalf("x-grok-conv-id = %q, want %q", got, firstKey)
 	}
 }

@@ -376,6 +376,19 @@ func mergeRecentRequestBuckets(dst, src []coreauth.RecentRequestBucket) []coreau
 	return dst
 }
 
+func apiKeyUsageProviderKey(auth *coreauth.Auth) string {
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if auth.Attributes != nil {
+		if compatName := strings.TrimSpace(auth.Attributes["compat_name"]); compatName != "" {
+			provider = strings.ToLower(compatName)
+		}
+	}
+	if provider == "" {
+		return "unknown"
+	}
+	return provider
+}
+
 // GetAPIKeyUsage returns recent request buckets for all in-memory api_key auths,
 // grouped by provider and keyed by "base_url|api_key".
 func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
@@ -415,10 +428,7 @@ func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 			}
 		}
 		compositeKey := baseURL + "|" + apiKey
-		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
-		if provider == "" {
-			provider = "unknown"
-		}
+		provider := apiKeyUsageProviderKey(auth)
 		if authID := strings.TrimSpace(auth.ID); authID != "" {
 			lookup[authID] = apiKeyUsageLookupKey{Provider: provider, Composite: compositeKey}
 		}

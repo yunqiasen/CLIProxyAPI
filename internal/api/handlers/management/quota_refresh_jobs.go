@@ -563,12 +563,3 @@ func truncateQuotaError(message string) string {
 	}
 	return message[:300] + "..."
 }
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if out := strings.TrimSpace(value); out != "" {
-			return out
-		}
-	}
-	return ""
-}

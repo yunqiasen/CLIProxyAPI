@@ -19,6 +19,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Refresh models catalog
         run: |
@@ -40,7 +42,11 @@ jobs:
 
       - name: Generate build metadata
         run: |
-          echo "VERSION=CPA-fork" >> "$GITHUB_ENV"
+          UPSTREAM_TAG=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          if [ -z "$UPSTREAM_TAG" ]; then
+            UPSTREAM_TAG="CPA-fork"
+          fi
+          echo "VERSION=${UPSTREAM_TAG}-CPA-fork" >> "$GITHUB_ENV"
           echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
           echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
 

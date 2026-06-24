@@ -83,8 +83,9 @@ type ServerOption func(*serverOptionConfig)
 func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
 	configDir := filepath.Dir(configPath)
 	logsDir := logging.ResolveLogDirectory(cfg)
-	logger := logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
+	logger := logging.NewFileRequestLogger(cfg != nil && cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
 	logger.SetHomeEnabled(cfg != nil && cfg.Home.Enabled)
+	logger.SetSuppressed(cfg != nil && cfg.CommercialMode)
 	return logger
 }
 
@@ -276,19 +277,18 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		engine.Use(mw)
 	}
 
-	// Add request logging middleware (positioned after recovery, before auth)
-	// Resolve logs directory relative to the configuration file directory.
+	// Add request logging middleware (positioned after recovery, before auth).
+	// Keep the middleware installed even when commercial-mode starts enabled, so a
+	// hot config reload can turn request logs back on without requiring a restart.
 	var requestLogger logging.RequestLogger
 	var toggle func(bool)
-	if !cfg.CommercialMode {
-		if optionState.requestLoggerFactory != nil {
-			requestLogger = optionState.requestLoggerFactory(cfg, configFilePath)
-		}
-		if requestLogger != nil {
-			engine.Use(middleware.RequestLoggingMiddleware(requestLogger))
-			if setter, ok := requestLogger.(interface{ SetEnabled(bool) }); ok {
-				toggle = setter.SetEnabled
-			}
+	if optionState.requestLoggerFactory != nil {
+		requestLogger = optionState.requestLoggerFactory(cfg, configFilePath)
+	}
+	if requestLogger != nil {
+		engine.Use(middleware.RequestLoggingMiddleware(requestLogger))
+		if setter, ok := requestLogger.(interface{ SetEnabled(bool) }); ok {
+			toggle = setter.SetEnabled
 		}
 	}
 
@@ -1604,6 +1604,11 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 			s.loggerToggle(cfg.RequestLog)
 		} else if toggler, ok := s.requestLogger.(interface{ SetEnabled(bool) }); ok {
 			toggler.SetEnabled(cfg.RequestLog)
+		}
+	}
+	if s.requestLogger != nil && (oldCfg == nil || oldCfg.CommercialMode != cfg.CommercialMode) {
+		if suppressor, ok := s.requestLogger.(interface{ SetSuppressed(bool) }); ok {
+			suppressor.SetSuppressed(cfg.CommercialMode)
 		}
 	}
 

@@ -15,6 +15,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	log "github.com/sirupsen/logrus"
 )
 
 const maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20 // 1 MiB
@@ -26,6 +27,11 @@ const maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20 // 1 MiB
 func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if logger == nil {
+			c.Next()
+			return
+		}
+
+		if suppressor, ok := logger.(requestLoggingSuppressor); ok && suppressor.IsSuppressed() {
 			c.Next()
 			return
 		}
@@ -46,8 +52,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		// Capture request information
 		requestInfo, err := captureRequestInfo(c, shouldCaptureRequestBody(loggerEnabled, c.Request))
 		if err != nil {
-			// Log error but continue processing
-			// In a real implementation, you might want to use a proper logger here
+			log.WithError(err).Warn("failed to capture request log info")
 			c.Next()
 			return
 		}
@@ -65,14 +70,17 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 
 		// Finalize logging after request processing
 		if err = wrapper.Finalize(c); err != nil {
-			// Log error but don't interrupt the response
-			// In a real implementation, you might want to use a proper logger here
+			log.WithError(err).Warn("failed to finalize request log")
 		}
 	}
 }
 
 type fileBodySourceFactory interface {
 	NewFileBodySource(prefix string) (*logging.FileBodySource, error)
+}
+
+type requestLoggingSuppressor interface {
+	IsSuppressed() bool
 }
 
 func attachRequestLogSources(c *gin.Context, logger logging.RequestLogger, loggerEnabled bool) {

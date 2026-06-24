@@ -414,6 +414,10 @@ type FileRequestLogger struct {
 	// errorLogsMaxFiles limits the number of error log files retained.
 	errorLogsMaxFiles int
 
+	// suppressed disables all detailed request logging while keeping the middleware
+	// installed so it can be re-enabled by hot config reloads.
+	suppressed bool
+
 	homeEnabled bool
 }
 
@@ -505,12 +509,25 @@ func (l *FileRequestLogger) SetHomeEnabled(enabled bool) {
 	l.homeEnabled = enabled
 }
 
+// SetSuppressed disables all detailed request logging without removing middleware.
+func (l *FileRequestLogger) SetSuppressed(suppressed bool) {
+	if l == nil {
+		return
+	}
+	l.suppressed = suppressed
+}
+
+// IsSuppressed reports whether detailed request logging should be skipped.
+func (l *FileRequestLogger) IsSuppressed() bool {
+	return l != nil && l.suppressed
+}
+
 // IsEnabled returns whether request logging is currently enabled.
 //
 // Returns:
 //   - bool: True if logging is enabled, false otherwise
 func (l *FileRequestLogger) IsEnabled() bool {
-	return l.enabled
+	return l != nil && l.enabled && !l.suppressed
 }
 
 // SetEnabled updates the request logging enabled state.

@@ -629,6 +629,74 @@ func assertCodexSupportedReasoningLevels(t *testing.T, model map[string]any, wan
 	}
 }
 
+func TestRequestLoggerHotReloadsAfterCommercialModeDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	t.Setenv("WRITABLE_PATH", tmpDir)
+	t.Setenv("writable_path", "")
+
+	authDir := filepath.Join(tmpDir, "auth")
+	if errMkdir := os.MkdirAll(authDir, 0o700); errMkdir != nil {
+		t.Fatalf("failed to create auth dir: %v", errMkdir)
+	}
+
+	cfg := &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeys:    []string{"test-key"},
+			RequestLog: true,
+		},
+		Port:                   0,
+		AuthDir:                authDir,
+		Debug:                  true,
+		LoggingToFile:          false,
+		UsageStatisticsEnabled: false,
+		CommercialMode:         true,
+	}
+
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	server := NewServer(cfg, auth.NewManager(nil, nil, nil), sdkaccess.NewManager(), configPath)
+
+	sendRequest := func() {
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"probe","input":"hello"}`))
+		req.Header.Set("Authorization", "Bearer test-key")
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+	}
+	countRequestLogs := func() int {
+		entries, errRead := os.ReadDir(filepath.Join(tmpDir, "logs"))
+		if errRead != nil {
+			if os.IsNotExist(errRead) {
+				return 0
+			}
+			t.Fatalf("failed to read logs dir: %v", errRead)
+		}
+		count := 0
+		for _, entry := range entries {
+			name := entry.Name()
+			if !entry.IsDir() && strings.Contains(name, "v1-responses") && strings.HasSuffix(name, ".log") {
+				count++
+			}
+		}
+		return count
+	}
+
+	sendRequest()
+	if got := countRequestLogs(); got != 0 {
+		t.Fatalf("request logs while commercial-mode enabled = %d, want 0", got)
+	}
+
+	updated := *cfg
+	updated.CommercialMode = false
+	server.UpdateClients(&updated)
+
+	sendRequest()
+	if got := countRequestLogs(); got == 0 {
+		t.Fatalf("request logs after commercial-mode disabled = %d, want > 0", got)
+	}
+}
+
 func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	t.Setenv("WRITABLE_PATH", "")
 	t.Setenv("writable_path", "")

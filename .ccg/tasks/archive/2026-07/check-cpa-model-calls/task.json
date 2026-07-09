@@ -1,0 +1,12 @@
+{
+  "id": "check-cpa-model-calls",
+  "title": "检查 WSL 本地 CPA 的模型调用状态",
+  "status": "completed",
+  "complexity": "M",
+  "risk": "low",
+  "domain": "backend",
+  "currentPhase": "completed",
+  "nextAction": "已完成检查；如需修复 gpt-5.4 需调整模型别名/路由配置",
+  "createdAt": "2026-07-10T00:00:00Z",
+  "branch": "CPA-fork"
+}

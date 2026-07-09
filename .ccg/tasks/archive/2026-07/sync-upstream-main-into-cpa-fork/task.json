@@ -1,0 +1,12 @@
+{
+  "id": "sync-upstream-main-into-cpa-fork",
+  "title": "同步 CPA 上游 main 并合并到 CPA-fork",
+  "status": "in_progress",
+  "complexity": "L+",
+  "risk": "medium",
+  "domain": "backend",
+  "currentPhase": "completed",
+  "nextAction": "归档任务",
+  "createdAt": "2026-07-10T00:00:00Z",
+  "branch": "CPA-fork"
+}

@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
@@ -103,9 +105,11 @@ type Service struct {
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
 
-	homeClient       *home.Client
-	homeCancel       context.CancelFunc
-	homeLogForwarder *logging.HomeAppLogForwarder
+	homeClient        *home.Client
+	homeCancel        context.CancelFunc
+	homeLogForwarder  *logging.HomeAppLogForwarder
+	homePluginSyncMu  sync.Mutex
+	homePluginSyncKey string
 }
 
 const (
@@ -354,12 +358,7 @@ func modelRegistrationCategory(auth *coreauth.Auth) string {
 		provider = "unknown"
 	}
 
-	authKind := strings.ToLower(strings.TrimSpace(auth.Attributes["auth_kind"]))
-	if authKind == "" {
-		if kind, _ := auth.AccountInfo(); strings.EqualFold(kind, "api_key") {
-			authKind = "apikey"
-		}
-	}
+	authKind := auth.AuthKind()
 	if authKind == "" {
 		return provider
 	}
@@ -988,7 +987,8 @@ func baselineExecutorAuths() []*coreauth.Auth {
 	providers := []string{
 		"codex",
 		"claude",
-		"gemini",
+		constant.Gemini,
+		constant.GeminiInteractions,
 		"vertex",
 		"aistudio",
 		"antigravity",
@@ -1064,8 +1064,10 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		return
 	}
 	switch strings.ToLower(a.Provider) {
-	case "gemini":
+	case constant.Gemini:
 		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
+	case constant.GeminiInteractions:
+		s.coreManager.RegisterExecutor(executor.NewGeminiInteractionsExecutor(s.cfg))
 	case "vertex":
 		s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(s.cfg))
 	case "aistudio":
@@ -1218,12 +1220,7 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 	if providerKey == "" {
 		providerKey = strings.ToLower(strings.TrimSpace(provider))
 	}
-	activeAuthKind := strings.ToLower(strings.TrimSpace(activeAuth.Attributes["auth_kind"]))
-	if activeAuthKind == "" {
-		if kind, _ := activeAuth.AccountInfo(); strings.EqualFold(kind, "api_key") {
-			activeAuthKind = "apikey"
-		}
-	}
+	activeAuthKind := activeAuth.AuthKind()
 	activeExcluded := s.oauthExcludedModels(providerKey, activeAuthKind)
 	if a == activeAuth && len(activeExcluded) == 0 {
 		activeExcluded = excluded
@@ -1452,10 +1449,24 @@ func (s *Service) applyHomeOverlayContext(ctx context.Context, remoteCfg *config
 	forceHomeRuntimeConfig(&merged)
 
 	logHomeConfigChanges(baseCfg, &merged)
-	if errSync := s.syncHomePlugins(ctx, &merged); errSync != nil {
-		return errSync
+	report, syncKey, didSync, errSync := s.syncHomePlugins(ctx, &merged)
+	if didSync {
+		if errSync != nil {
+			log.Warnf("failed to sync home plugins: %v", errSync)
+		}
 	}
 	s.applyConfigUpdate(&merged)
+	if didSync {
+		errLoad := homeplugins.MarkLoadResults(&report, s.pluginHost)
+		if errLoad != nil {
+			log.Warnf("failed to load home plugins after config update: %v", errLoad)
+		}
+		s.reportHomePluginStatus(ctx, &merged, report)
+		if errSync == nil && errLoad == nil {
+			s.markHomePluginsSynced(syncKey)
+		}
+	}
+	s.processHomePluginTasks(ctx, &merged)
 	return nil
 }
 
@@ -1906,12 +1917,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		GlobalModelRegistry().UnregisterClient(a.ID)
 		return
 	}
-	authKind := strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
-	if authKind == "" {
-		if kind, _ := a.AccountInfo(); strings.EqualFold(kind, "api_key") {
-			authKind = "apikey"
-		}
-	}
+	authKind := a.AuthKind()
 	// Unregister legacy client ID (if present) to avoid double counting
 	if a.Runtime != nil {
 		if idGetter, ok := a.Runtime.(interface{ GetClientID() string }); ok {
@@ -1938,9 +1944,20 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	}
 	var models []*ModelInfo
 	switch provider {
-	case "gemini":
+	case constant.Gemini:
 		models = registry.GetGeminiModels()
 		if entry := s.resolveConfigGeminiKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildGeminiConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
+	case constant.GeminiInteractions:
+		models = registry.GetGeminiModels()
+		if entry := s.resolveConfigInteractionsKey(a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildGeminiConfigModels(entry)
 			}
@@ -2219,6 +2236,20 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 }
 
 func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return s.resolveConfigGeminiKeyEntry(auth, s.cfg.GeminiKey)
+}
+
+func (s *Service) resolveConfigInteractionsKey(auth *coreauth.Auth) *config.GeminiKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return s.resolveConfigGeminiKeyEntry(auth, s.cfg.InteractionsKey)
+}
+
+func (s *Service) resolveConfigGeminiKeyEntry(auth *coreauth.Auth, entries []config.GeminiKey) *config.GeminiKey {
 	if auth == nil || s.cfg == nil {
 		return nil
 	}
@@ -2227,8 +2258,8 @@ func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey 
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	for i := range s.cfg.GeminiKey {
-		entry := &s.cfg.GeminiKey[i]
+	for i := range entries {
+		entry := &entries[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
 		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
@@ -2466,18 +2497,45 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		if thinking == nil && !model.Image {
 			thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 		}
+		inputModalities := normalizeCompatConfigModalities(model.InputModalities)
+		outputModalities := normalizeCompatConfigModalities(model.OutputModalities)
 		models = append(models, &ModelInfo{
-			ID:          modelID,
-			Object:      "model",
-			Created:     now,
-			OwnedBy:     compat.Name,
-			Type:        modelType,
-			DisplayName: modelID,
-			UserDefined: false,
-			Thinking:    thinking,
+			ID:                        modelID,
+			Object:                    "model",
+			Created:                   now,
+			OwnedBy:                   compat.Name,
+			Type:                      modelType,
+			DisplayName:               modelID,
+			UserDefined:               false,
+			Thinking:                  thinking,
+			SupportedInputModalities:  inputModalities,
+			SupportedOutputModalities: outputModalities,
 		})
 	}
 	return models
+}
+
+func normalizeCompatConfigModalities(raw []string) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, item := range raw {
+		modality := strings.ToLower(strings.TrimSpace(item))
+		if modality == "" {
+			continue
+		}
+		if _, exists := seen[modality]; exists {
+			continue
+		}
+		seen[modality] = struct{}{}
+		out = append(out, modality)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*ModelInfo {

@@ -1,0 +1,12 @@
+{
+  "id": "check-model-invocation",
+  "title": "检查 CCG 外部模型调用状态",
+  "status": "completed",
+  "complexity": "S",
+  "risk": "low",
+  "domain": "ops",
+  "currentPhase": "completed",
+  "nextAction": "归档任务；模型 CLI 认证需人工修复后再复测",
+  "createdAt": "2026-07-10T00:00:00Z",
+  "branch": "CPA-fork"
+}

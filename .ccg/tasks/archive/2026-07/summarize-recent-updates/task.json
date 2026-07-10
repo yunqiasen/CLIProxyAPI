@@ -1,0 +1,12 @@
+{
+  "id": "summarize-recent-updates",
+  "title": "汇总当前 CPA 分支近期更新内容",
+  "status": "completed",
+  "complexity": "S",
+  "risk": "low",
+  "domain": "ops",
+  "currentPhase": "completed",
+  "nextAction": "已汇总，归档任务",
+  "createdAt": "2026-07-10T00:00:00Z",
+  "branch": "CPA-fork"
+}

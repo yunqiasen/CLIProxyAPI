@@ -6,6 +6,10 @@ on:
       - CPA-fork
   workflow_dispatch:
 
+concurrency:
+  group: cpa-ghcr-image-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   packages: write
@@ -42,6 +46,7 @@ jobs:
 
       - name: Generate build metadata
         run: |
+          git fetch --force --tags https://github.com/router-for-me/CLIProxyAPI.git 'refs/tags/v*:refs/tags/v*'
           UPSTREAM_TAG=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
           if [ -z "$UPSTREAM_TAG" ]; then
             UPSTREAM_TAG="CPA-fork"

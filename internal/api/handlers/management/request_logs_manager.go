@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -138,7 +139,26 @@ func (m *requestLogIndexManager) Detail(ctx context.Context, id string) (request
 	if m == nil || m.store == nil {
 		return requestLogDetail{}, fmt.Errorf("request log index unavailable")
 	}
-	return m.store.detail(ctx, id)
+	cutoff := requestLogRetentionCutoff(m.now(), m.retentionDays())
+	detail, err := m.store.detailWithCutoff(ctx, id, cutoff)
+	if err == nil || !errors.Is(err, sql.ErrNoRows) {
+		return detail, err
+	}
+	candidate, err := findRequestLogCandidateByIDWithCutoff(m.dir, id, requestLogCutoffTime(cutoff))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return requestLogDetail{}, sql.ErrNoRows
+		}
+		return requestLogDetail{}, err
+	}
+	parsed, err := parseRequestLogFile(candidate)
+	if err != nil {
+		return requestLogDetail{}, err
+	}
+	if err := m.store.upsertParsed(ctx, parsed, candidate); err != nil {
+		return requestLogDetail{}, err
+	}
+	return m.store.detailWithCutoff(ctx, id, cutoff)
 }
 
 func (m *requestLogIndexManager) Export(ctx context.Context, w io.Writer, opts requestLogQueryOptions, format string) error {
@@ -155,11 +175,11 @@ func (m *requestLogIndexManager) FailureDetails(ctx context.Context, provider st
 	return m.store.failureDetails(ctx, provider, limit)
 }
 
-func (m *requestLogIndexManager) APIKeyUsageByAuthID(ctx context.Context, now time.Time) (map[string]apiKeyUsageEntry, error) {
+func (m *requestLogIndexManager) APIKeyUsageByAuthID(ctx context.Context, now time.Time, cutoff *int64) (map[string]apiKeyUsageEntry, error) {
 	if m == nil || m.store == nil {
 		return nil, fmt.Errorf("request log index unavailable")
 	}
-	return m.store.apiKeyUsageByAuthID(ctx, now)
+	return m.store.apiKeyUsageByAuthID(ctx, now, cutoff)
 }
 
 func (m *requestLogIndexManager) Close() error {
@@ -226,12 +246,9 @@ func (m *requestLogIndexManager) sync(ctx context.Context) error {
 	}
 
 	retentionDays := m.retentionDays()
-	cutoff, hasCutoff := requestLogRetentionCutoff(m.now(), retentionDays)
-	var cutoffPtr *time.Time
-	if hasCutoff {
-		cutoffPtr = &cutoff
-	}
-	candidates, err := collectRequestLogCandidateMetadataWithCutoff(m.dir, cutoffPtr)
+	cutoff := requestLogRetentionCutoff(m.now(), retentionDays)
+	cutoffTime := requestLogCutoffTime(cutoff)
+	candidates, err := collectRequestLogCandidateMetadataWithCutoff(m.dir, cutoffTime)
 	if err != nil {
 		if os.IsNotExist(err) {
 			candidates = nil
@@ -291,8 +308,8 @@ func (m *requestLogIndexManager) sync(ctx context.Context) error {
 			return err
 		}
 	}
-	if hasCutoff {
-		if err := m.store.pruneBefore(ctx, cutoff); err != nil {
+	if cutoffTime != nil {
+		if err := m.store.pruneBefore(ctx, *cutoffTime); err != nil {
 			return err
 		}
 	}

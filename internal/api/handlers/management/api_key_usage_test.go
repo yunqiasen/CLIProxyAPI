@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +23,20 @@ func sumRecentRequestBuckets(buckets []coreauth.RecentRequestBucket) (int64, int
 		failed += bucket.Failed
 	}
 	return success, failed
+}
+
+func attachTestRequestLogSnapshot(t *testing.T, h *Handler, dir string) {
+	t.Helper()
+	index, err := newRequestLogIndexManager(dir, requestLogIndexManagerOptions{RetentionDays: func() int { return 7 }})
+	if err != nil {
+		t.Fatalf("new request log snapshot: %v", err)
+	}
+	h.requestLogIndex = index
+	t.Cleanup(func() {
+		if err := index.Close(); err != nil {
+			t.Errorf("close request log snapshot: %v", err)
+		}
+	})
 }
 
 func TestGetAPIKeyUsage_IncludesPersistedRequestLogCounts(t *testing.T) {
@@ -62,6 +77,7 @@ func TestGetAPIKeyUsage_IncludesPersistedRequestLogCounts(t *testing.T) {
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
 	h.SetLogDirectory(logsDir)
+	attachTestRequestLogSnapshot(t, h, logsDir)
 
 	rec := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(rec)
@@ -133,6 +149,7 @@ func TestGetAPIKeyUsage_IncludesPersistedSuccessAndFailureDetails(t *testing.T) 
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
 	h.SetLogDirectory(logsDir)
+	attachTestRequestLogSnapshot(t, h, logsDir)
 
 	rec := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(rec)
@@ -283,5 +300,132 @@ func TestGetAPIKeyUsage_GroupsOpenAICompatibleByCompatName(t *testing.T) {
 	vastEntry := vastBucket["https://www.vastnum.com/v1|vast-key"]
 	if vastEntry.Success != 1 || vastEntry.Failed != 0 {
 		t.Fatalf("vast totals = %d/%d, want 1/0", vastEntry.Success, vastEntry.Failed)
+	}
+}
+
+func TestGetAPIKeyUsageSnapshotDoesNotWaitForBlockedScan(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	writeSnapshotRequestLog(t, dir, "usage-baseline001", "auth-shared", time.Now().Add(-time.Minute), 200)
+	var block atomic.Bool
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	index := newTestRequestLogIndexManager(t, dir, requestLogIndexManagerOptions{
+		RetentionDays: func() int { return 7 },
+		ScanHook: func(ctx context.Context) error {
+			if !block.Load() {
+				return nil
+			}
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	})
+	waitForRequestLogManager(t, index, func(status requestLogSyncStatus) bool {
+		return !status.Syncing && !status.LastSyncedAt.IsZero()
+	})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+
+	authManager := coreauth.NewManager(nil, nil, nil)
+	if _, err := authManager.Register(context.Background(), &coreauth.Auth{
+		ID:       "auth-shared",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key":  "shared-key",
+			"base_url": "https://relay.example.com",
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{RequestLogRetentionDays: 7}, authManager)
+	h.SetLogDirectory(dir)
+	h.requestLogIndex = index
+
+	writeSnapshotRequestLog(t, dir, "usage-pending002", "auth-shared", time.Now(), 200)
+	block.Store(true)
+	index.TriggerSync()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("blocked usage scan did not start")
+	}
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/api-key-usage", nil)
+	started := time.Now()
+	h.GetAPIKeyUsage(ginCtx)
+	if elapsed := time.Since(started); elapsed > 300*time.Millisecond {
+		t.Fatalf("usage snapshot waited %s for blocked scan", elapsed)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]map[string]apiKeyUsageEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode usage: %v", err)
+	}
+	entry := payload["claude"]["https://relay.example.com|shared-key"]
+	if entry.Success != 1 || entry.Failed != 0 {
+		t.Fatalf("snapshot usage = %d/%d, want 1/0", entry.Success, entry.Failed)
+	}
+	if rec.Header().Get("X-Request-Log-Syncing") != "true" || rec.Header().Get("X-Request-Log-Last-Synced-At") == "" {
+		t.Fatalf("usage sync headers = %#v", rec.Header())
+	}
+}
+
+func TestGetAPIKeyUsageSnapshotRetentionZeroIncludesOldRows(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	writeSnapshotRequestLog(t, dir, "usage-old001", "auth-old", time.Now().AddDate(0, 0, -30), 200)
+	index := newTestRequestLogIndexManager(t, dir, requestLogIndexManagerOptions{RetentionDays: func() int { return 0 }})
+	waitForRequestLogManager(t, index, func(status requestLogSyncStatus) bool {
+		return !status.Syncing && !status.LastSyncedAt.IsZero()
+	})
+
+	authManager := coreauth.NewManager(nil, nil, nil)
+	if _, err := authManager.Register(context.Background(), &coreauth.Auth{
+		ID:       "auth-old",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key": "old-key",
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{RequestLogRetentionDays: 0}, authManager)
+	h.SetLogDirectory(dir)
+	h.requestLogIndex = index
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/api-key-usage", nil)
+	h.GetAPIKeyUsage(ginCtx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]map[string]apiKeyUsageEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode usage: %v", err)
+	}
+	entry := payload["claude"]["|old-key"]
+	if entry.Success != 1 {
+		t.Fatalf("retention 0 usage = %#v, want old row included", entry)
+	}
+	if rec.Header().Get("X-Request-Log-Retention-Days") != "0" {
+		t.Fatalf("retention header = %q, want 0", rec.Header().Get("X-Request-Log-Retention-Days"))
 	}
 }

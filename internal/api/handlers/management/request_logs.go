@@ -3,6 +3,7 @@ package management
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -141,6 +142,45 @@ type requestPromptMetadata struct {
 	RequestMetadata     map[string]string     `json:"request_metadata"`
 }
 
+func (h *Handler) requestLogIndexSnapshot() (*requestLogIndexManager, string) {
+	if h == nil {
+		return nil, "management handler unavailable"
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.requestLogIndex, h.requestLogIndexError
+}
+
+func requestLogSyncResponse(status requestLogSyncStatus, retentionDays int) gin.H {
+	lastSyncedAt := ""
+	if !status.LastSyncedAt.IsZero() {
+		lastSyncedAt = status.LastSyncedAt.Format(time.RFC3339Nano)
+	}
+	return gin.H{
+		"syncing":         status.Syncing,
+		"last_synced_at":  lastSyncedAt,
+		"last_sync_error": status.LastSyncError,
+		"retention_days":  retentionDays,
+	}
+}
+
+func (h *Handler) setRequestLogSyncHeaders(c *gin.Context) {
+	if h == nil || c == nil {
+		return
+	}
+	manager, startupError := h.requestLogIndexSnapshot()
+	status := requestLogSyncStatus{LastSyncError: startupError}
+	if manager != nil {
+		status = manager.Status()
+	}
+	c.Header("X-Request-Log-Syncing", strconv.FormatBool(status.Syncing))
+	if !status.LastSyncedAt.IsZero() {
+		c.Header("X-Request-Log-Last-Synced-At", status.LastSyncedAt.Format(time.RFC3339Nano))
+	}
+	c.Header("X-Request-Log-Last-Sync-Error", status.LastSyncError)
+	c.Header("X-Request-Log-Retention-Days", strconv.Itoa(h.requestLogRetentionDays()))
+}
+
 // GetRequestLogs returns structured request log rows for the management UI.
 func (h *Handler) GetRequestLogs(c *gin.Context) {
 	if h == nil {
@@ -170,43 +210,44 @@ func (h *Handler) GetRequestLogs(c *gin.Context) {
 	}
 	query := strings.TrimSpace(c.Query("q"))
 
+	retentionDays := h.requestLogRetentionDays()
 	storageError := ""
-	store, errStore := openRequestLogStore(dir)
-	if errStore == nil {
-		defer store.close()
-		requestLogStoreMu.Lock()
-		errSync := syncRequestLogStore(c.Request.Context(), store, dir)
-		var items []requestLogListItem
-		var total int
-		var errList error
-		if errSync == nil {
-			items, total, errList = store.list(c.Request.Context(), requestLogQueryOptions{Query: query, Limit: limit, Offset: offset})
-		}
-		requestLogStoreMu.Unlock()
-		if errSync == nil && errList == nil {
-			c.JSON(http.StatusOK, gin.H{
-				"items":          items,
-				"total":          total,
-				"limit":          limit,
-				"offset":         offset,
-				"retention_days": requestLogRetentionDays,
-				"storage":        "sqlite",
-			})
+	manager, startupError := h.requestLogIndexSnapshot()
+	status := requestLogSyncStatus{LastSyncError: startupError}
+	if manager != nil {
+		manager.TriggerSync()
+		items, total, errList := manager.List(c.Request.Context(), requestLogQueryOptions{Query: query, Limit: limit, Offset: offset})
+		status = manager.Status()
+		if errList == nil {
+			response := gin.H{
+				"items":   items,
+				"total":   total,
+				"limit":   limit,
+				"offset":  offset,
+				"storage": "sqlite",
+			}
+			for key, value := range requestLogSyncResponse(status, retentionDays) {
+				response[key] = value
+			}
+			c.JSON(http.StatusOK, response)
 			return
 		}
-		if errSync == nil {
-			storageError = fmt.Sprintf("failed to list sqlite request logs: %v", errList)
-		} else {
-			storageError = fmt.Sprintf("failed to sync sqlite request logs: %v", errSync)
-		}
+		storageError = fmt.Sprintf("failed to list sqlite request logs: %v", errList)
+	} else if startupError != "" {
+		storageError = fmt.Sprintf("failed to open sqlite request log store: %s", startupError)
 	} else {
-		storageError = fmt.Sprintf("failed to open sqlite request log store: %v", errStore)
+		storageError = "request log index unavailable"
 	}
 
-	candidates, errCollect := collectRequestLogCandidates(dir)
+	cutoff := requestLogRetentionCutoff(time.Now(), retentionDays)
+	candidates, errCollect := collectRequestLogCandidatesWithCutoff(dir, requestLogCutoffTime(cutoff))
 	if errCollect != nil {
 		if os.IsNotExist(errCollect) {
-			c.JSON(http.StatusOK, gin.H{"items": []requestLogListItem{}, "total": 0, "limit": limit, "offset": offset})
+			response := gin.H{"items": []requestLogListItem{}, "total": 0, "limit": limit, "offset": offset, "storage": "file", "storage_error": storageError}
+			for key, value := range requestLogSyncResponse(status, retentionDays) {
+				response[key] = value
+			}
+			c.JSON(http.StatusOK, response)
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to list request logs: %v", errCollect)})
@@ -259,15 +300,18 @@ func (h *Handler) GetRequestLogs(c *gin.Context) {
 		items = append(items, parsed.requestLogListItem)
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"items":          items,
-		"total":          total,
-		"limit":          limit,
-		"offset":         offset,
-		"retention_days": requestLogRetentionDays,
-		"storage":        "file",
-		"storage_error":  storageError,
-	})
+	response := gin.H{
+		"items":         items,
+		"total":         total,
+		"limit":         limit,
+		"offset":        offset,
+		"storage":       "file",
+		"storage_error": storageError,
+	}
+	for key, value := range requestLogSyncResponse(status, retentionDays) {
+		response[key] = value
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 // GetRequestLogDetail returns cleaned full prompt/output/error text for a request log.
@@ -293,28 +337,23 @@ func (h *Handler) GetRequestLogDetail(c *gin.Context) {
 		return
 	}
 
-	store, errStore := openRequestLogStore(dir)
-	if errStore == nil {
-		defer store.close()
-		requestLogStoreMu.Lock()
-		errSync := syncRequestLogStore(c.Request.Context(), store, dir)
-		var detail requestLogDetail
-		var errDetail error
-		if errSync == nil {
-			detail, errDetail = store.detail(c.Request.Context(), id)
-		}
-		requestLogStoreMu.Unlock()
-		if errSync == nil && errDetail == nil {
+	manager, _ := h.requestLogIndexSnapshot()
+	if manager != nil {
+		manager.TriggerSync()
+		detail, errDetail := manager.Detail(c.Request.Context(), id)
+		h.setRequestLogSyncHeaders(c)
+		if errDetail == nil {
 			c.JSON(http.StatusOK, detail)
 			return
 		}
-		if errSync == nil && errDetail != sql.ErrNoRows {
+		if !errors.Is(errDetail, sql.ErrNoRows) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to load request log: %v", errDetail)})
 			return
 		}
 	}
 
-	candidate, errFind := findRequestLogCandidateByID(dir, id)
+	cutoff := requestLogRetentionCutoff(time.Now(), h.requestLogRetentionDays())
+	candidate, errFind := findRequestLogCandidateByIDWithCutoff(dir, id, requestLogCutoffTime(cutoff))
 	if errFind != nil {
 		if os.IsNotExist(errFind) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
@@ -390,18 +429,16 @@ func (h *Handler) ExportRequestLogs(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "format must be csv or jsonl"})
 		return
 	}
-	store, errStore := openRequestLogStore(dir)
-	if errStore != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to open request log database: %v", errStore)})
+	manager, startupError := h.requestLogIndexSnapshot()
+	if manager == nil {
+		if startupError == "" {
+			startupError = "request log index unavailable"
+		}
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": startupError})
 		return
 	}
-	defer store.close()
-	requestLogStoreMu.Lock()
-	defer requestLogStoreMu.Unlock()
-	if errSync := syncRequestLogStore(c.Request.Context(), store, dir); errSync != nil && !os.IsNotExist(errSync) {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to sync request logs: %v", errSync)})
-		return
-	}
+	manager.TriggerSync()
+	h.setRequestLogSyncHeaders(c)
 	filename := fmt.Sprintf("request-logs-%s.%s", time.Now().Format("20060102-150405"), format)
 	if format == "jsonl" {
 		c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
@@ -409,7 +446,7 @@ func (h *Handler) ExportRequestLogs(c *gin.Context) {
 		c.Header("Content-Type", "text/csv; charset=utf-8")
 	}
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
-	if errExport := store.export(c.Request.Context(), c.Writer, requestLogQueryOptions{Query: c.Query("q"), Limit: limit, Offset: offset}, format); errExport != nil {
+	if errExport := manager.Export(c.Request.Context(), c.Writer, requestLogQueryOptions{Query: c.Query("q"), Limit: limit, Offset: offset}, format); errExport != nil {
 		_ = c.Error(errExport)
 		return
 	}
@@ -445,31 +482,28 @@ func (h *Handler) GetRequestLogFailureDetails(c *gin.Context) {
 	}
 	provider := strings.TrimSpace(c.Query("provider"))
 
-	store, errStore := openRequestLogStore(dir)
-	if errStore != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to open request log database: %v", errStore)})
+	manager, startupError := h.requestLogIndexSnapshot()
+	if manager == nil {
+		if startupError == "" {
+			startupError = "request log index unavailable"
+		}
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": startupError})
 		return
 	}
-	defer store.close()
-
-	requestLogStoreMu.Lock()
-	errSync := syncRequestLogStore(c.Request.Context(), store, dir)
-	var details []requestLogFailureDetail
-	var errDetails error
-	if errSync == nil {
-		details, errDetails = store.failureDetails(c.Request.Context(), provider, limit)
-	}
-	requestLogStoreMu.Unlock()
-	if errSync != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to sync request logs: %v", errSync)})
-		return
-	}
+	manager.TriggerSync()
+	details, errDetails := manager.FailureDetails(c.Request.Context(), provider, limit)
+	status := manager.Status()
 	if errDetails != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to load failure details: %v", errDetails)})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"items": details, "limit": limit, "retention_days": requestLogRetentionDays})
+	response := gin.H{"items": details, "limit": limit}
+	for key, value := range requestLogSyncResponse(status, h.requestLogRetentionDays()) {
+		response[key] = value
+	}
+	c.JSON(http.StatusOK, response)
+
 }
 
 func parseRequestLogLimit(raw string) (int, error) {
@@ -499,16 +533,25 @@ func parseRequestLogOffset(raw string) (int, error) {
 	return offset, nil
 }
 
-func requestLogRetentionCutoff(now time.Time, retentionDays int) (time.Time, bool) {
+func requestLogRetentionCutoff(now time.Time, retentionDays int) *int64 {
 	if retentionDays <= 0 {
-		return time.Time{}, false
+		return nil
 	}
-	return now.AddDate(0, 0, -retentionDays), true
+	cutoff := now.AddDate(0, 0, -retentionDays).Unix()
+	return &cutoff
+}
+
+func requestLogCutoffTime(cutoff *int64) *time.Time {
+	if cutoff == nil {
+		return nil
+	}
+	value := time.Unix(*cutoff, 0)
+	return &value
 }
 
 func collectRequestLogCandidates(dir string) ([]requestLogCandidate, error) {
-	cutoff, _ := requestLogRetentionCutoff(time.Now(), requestLogRetentionDays)
-	return collectRequestLogCandidatesWithCutoff(dir, &cutoff)
+	cutoff := requestLogRetentionCutoff(time.Now(), requestLogRetentionDays)
+	return collectRequestLogCandidatesWithCutoff(dir, requestLogCutoffTime(cutoff))
 }
 
 func collectRequestLogCandidatesWithCutoff(dir string, cutoff *time.Time) ([]requestLogCandidate, error) {
@@ -671,7 +714,12 @@ func requestLogMatchesQuery(parsed parsedRequestLog, query string) bool {
 }
 
 func findRequestLogCandidateByID(dir, id string) (requestLogCandidate, error) {
-	candidates, err := collectRequestLogCandidates(dir)
+	cutoff := requestLogRetentionCutoff(time.Now(), requestLogRetentionDays)
+	return findRequestLogCandidateByIDWithCutoff(dir, id, requestLogCutoffTime(cutoff))
+}
+
+func findRequestLogCandidateByIDWithCutoff(dir, id string, cutoff *time.Time) (requestLogCandidate, error) {
+	candidates, err := collectRequestLogCandidatesWithCutoff(dir, cutoff)
 	if err != nil {
 		return requestLogCandidate{}, err
 	}

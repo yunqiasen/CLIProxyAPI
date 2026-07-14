@@ -74,9 +74,16 @@ func recordAPIKeyUsageBucket(buckets []coreauth.RecentRequestBucket, now time.Ti
 	buckets[idx].Failed++
 }
 
-func (s *requestLogStore) apiKeyUsageByAuthID(ctx context.Context, now time.Time) (map[string]apiKeyUsageEntry, error) {
-	cutoff := now.AddDate(0, 0, -requestLogRetentionDays).Unix()
-	rows, err := s.db.QueryContext(ctx, `SELECT COALESCE(auth_id, ''), COALESCE(success, 0), COALESCE(timestamp_unix, 0) FROM request_log_entries WHERE COALESCE(auth_id, '') != '' AND timestamp_unix >= ?`, cutoff)
+func requestLogCutoffSQL(cutoff *int64) (string, []any) {
+	if cutoff == nil {
+		return "", nil
+	}
+	return " AND timestamp_unix >= ?", []any{*cutoff}
+}
+
+func (s *requestLogStore) apiKeyUsageByAuthID(ctx context.Context, now time.Time, cutoff *int64) (map[string]apiKeyUsageEntry, error) {
+	cutoffSQL, cutoffArgs := requestLogCutoffSQL(cutoff)
+	rows, err := s.db.QueryContext(ctx, `SELECT COALESCE(auth_id, ''), COALESCE(success, 0), COALESCE(timestamp_unix, 0) FROM request_log_entries WHERE COALESCE(auth_id, '') != ''`+cutoffSQL, cutoffArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +123,7 @@ func (s *requestLogStore) apiKeyUsageByAuthID(ctx context.Context, now time.Time
 	return out, nil
 }
 
-func (s *requestLogStore) attachAPIKeyUsageDetails(ctx context.Context, cutoff int64, out map[string]apiKeyUsageEntry) error {
+func (s *requestLogStore) attachAPIKeyUsageDetails(ctx context.Context, cutoff *int64, out map[string]apiKeyUsageEntry) error {
 	if len(out) == 0 {
 		return nil
 	}
@@ -126,7 +133,8 @@ func (s *requestLogStore) attachAPIKeyUsageDetails(ctx context.Context, cutoff i
 	return s.attachAPIKeyUsageFailureDetails(ctx, cutoff, out)
 }
 
-func (s *requestLogStore) attachAPIKeyUsageSuccessDetails(ctx context.Context, cutoff int64, out map[string]apiKeyUsageEntry) error {
+func (s *requestLogStore) attachAPIKeyUsageSuccessDetails(ctx context.Context, cutoff *int64, out map[string]apiKeyUsageEntry) error {
+	cutoffSQL, cutoffArgs := requestLogCutoffSQL(cutoff)
 	rows, err := s.db.QueryContext(ctx, `
 SELECT auth_id, model_name, status_code, request_count
 FROM (
@@ -136,10 +144,10 @@ FROM (
     COALESCE(status, 0) AS status_code,
     COUNT(1) AS request_count
   FROM request_log_entries
-  WHERE COALESCE(auth_id, '') != '' AND timestamp_unix >= ? AND COALESCE(success, 0) != 0
+  WHERE COALESCE(auth_id, '') != ''`+cutoffSQL+` AND COALESCE(success, 0) != 0
   GROUP BY auth_id, model_name, status_code
 )
-ORDER BY auth_id ASC, request_count DESC, model_name ASC, status_code ASC`, cutoff)
+ORDER BY auth_id ASC, request_count DESC, model_name ASC, status_code ASC`, cutoffArgs...)
 	if err != nil {
 		return err
 	}
@@ -169,7 +177,8 @@ ORDER BY auth_id ASC, request_count DESC, model_name ASC, status_code ASC`, cuto
 	return rows.Err()
 }
 
-func (s *requestLogStore) attachAPIKeyUsageFailureDetails(ctx context.Context, cutoff int64, out map[string]apiKeyUsageEntry) error {
+func (s *requestLogStore) attachAPIKeyUsageFailureDetails(ctx context.Context, cutoff *int64, out map[string]apiKeyUsageEntry) error {
+	cutoffSQL, cutoffArgs := requestLogCutoffSQL(cutoff)
 	rows, err := s.db.QueryContext(ctx, `
 SELECT auth_id, model_name, status_code, error_text, request_count
 FROM (
@@ -185,10 +194,10 @@ FROM (
     ) AS error_text,
     COUNT(1) AS request_count
   FROM request_log_entries
-  WHERE COALESCE(auth_id, '') != '' AND timestamp_unix >= ? AND (COALESCE(success, 0) = 0 OR COALESCE(has_error, 0) != 0)
+  WHERE COALESCE(auth_id, '') != ''`+cutoffSQL+` AND (COALESCE(success, 0) = 0 OR COALESCE(has_error, 0) != 0)
   GROUP BY auth_id, model_name, status_code, error_text
 )
-ORDER BY auth_id ASC, request_count DESC, model_name ASC, status_code ASC, error_text ASC`, cutoff)
+ORDER BY auth_id ASC, request_count DESC, model_name ASC, status_code ASC, error_text ASC`, cutoffArgs...)
 	if err != nil {
 		return err
 	}
@@ -235,22 +244,13 @@ func (h *Handler) persistedAPIKeyUsage(ctx context.Context, now time.Time, looku
 	if h == nil || len(lookup) == 0 {
 		return nil
 	}
-	dir := h.logDirectory()
-	if strings.TrimSpace(dir) == "" {
+	manager, _ := h.requestLogIndexSnapshot()
+	if manager == nil {
 		return nil
 	}
-	store, errStore := openRequestLogStore(dir)
-	if errStore != nil {
-		return nil
-	}
-	defer store.close()
-
-	requestLogStoreMu.Lock()
-	defer requestLogStoreMu.Unlock()
-	if errSync := syncRequestLogStore(ctx, store, dir); errSync != nil {
-		return nil
-	}
-	byAuthID, errUsage := store.apiKeyUsageByAuthID(ctx, now)
+	manager.TriggerSync()
+	cutoff := requestLogRetentionCutoff(now, h.requestLogRetentionDays())
+	byAuthID, errUsage := manager.APIKeyUsageByAuthID(ctx, now, cutoff)
 	if errUsage != nil {
 		return nil
 	}
@@ -469,5 +469,6 @@ func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 		providerBucket[key.Composite] = existing
 	}
 
+	h.setRequestLogSyncHeaders(c)
 	c.JSON(http.StatusOK, out)
 }

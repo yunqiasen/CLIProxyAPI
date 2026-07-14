@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -288,5 +289,22 @@ func TestRequestLogIndexManagerHandlerLifecycle(t *testing.T) {
 	}
 	if err := h.Close(); err != nil {
 		t.Fatalf("handler second close: %v", err)
+	}
+}
+
+func TestRequestLogDetailBackfillAppliesRetentionBeforeBackgroundPrune(t *testing.T) {
+	dir := t.TempDir()
+	path := writeManagerRequestLog(t, dir, "old-detail", time.Now().AddDate(0, 0, -30))
+	var retention atomic.Int32
+	retention.Store(0)
+	manager := newTestRequestLogIndexManager(t, dir, requestLogIndexManagerOptions{RetentionDays: func() int { return int(retention.Load()) }})
+	waitForRequestLogManager(t, manager, func(status requestLogSyncStatus) bool {
+		return !status.Syncing && !status.LastSyncedAt.IsZero()
+	})
+	retention.Store(7)
+
+	_, err := manager.Detail(context.Background(), requestLogIDFromFilename(filepath.Base(path)))
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("detail error = %v, want sql.ErrNoRows after retention changed", err)
 	}
 }

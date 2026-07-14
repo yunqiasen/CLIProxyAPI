@@ -10,15 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
 const requestLogDBFilename = "request_logs.db"
-
-var requestLogStoreMu sync.Mutex
 
 type requestLogStore struct {
 	path string
@@ -391,7 +388,13 @@ func (s *requestLogStore) list(ctx context.Context, opts requestLogQueryOptions)
 }
 
 func (s *requestLogStore) detail(ctx context.Context, id string) (requestLogDetail, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT COALESCE(id, ''), COALESCE(name, ''), COALESCE(size, 0), COALESCE(modified, 0), COALESCE(timestamp_text, ''), COALESCE(url, ''), COALESCE(method, ''), COALESCE(model, ''), COALESCE(NULLIF(TRIM(provider_name), ''), COALESCE(provider, '')), COALESCE(auth_id, ''), COALESCE(auth_type, ''), COALESCE(upstream_url, ''), COALESCE(upstream_model, ''), COALESCE(channel_model, ''), COALESCE(ip, ''), COALESCE(ip_location, ''), COALESCE(status, 0), COALESCE(success, 0), COALESCE(prompt_preview, ''), COALESCE(output_preview, ''), COALESCE(error_preview, ''), COALESCE(tool_preview, ''), COALESCE(system_prompt_preview, ''), COALESCE(called_tools_preview, ''), COALESCE(session_id, ''), COALESCE(thread_id, ''), COALESCE(turn_id, ''), COALESCE(has_error, 0), COALESCE(prompt, ''), COALESCE(output, ''), COALESCE(error, ''), COALESCE(system_prompt, ''), COALESCE(available_tools_json, '[]'), COALESCE(mcps_json, '[]'), COALESCE(skills_json, '[]'), COALESCE(called_tools_json, '[]'), COALESCE(prompt_metadata_json, '{}'), COALESCE(request_metadata_json, '{}') FROM request_log_entries WHERE id = ?`, id)
+	return s.detailWithCutoff(ctx, id, nil)
+}
+
+func (s *requestLogStore) detailWithCutoff(ctx context.Context, id string, cutoff *int64) (requestLogDetail, error) {
+	cutoffSQL, cutoffArgs := requestLogCutoffSQL(cutoff)
+	args := append([]any{id}, cutoffArgs...)
+	row := s.db.QueryRowContext(ctx, `SELECT COALESCE(id, ''), COALESCE(name, ''), COALESCE(size, 0), COALESCE(modified, 0), COALESCE(timestamp_text, ''), COALESCE(url, ''), COALESCE(method, ''), COALESCE(model, ''), COALESCE(NULLIF(TRIM(provider_name), ''), COALESCE(provider, '')), COALESCE(auth_id, ''), COALESCE(auth_type, ''), COALESCE(upstream_url, ''), COALESCE(upstream_model, ''), COALESCE(channel_model, ''), COALESCE(ip, ''), COALESCE(ip_location, ''), COALESCE(status, 0), COALESCE(success, 0), COALESCE(prompt_preview, ''), COALESCE(output_preview, ''), COALESCE(error_preview, ''), COALESCE(tool_preview, ''), COALESCE(system_prompt_preview, ''), COALESCE(called_tools_preview, ''), COALESCE(session_id, ''), COALESCE(thread_id, ''), COALESCE(turn_id, ''), COALESCE(has_error, 0), COALESCE(prompt, ''), COALESCE(output, ''), COALESCE(error, ''), COALESCE(system_prompt, ''), COALESCE(available_tools_json, '[]'), COALESCE(mcps_json, '[]'), COALESCE(skills_json, '[]'), COALESCE(called_tools_json, '[]'), COALESCE(prompt_metadata_json, '{}'), COALESCE(request_metadata_json, '{}') FROM request_log_entries WHERE id = ?`+cutoffSQL, args...)
 	var detail requestLogDetail
 	var success, hasError int
 	var availableToolsJSON, mcpsJSON, skillsJSON, calledToolsJSON, promptMetadataJSON, requestMetadataJSON string

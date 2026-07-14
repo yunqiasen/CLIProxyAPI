@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -581,8 +583,16 @@ func TestExportRequestLogsHonorsPages(t *testing.T) {
 		}
 	}
 
-	h := NewHandlerWithoutConfigFilePath(&config.Config{}, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{RequestLogRetentionDays: 7}, nil)
 	h.SetLogDirectory(logsDir)
+	if err := h.StartRequestLogIndex(); err != nil {
+		t.Fatalf("start request log index: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	manager, _ := h.requestLogIndexSnapshot()
+	waitForRequestLogManager(t, manager, func(status requestLogSyncStatus) bool {
+		return !status.Syncing && !status.LastSyncedAt.IsZero()
+	})
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/request-logs/export?limit=1&pages=2&format=csv", nil)
@@ -773,5 +783,213 @@ func TestRequestLogProviderNameMigrationAddsColumnAndCompositeIndexes(t *testing
 		if !indexes[name] {
 			t.Fatalf("index %s missing: %#v", name, indexes)
 		}
+	}
+}
+
+func writeSnapshotRequestLog(t *testing.T, dir, suffix, authID string, timestamp time.Time, status int) string {
+	t.Helper()
+	name := fmt.Sprintf("v1-responses-%s-%s.log", timestamp.Format("2006-01-02T150405"), suffix)
+	path := filepath.Join(dir, name)
+	responseBody := `{"output_text":"ok"}`
+	if status >= 400 {
+		responseBody = fmt.Sprintf(`{"error":{"message":"status %d"}}`, status)
+	}
+	content := strings.Join([]string{
+		"=== REQUEST INFO ===",
+		"Timestamp: " + timestamp.Format(time.RFC3339),
+		"URL: /v1/responses",
+		"Method: POST",
+		"",
+		"=== REQUEST BODY ===",
+		`{"model":"client-model","input":"hello"}`,
+		"",
+		"=== API REQUEST 1 ===",
+		"Upstream URL: https://api.example.com/v1/responses",
+		"HTTP Method: POST",
+		"Auth: provider=claude, provider_name=relay-a, auth_id=" + authID + ", type=api_key",
+		"",
+		"Body:",
+		`{"model":"upstream-model","input":"hello"}`,
+		"",
+		"=== RESPONSE ===",
+		fmt.Sprintf("Status: %d", status),
+		"Content-Type: application/json",
+		"",
+		responseBody,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write snapshot log: %v", err)
+	}
+	return path
+}
+
+func newBlockedSnapshotHandler(t *testing.T, dir string) (*Handler, *requestLogIndexManager, func()) {
+	t.Helper()
+	var block atomic.Bool
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	manager := newTestRequestLogIndexManager(t, dir, requestLogIndexManagerOptions{
+		RetentionDays: func() int { return 7 },
+		ScanHook: func(ctx context.Context) error {
+			if !block.Load() {
+				return nil
+			}
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	})
+	waitForRequestLogManager(t, manager, func(status requestLogSyncStatus) bool {
+		return !status.Syncing && !status.LastSyncedAt.IsZero()
+	})
+	h := NewHandlerWithoutConfigFilePath(&config.Config{RequestLogRetentionDays: 7}, nil)
+	h.SetLogDirectory(dir)
+	h.requestLogIndex = manager
+	startBlocked := func() {
+		block.Store(true)
+		manager.TriggerSync()
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("blocked snapshot scan did not start")
+		}
+	}
+	releaseBlocked := func() {
+		block.Store(false)
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}
+	t.Cleanup(releaseBlocked)
+	return h, manager, func() {
+		startBlocked()
+	}
+}
+
+func TestRequestLogsListSnapshotDoesNotWaitForBlockedScan(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	writeSnapshotRequestLog(t, dir, "baseline", "auth-baseline", time.Now().Add(-time.Minute), 200)
+	h, _, block := newBlockedSnapshotHandler(t, dir)
+	writeSnapshotRequestLog(t, dir, "pending", "auth-pending", time.Now(), 200)
+	block()
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/request-logs?limit=10", nil)
+	started := time.Now()
+	h.GetRequestLogs(ctx)
+	if elapsed := time.Since(started); elapsed > 300*time.Millisecond {
+		t.Fatalf("snapshot list waited %s for blocked scan", elapsed)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Items         []requestLogListItem `json:"items"`
+		Total         int                  `json:"total"`
+		Syncing       bool                 `json:"syncing"`
+		LastSyncedAt  string               `json:"last_synced_at"`
+		LastSyncError string               `json:"last_sync_error"`
+		RetentionDays int                  `json:"retention_days"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if payload.Total != 1 || len(payload.Items) != 1 || !payload.Syncing || payload.LastSyncedAt == "" || payload.RetentionDays != 7 {
+		t.Fatalf("snapshot list payload = %#v", payload)
+	}
+}
+
+func TestRequestLogsFailureSnapshotDoesNotWaitForBlockedScan(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	writeSnapshotRequestLog(t, dir, "baseline-failure001", "auth-baseline", time.Now().Add(-time.Minute), 500)
+	h, _, block := newBlockedSnapshotHandler(t, dir)
+	writeSnapshotRequestLog(t, dir, "pending-failure002", "auth-pending", time.Now(), 500)
+	block()
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/request-logs/failures?provider=relay-a", nil)
+	h.GetRequestLogFailureDetails(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Items   []requestLogFailureDetail `json:"items"`
+		Syncing bool                      `json:"syncing"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode failures: %v", err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].Count != 1 || !payload.Syncing {
+		t.Fatalf("failure snapshot payload = %#v", payload)
+	}
+}
+
+func TestRequestLogsExportSnapshotDoesNotWaitForBlockedScan(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	writeSnapshotRequestLog(t, dir, "baseline-export", "auth-baseline", time.Now().Add(-time.Minute), 200)
+	h, _, block := newBlockedSnapshotHandler(t, dir)
+	writeSnapshotRequestLog(t, dir, "pending-export", "auth-pending", time.Now(), 200)
+	block()
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/request-logs/export?limit=10&format=csv", nil)
+	h.ExportRequestLogs(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	records, err := csv.NewReader(strings.NewReader(rec.Body.String())).ReadAll()
+	if err != nil {
+		t.Fatalf("read export: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("export row count = %d, want header + snapshot row", len(records))
+	}
+	if rec.Header().Get("X-Request-Log-Syncing") != "true" || rec.Header().Get("X-Request-Log-Last-Synced-At") == "" {
+		t.Fatalf("export sync headers = %#v", rec.Header())
+	}
+}
+
+func TestRequestLogDetailBackfillIndexesOnlyRequestedFile(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	manager := newTestRequestLogIndexManager(t, dir, requestLogIndexManagerOptions{RetentionDays: func() int { return 7 }})
+	waitForRequestLogManager(t, manager, func(status requestLogSyncStatus) bool {
+		return !status.Syncing && !status.LastSyncedAt.IsZero()
+	})
+	requestedPath := writeSnapshotRequestLog(t, dir, "requested-detail001", "auth-requested", time.Now().Add(-time.Minute), 200)
+	writeSnapshotRequestLog(t, dir, "unrelated-detail002", "auth-unrelated", time.Now(), 200)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{RequestLogRetentionDays: 7}, nil)
+	h.SetLogDirectory(dir)
+	h.requestLogIndex = manager
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Params = gin.Params{{Key: "id", Value: requestLogIDFromFilename(filepath.Base(requestedPath))}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/request-logs/detail", nil)
+	h.GetRequestLogDetail(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	_, total, err := manager.List(context.Background(), requestLogQueryOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("list after backfill: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("detail backfill indexed %d rows, want only requested file", total)
 	}
 }

@@ -2,25 +2,34 @@ package management
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 )
 
+type nativeAPIKeyEntryWithAuthIndex struct {
+	config.NativeAPIKeyEntry
+	AuthIndex string `json:"auth-index,omitempty"`
+}
+
 type geminiKeyWithAuthIndex struct {
 	config.GeminiKey
-	AuthIndex string `json:"auth-index,omitempty"`
+	APIKeyEntries []nativeAPIKeyEntryWithAuthIndex `json:"api-key-entries,omitempty"`
+	AuthIndex     string                           `json:"auth-index,omitempty"`
 }
 
 type claudeKeyWithAuthIndex struct {
 	config.ClaudeKey
-	AuthIndex string `json:"auth-index,omitempty"`
+	APIKeyEntries []nativeAPIKeyEntryWithAuthIndex `json:"api-key-entries,omitempty"`
+	AuthIndex     string                           `json:"auth-index,omitempty"`
 }
 
 type codexKeyWithAuthIndex struct {
 	config.CodexKey
-	AuthIndex string `json:"auth-index,omitempty"`
+	APIKeyEntries []nativeAPIKeyEntryWithAuthIndex `json:"api-key-entries,omitempty"`
+	AuthIndex     string                           `json:"auth-index,omitempty"`
 }
 
 type xaiKeyWithAuthIndex struct {
@@ -104,10 +113,22 @@ func (h *Handler) geminiKeysWithAuthIndex() []geminiKeyWithAuthIndex {
 			id, _ := idGen.Next("gemini:apikey", key, entry.BaseURL)
 			authIndex = liveIndexByID[id]
 		}
-		out[i] = geminiKeyWithAuthIndex{
+		response := geminiKeyWithAuthIndex{
 			GeminiKey: entry,
 			AuthIndex: authIndex,
 		}
+		if len(entry.APIKeyEntries) > 0 {
+			response.APIKeyEntries = make([]nativeAPIKeyEntryWithAuthIndex, len(entry.APIKeyEntries))
+			for j := range entry.APIKeyEntries {
+				keyEntry := entry.APIKeyEntries[j]
+				id, _ := idGen.Next("gemini:apikey", keyEntry.APIKey, entry.BaseURL, strconv.Itoa(j))
+				response.APIKeyEntries[j] = nativeAPIKeyEntryWithAuthIndex{
+					NativeAPIKeyEntry: keyEntry,
+					AuthIndex:         liveIndexByID[id],
+				}
+			}
+		}
+		out[i] = response
 	}
 	return out
 }
@@ -162,10 +183,22 @@ func (h *Handler) claudeKeysWithAuthIndex() []claudeKeyWithAuthIndex {
 			id, _ := idGen.Next("claude:apikey", key, entry.BaseURL)
 			authIndex = liveIndexByID[id]
 		}
-		out[i] = claudeKeyWithAuthIndex{
+		response := claudeKeyWithAuthIndex{
 			ClaudeKey: entry,
 			AuthIndex: authIndex,
 		}
+		if len(entry.APIKeyEntries) > 0 {
+			response.APIKeyEntries = make([]nativeAPIKeyEntryWithAuthIndex, len(entry.APIKeyEntries))
+			for j := range entry.APIKeyEntries {
+				keyEntry := entry.APIKeyEntries[j]
+				id, _ := idGen.Next("claude:apikey", keyEntry.APIKey, entry.BaseURL, strconv.Itoa(j))
+				response.APIKeyEntries[j] = nativeAPIKeyEntryWithAuthIndex{
+					NativeAPIKeyEntry: keyEntry,
+					AuthIndex:         liveIndexByID[id],
+				}
+			}
+		}
+		out[i] = response
 	}
 	return out
 }
@@ -191,10 +224,22 @@ func (h *Handler) codexKeysWithAuthIndex() []codexKeyWithAuthIndex {
 			id, _ := idGen.Next("codex:apikey", key, entry.BaseURL)
 			authIndex = liveIndexByID[id]
 		}
-		out[i] = codexKeyWithAuthIndex{
+		response := codexKeyWithAuthIndex{
 			CodexKey:  entry,
 			AuthIndex: authIndex,
 		}
+		if len(entry.APIKeyEntries) > 0 {
+			response.APIKeyEntries = make([]nativeAPIKeyEntryWithAuthIndex, len(entry.APIKeyEntries))
+			for j := range entry.APIKeyEntries {
+				keyEntry := entry.APIKeyEntries[j]
+				id, _ := idGen.Next("codex:apikey", keyEntry.APIKey, entry.BaseURL, strconv.Itoa(j))
+				response.APIKeyEntries[j] = nativeAPIKeyEntryWithAuthIndex{
+					NativeAPIKeyEntry: keyEntry,
+					AuthIndex:         liveIndexByID[id],
+				}
+			}
+		}
+		out[i] = response
 	}
 	return out
 }

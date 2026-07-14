@@ -838,3 +838,76 @@ func TestConfigSynthesizer_GroupedNativeProviderKeys(t *testing.T) {
 		t.Fatal("legacy key synthesized alongside grouped keys")
 	}
 }
+
+func TestConfigSynthesizer_NativeAuthIDCompatibility(t *testing.T) {
+	tests := []struct {
+		name      string
+		kind      string
+		key       string
+		baseURL   string
+		configFor func(grouped bool) *config.Config
+	}{
+		{
+			name: "gemini", kind: "gemini:apikey", key: "gemini-key", baseURL: "https://gemini.example/v1",
+			configFor: func(grouped bool) *config.Config {
+				entry := config.GeminiKey{APIKey: "gemini-key", BaseURL: "https://gemini.example/v1"}
+				if grouped {
+					entry.APIKey = ""
+					entry.APIKeyEntries = []config.NativeAPIKeyEntry{{APIKey: "gemini-key"}}
+				}
+				return &config.Config{GeminiKey: []config.GeminiKey{entry}}
+			},
+		},
+		{
+			name: "claude", kind: "claude:apikey", key: "claude-key", baseURL: "https://claude.example/v1",
+			configFor: func(grouped bool) *config.Config {
+				entry := config.ClaudeKey{APIKey: "claude-key", BaseURL: "https://claude.example/v1"}
+				if grouped {
+					entry.APIKey = ""
+					entry.APIKeyEntries = []config.NativeAPIKeyEntry{{APIKey: "claude-key"}}
+				}
+				return &config.Config{ClaudeKey: []config.ClaudeKey{entry}}
+			},
+		},
+		{
+			name: "codex", kind: "codex:apikey", key: "codex-key", baseURL: "https://codex.example/v1",
+			configFor: func(grouped bool) *config.Config {
+				entry := config.CodexKey{APIKey: "codex-key", BaseURL: "https://codex.example/v1"}
+				if grouped {
+					entry.APIKey = ""
+					entry.APIKeyEntries = []config.NativeAPIKeyEntry{{APIKey: "codex-key"}}
+				}
+				return &config.Config{CodexKey: []config.CodexKey{entry}}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			legacyAuths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+				Config: tt.configFor(false), Now: time.Now(), IDGenerator: NewStableIDGenerator(),
+			})
+			if err != nil || len(legacyAuths) != 1 {
+				t.Fatalf("synthesize legacy auth: count=%d err=%v", len(legacyAuths), err)
+			}
+			expectedLegacyID, _ := NewStableIDGenerator().Next(tt.kind, tt.key, tt.baseURL)
+			if got := legacyAuths[0].ID; got != expectedLegacyID {
+				t.Fatalf("legacy auth ID = %q, want historical ID %q", got, expectedLegacyID)
+			}
+
+			groupedAuths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+				Config: tt.configFor(true), Now: time.Now(), IDGenerator: NewStableIDGenerator(),
+			})
+			if err != nil || len(groupedAuths) != 1 {
+				t.Fatalf("synthesize grouped auth: count=%d err=%v", len(groupedAuths), err)
+			}
+			expectedGroupedID, _ := NewStableIDGenerator().Next(tt.kind, tt.key, tt.baseURL, "0")
+			if got := groupedAuths[0].ID; got != expectedGroupedID {
+				t.Fatalf("grouped auth ID = %q, want indexed ID %q", got, expectedGroupedID)
+			}
+			if groupedAuths[0].ID == legacyAuths[0].ID {
+				t.Fatalf("grouped auth ID %q must differ from legacy ID", groupedAuths[0].ID)
+			}
+		})
+	}
+}

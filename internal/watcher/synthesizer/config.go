@@ -46,6 +46,13 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	return out, nil
 }
 
+func nextNativeAuthID(idGen *StableIDGenerator, kind, apiKey, baseURL string, entryIndex int) (string, string) {
+	if entryIndex < 0 {
+		return idGen.Next(kind, apiKey, baseURL)
+	}
+	return idGen.Next(kind, apiKey, baseURL, strconv.Itoa(entryIndex))
+}
+
 // synthesizeGeminiKeys creates Auth entries for Gemini API keys.
 func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*coreauth.Auth {
 	return s.synthesizeGeminiKeyEntries(ctx, ctx.Config.GeminiKey, "gemini:apikey", "gemini", "gemini-apikey", constant.Gemini)
@@ -72,7 +79,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 			displayLabel = label
 		}
 		for _, effective := range effectiveKeys {
-			id, token := idGen.Next(idKind, effective.APIKey, base, strconv.Itoa(effective.Index))
+			id, token := nextNativeAuthID(idGen, idKind, effective.APIKey, base, effective.Index)
 			attrs := map[string]string{
 				"source":  fmt.Sprintf("config:%s[%s]", sourceName, token),
 				"api_key": effective.APIKey,
@@ -122,7 +129,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			label = "claude-apikey"
 		}
 		for _, effective := range effectiveKeys {
-			id, token := idGen.Next("claude:apikey", effective.APIKey, base, strconv.Itoa(effective.Index))
+			id, token := nextNativeAuthID(idGen, "claude:apikey", effective.APIKey, base, effective.Index)
 			attrs := map[string]string{"source": fmt.Sprintf("config:claude[%s]", token), "api_key": effective.APIKey}
 			if ck.Name != "" {
 				attrs["provider_name"] = strings.TrimSpace(ck.Name)
@@ -181,7 +188,7 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 			label = provider + "-apikey"
 		}
 		for _, effective := range effectiveKeys {
-			id, token := idGen.Next(provider+":apikey", effective.APIKey, baseURL, strconv.Itoa(effective.Index))
+			id, token := nextNativeAuthID(idGen, provider+":apikey", effective.APIKey, baseURL, effective.Index)
 			attrs := map[string]string{"source": fmt.Sprintf("config:%s[%s]", provider, token), "api_key": effective.APIKey}
 			if entry.Name != "" {
 				attrs["provider_name"] = strings.TrimSpace(entry.Name)

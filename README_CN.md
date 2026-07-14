@@ -128,6 +128,64 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
+
+## 原生 Provider 多 Key 与请求日志保留
+
+Claude、Codex、Gemini 原生 Provider 同时支持旧版单 Key 和命名分组配置：
+
+```yaml
+request-log-retention-days: 7 # 设为 0 时永久保留结构化请求日志
+
+gemini-api-key:
+  - name: gemini-production
+    priority: 10
+    proxy-url: socks5://default-proxy.example.com:1080
+    api-key-entries:
+      - api-key: AIzaSy...01       # 继承 priority 和 proxy-url
+      - api-key: AIzaSy...02
+        priority: 0                # 显式 0 覆盖 Provider 默认值
+        proxy-url: http://key-proxy.example.com:8080
+
+codex-api-key:
+  - name: codex-production
+    api-key-entries:
+      - api-key: sk-codex-01
+      - api-key: sk-codex-02
+    websockets: true               # Codex 共享选项
+
+claude-api-key:
+  - name: claude-production
+    api-key-entries:
+      - api-key: sk-claude-01
+      - api-key: sk-claude-02
+        priority: 20
+    rebuild-mid-system-message: true # Claude 共享选项
+```
+
+`name` 是写入结构化请求日志的 Provider 标签。Provider 共享字段包括 `base-url`、`prefix`、`priority`、`proxy-url`、模型、排除模型、请求头、冷却设置和协议专属选项。每个 `api-key-entries` 项只拥有 `api-key`，并可覆盖 `priority` 和 `proxy-url`。省略覆盖值时继承 Provider 配置；显式 `priority: 0` 会覆盖非零默认值；Key 级代理为空时继承 Provider 代理。
+
+旧配置 `- api-key: sk-old` 保持兼容，历史 Auth ID 也保持不变。只要 `api-key-entries` 至少包含一个非空 Key，分组项就优先生效；空项会被忽略；顶层旧 `api-key` 仍保留在配置中，但不参与执行。
+
+`request-log-retention-days` 默认值为 `7`。设为 `0` 时永久保留结构化请求日志。原始应用日志轮转由 `logging-to-file`、`logs-max-total-size-mb` 和错误日志配置独立控制。
+
+### 回滚到旧版程序
+
+运行不支持 `api-key-entries` 的旧版本前，需要把每个分组 Key 展开成独立旧版 Provider 项，并显式复制继承值：
+
+```yaml
+claude-api-key:
+  - api-key: sk-claude-01
+    priority: 10
+    proxy-url: socks5://default-proxy.example.com:1080
+    rebuild-mid-system-message: true
+  - api-key: sk-claude-02
+    priority: 20
+    proxy-url: socks5://default-proxy.example.com:1080
+    rebuild-mid-system-message: true
+```
+
+随后回退功能提交，恢复上一版管理 UI bundle；若旧程序不识别 `request-log-retention-days`，再删除该字段。原有旧版单 Key 配置不需要转换。
+
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)

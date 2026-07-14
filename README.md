@@ -128,6 +128,64 @@ PackyCode provides special discounts for our software users: register using <a h
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+
+## Native Provider Key Groups and Request-Log Retention
+
+Claude, Codex, and Gemini native providers accept the legacy single-key form and a named grouped form:
+
+```yaml
+request-log-retention-days: 7 # 0 keeps structured request logs forever
+
+gemini-api-key:
+  - name: gemini-production
+    priority: 10
+    proxy-url: socks5://default-proxy.example.com:1080
+    api-key-entries:
+      - api-key: AIzaSy...01       # inherits priority and proxy-url
+      - api-key: AIzaSy...02
+        priority: 0                # explicit zero overrides the provider default
+        proxy-url: http://key-proxy.example.com:8080
+
+codex-api-key:
+  - name: codex-production
+    api-key-entries:
+      - api-key: sk-codex-01
+      - api-key: sk-codex-02
+    websockets: true               # shared Codex option
+
+claude-api-key:
+  - name: claude-production
+    api-key-entries:
+      - api-key: sk-claude-01
+      - api-key: sk-claude-02
+        priority: 20
+    rebuild-mid-system-message: true # shared Claude option
+```
+
+`name` is the provider label recorded in structured request logs. Shared provider fields include `base-url`, `prefix`, `priority`, `proxy-url`, models, excluded models, headers, cooling settings, and protocol-specific options. Each `api-key-entries` row owns only `api-key`, and optional `priority` and `proxy-url` overrides. An omitted override inherits the provider value; explicit `priority: 0` overrides a non-zero default. An empty per-key proxy inherits the provider proxy.
+
+Legacy entries such as `- api-key: sk-old` remain compatible and keep their historical Auth IDs. When at least one non-empty grouped key exists, grouped keys take precedence, empty rows are ignored, and the top-level legacy `api-key` is retained in configuration but is not executed.
+
+`request-log-retention-days` defaults to `7`. Set it to `0` for permanent structured request-log retention. Raw application log rotation remains controlled independently by `logging-to-file`, `logs-max-total-size-mb`, and error-log settings.
+
+### Rollback to an older binary
+
+Before running a version that predates `api-key-entries`, flatten every grouped row into a separate legacy provider item and copy inherited values explicitly:
+
+```yaml
+claude-api-key:
+  - api-key: sk-claude-01
+    priority: 10
+    proxy-url: socks5://default-proxy.example.com:1080
+    rebuild-mid-system-message: true
+  - api-key: sk-claude-02
+    priority: 20
+    proxy-url: socks5://default-proxy.example.com:1080
+    rebuild-mid-system-message: true
+```
+
+Revert the feature commits, restore the previous management UI bundle, and remove `request-log-retention-days` if the older binary does not recognize it. Existing legacy entries require no conversion.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)

@@ -86,6 +86,10 @@ commercial-mode: false
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
 
+# Structured request-log retention in days. Default is 7; set to 0 to retain forever.
+# This does not change raw application log rotation or logs-max-total-size-mb.
+request-log-retention-days: 7
+
 # Maximum total size (MB) of log files under the logs directory. When exceeded, the oldest log
 # files are deleted until within the limit. Set to 0 to disable.
 logs-max-total-size-mb: 0
@@ -207,6 +211,7 @@ nonstream-keepalive-interval: 0
 
 # Gemini API keys
 # gemini-api-key:
+#   # Legacy single-key form remains supported.
 #   - api-key: "AIzaSy...01"
 #     prefix: "test" # optional: require calls like "test/gemini-3-pro-preview" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
@@ -224,7 +229,16 @@ nonstream-keepalive-interval: 0
 #       - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
 #       - "*-preview"          # wildcard matching suffix (e.g. gemini-3-pro-preview)
 #       - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
-#   - api-key: "AIzaSy...02"
+#   # Named grouped form. Shared fields belong to the provider; key fields override defaults.
+#   - name: "gemini-production"
+#     priority: 10
+#     proxy-url: "socks5://default-proxy.example.com:1080"
+#     api-key-entries:
+#       - api-key: "AIzaSy...02" # inherits priority and proxy-url
+#       - api-key: "AIzaSy...03"
+#         priority: 0             # explicit zero overrides provider priority
+#         proxy-url: "http://key-proxy.example.com:8080"
+#     base-url: "https://generativelanguage.googleapis.com"
 
 # Native Interactions API keys
 # These keys are used only for direct /v1beta/interactions execution. Regular gemini-api-key entries still
@@ -246,6 +260,7 @@ nonstream-keepalive-interval: 0
 
 # Codex API keys
 # codex-api-key:
+#   # Legacy single-key form remains supported.
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
@@ -264,6 +279,14 @@ nonstream-keepalive-interval: 0
 #       - "gpt-5-*"         # wildcard matching prefix (e.g. gpt-5-medium, gpt-5-codex)
 #       - "*-mini"          # wildcard matching suffix (e.g. gpt-5-codex-mini)
 #       - "*codex*"         # wildcard matching substring (e.g. gpt-5-codex-low)
+#   - name: "codex-production"
+#     priority: 5
+#     api-key-entries:
+#       - api-key: "sk-codex-01"
+#       - api-key: "sk-codex-02"
+#         proxy-url: "http://key-proxy.example.com:8080"
+#     base-url: "https://www.example.com"
+#     websockets: true # Codex-specific shared option
 
 # xAI API keys
 # Uses the native xAI executor, including its Responses namespace-tool handling.
@@ -288,6 +311,7 @@ nonstream-keepalive-interval: 0
 
 # Claude API keys
 # claude-api-key:
+#   # Legacy single-key form remains supported.
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
@@ -324,6 +348,20 @@ nonstream-keepalive-interval: 0
 #       cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
 #     experimental-cch-signing: false # optional: default is false; when true, sign the final /v1/messages body using the current Claude Code cch algorithm
 #                                     # keep this disabled unless you explicitly need the behavior, so upstream seed changes fall back to legacy proxy behavior
+#   - name: "claude-production"
+#     priority: 10
+#     proxy-url: "socks5://default-proxy.example.com:1080"
+#     api-key-entries:
+#       - api-key: "sk-claude-01"
+#       - api-key: "sk-claude-02"
+#         priority: 20
+#     rebuild-mid-system-message: true # Claude-specific shared option
+#     experimental-cch-signing: false
+
+# Grouped native-key precedence:
+# - At least one non-empty api-key-entries row disables execution of the legacy top-level api-key.
+# - Omitted key priority/proxy-url inherits the provider value; explicit priority: 0 overrides it.
+# - Empty key rows are ignored. name is the provider label shown in structured request logs.
 
 # Default headers for Claude API requests. Update when Claude Code releases new versions.
 # In legacy mode, user-agent/package-version/runtime-version/timeout are used as fallbacks

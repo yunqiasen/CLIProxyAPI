@@ -64,49 +64,43 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 	out := make([]*coreauth.Auth, 0, len(entries))
 	for i := range entries {
 		entry := entries[i]
-		key := strings.TrimSpace(entry.APIKey)
-		if key == "" {
-			continue
-		}
+		effectiveKeys := config.EffectiveNativeAPIKeys(entry.APIKey, entry.Priority, entry.ProxyURL, entry.APIKeyEntries)
 		prefix := strings.TrimSpace(entry.Prefix)
 		base := strings.TrimSpace(entry.BaseURL)
-		proxyURL := strings.TrimSpace(entry.ProxyURL)
-		id, token := idGen.Next(idKind, key, base)
-		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:%s[%s]", sourceName, token),
-			"api_key": key,
+		displayLabel := strings.TrimSpace(entry.Name)
+		if displayLabel == "" {
+			displayLabel = label
 		}
-		metadata := map[string]any{}
-		if entry.DisableCooling {
-			metadata["disable_cooling"] = true
+		for _, effective := range effectiveKeys {
+			id, token := idGen.Next(idKind, effective.APIKey, base, strconv.Itoa(effective.Index))
+			attrs := map[string]string{
+				"source":  fmt.Sprintf("config:%s[%s]", sourceName, token),
+				"api_key": effective.APIKey,
+			}
+			if entry.Name != "" {
+				attrs["provider_name"] = strings.TrimSpace(entry.Name)
+			}
+			metadata := map[string]any{}
+			if entry.DisableCooling {
+				metadata["disable_cooling"] = true
+			}
+			if effective.Priority != 0 || (effective.Index >= 0 && entry.APIKeyEntries[effective.Index].Priority != nil) {
+				attrs["priority"] = strconv.Itoa(effective.Priority)
+			}
+			if base != "" {
+				attrs["base_url"] = base
+			}
+			if hash := diff.ComputeGeminiModelsHash(entry.Models); hash != "" {
+				attrs["models_hash"] = hash
+			}
+			addConfigHeadersToAttrs(entry.Headers, attrs)
+			a := &coreauth.Auth{ID: id, Provider: provider, Label: displayLabel, Prefix: prefix, Status: coreauth.StatusActive, ProxyURL: effective.ProxyURL, Attributes: attrs, Metadata: metadata, CreatedAt: now, UpdatedAt: now}
+			ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
+			if len(a.Metadata) == 0 {
+				a.Metadata = nil
+			}
+			out = append(out, a)
 		}
-		if entry.Priority != 0 {
-			attrs["priority"] = strconv.Itoa(entry.Priority)
-		}
-		if base != "" {
-			attrs["base_url"] = base
-		}
-		if hash := diff.ComputeGeminiModelsHash(entry.Models); hash != "" {
-			attrs["models_hash"] = hash
-		}
-		addConfigHeadersToAttrs(entry.Headers, attrs)
-		a := &coreauth.Auth{
-			ID:         id,
-			Provider:   provider,
-			Label:      label,
-			Prefix:     prefix,
-			Status:     coreauth.StatusActive,
-			ProxyURL:   proxyURL,
-			Attributes: attrs,
-			Metadata:   metadata,
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		}
-		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
-		if len(a.Metadata) == 0 {
-			a.Metadata = nil
-		}
-		out = append(out, a)
 	}
 	return out
 }
@@ -120,52 +114,43 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 	out := make([]*coreauth.Auth, 0, len(cfg.ClaudeKey))
 	for i := range cfg.ClaudeKey {
 		ck := cfg.ClaudeKey[i]
-		key := strings.TrimSpace(ck.APIKey)
-		if key == "" {
-			continue
-		}
+		effectiveKeys := config.EffectiveNativeAPIKeys(ck.APIKey, ck.Priority, ck.ProxyURL, ck.APIKeyEntries)
 		prefix := strings.TrimSpace(ck.Prefix)
 		base := strings.TrimSpace(ck.BaseURL)
-		id, token := idGen.Next("claude:apikey", key, base)
-		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:claude[%s]", token),
-			"api_key": key,
+		label := strings.TrimSpace(ck.Name)
+		if label == "" {
+			label = "claude-apikey"
 		}
-		metadata := map[string]any{}
-		if ck.DisableCooling {
-			metadata["disable_cooling"] = true
+		for _, effective := range effectiveKeys {
+			id, token := idGen.Next("claude:apikey", effective.APIKey, base, strconv.Itoa(effective.Index))
+			attrs := map[string]string{"source": fmt.Sprintf("config:claude[%s]", token), "api_key": effective.APIKey}
+			if ck.Name != "" {
+				attrs["provider_name"] = strings.TrimSpace(ck.Name)
+			}
+			metadata := map[string]any{}
+			if ck.DisableCooling {
+				metadata["disable_cooling"] = true
+			}
+			if effective.Priority != 0 || (effective.Index >= 0 && ck.APIKeyEntries[effective.Index].Priority != nil) {
+				attrs["priority"] = strconv.Itoa(effective.Priority)
+			}
+			if base != "" {
+				attrs["base_url"] = base
+			}
+			if ck.RebuildMidSystemMessage {
+				attrs["rebuild_mid_system_message"] = "true"
+			}
+			if hash := diff.ComputeClaudeModelsHash(ck.Models); hash != "" {
+				attrs["models_hash"] = hash
+			}
+			addConfigHeadersToAttrs(ck.Headers, attrs)
+			a := &coreauth.Auth{ID: id, Provider: "claude", Label: label, Prefix: prefix, Status: coreauth.StatusActive, ProxyURL: effective.ProxyURL, Attributes: attrs, Metadata: metadata, CreatedAt: now, UpdatedAt: now}
+			ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
+			if len(a.Metadata) == 0 {
+				a.Metadata = nil
+			}
+			out = append(out, a)
 		}
-		if ck.Priority != 0 {
-			attrs["priority"] = strconv.Itoa(ck.Priority)
-		}
-		if base != "" {
-			attrs["base_url"] = base
-		}
-		if ck.RebuildMidSystemMessage {
-			attrs["rebuild_mid_system_message"] = "true"
-		}
-		if hash := diff.ComputeClaudeModelsHash(ck.Models); hash != "" {
-			attrs["models_hash"] = hash
-		}
-		addConfigHeadersToAttrs(ck.Headers, attrs)
-		proxyURL := strings.TrimSpace(ck.ProxyURL)
-		a := &coreauth.Auth{
-			ID:         id,
-			Provider:   "claude",
-			Label:      "claude-apikey",
-			Prefix:     prefix,
-			Status:     coreauth.StatusActive,
-			ProxyURL:   proxyURL,
-			Attributes: attrs,
-			Metadata:   metadata,
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		}
-		ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
-		if len(a.Metadata) == 0 {
-			a.Metadata = nil
-		}
-		out = append(out, a)
 	}
 	return out
 }
@@ -188,51 +173,43 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 	out := make([]*coreauth.Auth, 0, len(entries))
 	for i := range entries {
 		entry := entries[i]
-		key := strings.TrimSpace(entry.APIKey)
-		if key == "" {
-			continue
-		}
+		effectiveKeys := config.EffectiveNativeAPIKeys(entry.APIKey, entry.Priority, entry.ProxyURL, entry.APIKeyEntries)
 		prefix := strings.TrimSpace(entry.Prefix)
 		baseURL := strings.TrimSpace(entry.BaseURL)
-		id, token := idGen.Next(provider+":apikey", key, baseURL)
-		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:%s[%s]", provider, token),
-			"api_key": key,
+		label := strings.TrimSpace(entry.Name)
+		if label == "" {
+			label = provider + "-apikey"
 		}
-		metadata := map[string]any{}
-		if entry.DisableCooling {
-			metadata["disable_cooling"] = true
+		for _, effective := range effectiveKeys {
+			id, token := idGen.Next(provider+":apikey", effective.APIKey, baseURL, strconv.Itoa(effective.Index))
+			attrs := map[string]string{"source": fmt.Sprintf("config:%s[%s]", provider, token), "api_key": effective.APIKey}
+			if entry.Name != "" {
+				attrs["provider_name"] = strings.TrimSpace(entry.Name)
+			}
+			metadata := map[string]any{}
+			if entry.DisableCooling {
+				metadata["disable_cooling"] = true
+			}
+			if effective.Priority != 0 || (effective.Index >= 0 && entry.APIKeyEntries[effective.Index].Priority != nil) {
+				attrs["priority"] = strconv.Itoa(effective.Priority)
+			}
+			if baseURL != "" {
+				attrs["base_url"] = baseURL
+			}
+			if entry.Websockets {
+				attrs["websockets"] = "true"
+			}
+			if hash := diff.ComputeCodexModelsHash(entry.Models); hash != "" {
+				attrs["models_hash"] = hash
+			}
+			addConfigHeadersToAttrs(entry.Headers, attrs)
+			a := &coreauth.Auth{ID: id, Provider: provider, Label: label, Prefix: prefix, Status: coreauth.StatusActive, ProxyURL: effective.ProxyURL, Attributes: attrs, Metadata: metadata, CreatedAt: now, UpdatedAt: now}
+			ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
+			if len(a.Metadata) == 0 {
+				a.Metadata = nil
+			}
+			out = append(out, a)
 		}
-		if entry.Priority != 0 {
-			attrs["priority"] = strconv.Itoa(entry.Priority)
-		}
-		if baseURL != "" {
-			attrs["base_url"] = baseURL
-		}
-		if entry.Websockets {
-			attrs["websockets"] = "true"
-		}
-		if hash := diff.ComputeCodexModelsHash(entry.Models); hash != "" {
-			attrs["models_hash"] = hash
-		}
-		addConfigHeadersToAttrs(entry.Headers, attrs)
-		a := &coreauth.Auth{
-			ID:         id,
-			Provider:   provider,
-			Label:      provider + "-apikey",
-			Prefix:     prefix,
-			Status:     coreauth.StatusActive,
-			ProxyURL:   strings.TrimSpace(entry.ProxyURL),
-			Attributes: attrs,
-			Metadata:   metadata,
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		}
-		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
-		if len(a.Metadata) == 0 {
-			a.Metadata = nil
-		}
-		out = append(out, a)
 	}
 	return out
 }

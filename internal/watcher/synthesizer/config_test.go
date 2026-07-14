@@ -790,3 +790,51 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigSynthesizer_GroupedNativeProviderKeys(t *testing.T) {
+	zero := 0
+	twenty := 20
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			GeminiKey: []config.GeminiKey{{
+				Name: "gemini-relay", APIKey: "legacy", Priority: 8, ProxyURL: "http://default",
+				APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: "g-a", Priority: &zero}, {APIKey: "g-b", Priority: &twenty, ProxyURL: "http://key"}},
+				Headers:       map[string]string{"X-Shared": "yes"},
+			}},
+			ClaudeKey: []config.ClaudeKey{{
+				Name: "claude-relay", APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: "c-a"}, {APIKey: "c-b"}},
+				Priority: 4, ProxyURL: "http://claude", RebuildMidSystemMessage: true,
+			}},
+			CodexKey: []config.CodexKey{{
+				Name: "codex-relay", BaseURL: "https://codex.example.com", APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: "x-a"}, {APIKey: "x-b"}}, Websockets: true,
+			}},
+		},
+		Now: time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC), IDGenerator: NewStableIDGenerator(),
+	}
+	auths, err := NewConfigSynthesizer().Synthesize(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(auths) != 6 {
+		t.Fatalf("auth count = %d, want 6", len(auths))
+	}
+	byKey := make(map[string]*coreauth.Auth, len(auths))
+	for _, auth := range auths {
+		byKey[auth.Attributes["api_key"]] = auth
+	}
+	if got := byKey["g-a"]; got == nil || got.Provider != "gemini" || got.Label != "gemini-relay" || got.Attributes["provider_name"] != "gemini-relay" || got.Attributes["priority"] != "0" || got.ProxyURL != "http://default" || got.Attributes["header:X-Shared"] != "yes" {
+		t.Fatalf("grouped Gemini auth = %#v", got)
+	}
+	if got := byKey["g-b"]; got == nil || got.Attributes["priority"] != "20" || got.ProxyURL != "http://key" {
+		t.Fatalf("overridden Gemini auth = %#v", got)
+	}
+	if got := byKey["c-a"]; got == nil || got.Provider != "claude" || got.Label != "claude-relay" || got.Attributes["rebuild_mid_system_message"] != "true" || got.ProxyURL != "http://claude" {
+		t.Fatalf("grouped Claude auth = %#v", got)
+	}
+	if got := byKey["x-a"]; got == nil || got.Provider != "codex" || got.Label != "codex-relay" || got.Attributes["websockets"] != "true" {
+		t.Fatalf("grouped Codex auth = %#v", got)
+	}
+	if byKey["legacy"] != nil {
+		t.Fatal("legacy key synthesized alongside grouped keys")
+	}
+}

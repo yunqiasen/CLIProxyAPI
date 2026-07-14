@@ -364,6 +364,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 	logDir := logging.ResolveLogDirectory(cfg)
 	s.mgmt.SetLogDirectory(logDir)
+	if errStartIndex := s.mgmt.StartRequestLogIndex(); errStartIndex != nil {
+		log.WithError(errStartIndex).Warn("failed to start request log index; file fallback remains available")
+	}
 	if optionState.postAuthHook != nil {
 		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
 	}
@@ -1777,8 +1780,16 @@ func (s *Server) Stop(ctx context.Context) error {
 	}
 
 	// Shutdown the HTTP server.
-	if err := s.server.Shutdown(ctx); err != nil {
-		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
+	errShutdown := s.server.Shutdown(ctx)
+	var errManagement error
+	if s.mgmt != nil {
+		errManagement = s.mgmt.Close()
+	}
+	if errShutdown != nil {
+		return fmt.Errorf("failed to shutdown HTTP server: %v", errShutdown)
+	}
+	if errManagement != nil {
+		return fmt.Errorf("failed to close management handler: %v", errManagement)
 	}
 
 	log.Debug("API server stopped")

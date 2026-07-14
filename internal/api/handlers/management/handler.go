@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
@@ -61,6 +62,8 @@ type Handler struct {
 	pluginReleaseCacheMu    sync.Mutex
 	pluginReleaseCache      map[string]pluginReleaseCacheEntry
 	quotaRefreshJobs        *quotaRefreshJobStore
+	requestLogIndex         *requestLogIndexManager
+	requestLogIndexError    string
 }
 
 type configReloadSnapshot struct {
@@ -249,6 +252,70 @@ func (h *Handler) SetLogDirectory(dir string) {
 		}
 	}
 	h.logDir = dir
+}
+
+// StartRequestLogIndex initializes the long-lived structured request-log index.
+func (h *Handler) StartRequestLogIndex() error {
+	if h == nil {
+		return fmt.Errorf("management handler unavailable")
+	}
+	h.mu.Lock()
+	if h.requestLogIndex != nil {
+		h.mu.Unlock()
+		return nil
+	}
+	dir := h.logDir
+	if dir == "" {
+		dir = logging.ResolveLogDirectory(h.cfg)
+	}
+	h.mu.Unlock()
+
+	manager, err := newRequestLogIndexManager(dir, requestLogIndexManagerOptions{
+		RetentionDays: h.requestLogRetentionDays,
+		SyncInterval:  defaultRequestLogSyncInterval,
+	})
+	if err != nil {
+		h.mu.Lock()
+		h.requestLogIndexError = err.Error()
+		h.mu.Unlock()
+		return err
+	}
+
+	h.mu.Lock()
+	if h.requestLogIndex != nil {
+		h.mu.Unlock()
+		_ = manager.Close()
+		return nil
+	}
+	h.requestLogIndex = manager
+	h.requestLogIndexError = ""
+	h.mu.Unlock()
+	manager.Start()
+	return nil
+}
+
+func (h *Handler) requestLogRetentionDays() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return requestLogRetentionDays
+	}
+	return h.cfg.RequestLogRetentionDays
+}
+
+// Close releases background resources owned by the management handler.
+func (h *Handler) Close() error {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	manager := h.requestLogIndex
+	h.requestLogIndex = nil
+	h.mu.Unlock()
+	if manager == nil {
+		return nil
+	}
+	return manager.Close()
 }
 
 // SetPostAuthHook registers a hook to be called after auth record creation but before persistence.

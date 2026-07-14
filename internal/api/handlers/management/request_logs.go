@@ -499,14 +499,33 @@ func parseRequestLogOffset(raw string) (int, error) {
 	return offset, nil
 }
 
+func requestLogRetentionCutoff(now time.Time, retentionDays int) (time.Time, bool) {
+	if retentionDays <= 0 {
+		return time.Time{}, false
+	}
+	return now.AddDate(0, 0, -retentionDays), true
+}
+
 func collectRequestLogCandidates(dir string) ([]requestLogCandidate, error) {
+	cutoff, _ := requestLogRetentionCutoff(time.Now(), requestLogRetentionDays)
+	return collectRequestLogCandidatesWithCutoff(dir, &cutoff)
+}
+
+func collectRequestLogCandidatesWithCutoff(dir string, cutoff *time.Time) ([]requestLogCandidate, error) {
+	return collectRequestLogCandidatesInternal(dir, cutoff, true)
+}
+
+func collectRequestLogCandidateMetadataWithCutoff(dir string, cutoff *time.Time) ([]requestLogCandidate, error) {
+	return collectRequestLogCandidatesInternal(dir, cutoff, false)
+}
+
+func collectRequestLogCandidatesInternal(dir string, cutoff *time.Time, readTimestamp bool) ([]requestLogCandidate, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
 
 	candidates := make([]requestLogCandidate, 0, len(entries))
-	cutoff := time.Now().AddDate(0, 0, -requestLogRetentionDays)
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -520,8 +539,11 @@ func collectRequestLogCandidates(dir string) ([]requestLogCandidate, error) {
 			return nil, errInfo
 		}
 		path := filepath.Join(dir, name)
-		logTime := requestLogTimeFromFile(path, name, info.ModTime())
-		if logTime.Before(cutoff) {
+		logTime := requestLogTimeFromFilename(name, info.ModTime())
+		if readTimestamp {
+			logTime = requestLogTimeFromFile(path, name, info.ModTime())
+		}
+		if cutoff != nil && logTime.Before(*cutoff) {
 			continue
 		}
 		candidates = append(candidates, requestLogCandidate{

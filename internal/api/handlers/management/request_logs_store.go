@@ -43,8 +43,8 @@ func openRequestLogStore(logDir string) (*requestLogStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 	store := &requestLogStore{path: path, db: db}
 	if err := store.ensureSchema(context.Background()); err != nil {
 		_ = db.Close()
@@ -53,10 +53,11 @@ func openRequestLogStore(logDir string) (*requestLogStore, error) {
 	return store, nil
 }
 
-func (s *requestLogStore) close() {
+func (s *requestLogStore) close() error {
 	if s != nil && s.db != nil {
-		_ = s.db.Close()
+		return s.db.Close()
 	}
+	return nil
 }
 
 func (s *requestLogStore) ensureSchema(ctx context.Context) error {
@@ -163,7 +164,15 @@ func (s *requestLogStore) pruneBefore(ctx context.Context, cutoff time.Time) err
 	return err
 }
 
+type requestLogExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 func (s *requestLogStore) upsertParsed(ctx context.Context, parsed parsedRequestLog, candidate requestLogCandidate) error {
+	return upsertParsedWithExecer(ctx, s.db, parsed, candidate)
+}
+
+func upsertParsedWithExecer(ctx context.Context, execer requestLogExecer, parsed parsedRequestLog, candidate requestLogCandidate) error {
 	now := time.Now().Unix()
 	item := parsed.requestLogListItem
 	availableTools, _ := json.Marshal(parsed.promptMetadata.AvailableTools)
@@ -182,7 +191,7 @@ func (s *requestLogStore) upsertParsed(ctx context.Context, parsed parsedRequest
 	if strings.TrimSpace(item.Provider) != "" && !strings.EqualFold(strings.TrimSpace(item.Provider), protocolProvider) {
 		providerName = strings.TrimSpace(item.Provider)
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := execer.ExecContext(ctx, `
 INSERT INTO request_log_entries (
   id, name, raw_log_path, size, modified, timestamp_text, timestamp_unix,
   url, method, model, provider, provider_name, auth_id, auth_type, upstream_url, upstream_model, channel_model, ip, ip_location, status, success,
@@ -235,6 +244,60 @@ ON CONFLICT(id) DO UPDATE SET
   updated_at=excluded.updated_at
 	`, item.ID, item.Name, candidate.path, item.Size, item.Modified, item.Timestamp, candidate.logTime.Unix(), item.URL, item.Method, item.Model, protocolProvider, providerName, item.AuthID, item.AuthType, item.UpstreamURL, item.UpstreamModel, item.ChannelModel, item.IP, item.IPLocation, item.Status, success, parsed.prompt, parsed.output, parsed.error, parsed.promptMetadata.SystemPrompt, string(availableTools), string(mcps), string(skills), string(calledTools), string(promptMetadata), string(requestMetadata), item.PromptPreview, item.OutputPreview, item.ErrorPreview, item.ToolPreview, item.SystemPromptPreview, item.CalledToolsPreview, item.SessionID, item.ThreadID, item.TurnID, hasError, now, now)
 	return err
+}
+
+func (s *requestLogStore) upsertParsedBatch(ctx context.Context, batch []parsedRequestLogCandidate) error {
+	if len(batch) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, item := range batch {
+		if err := upsertParsedWithExecer(ctx, tx, item.parsed, item.candidate); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *requestLogStore) compactSyncStates(ctx context.Context) (map[string]requestLogSyncState, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, size, modified FROM request_log_entries`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	states := make(map[string]requestLogSyncState)
+	for rows.Next() {
+		var id string
+		var size, modified int64
+		if err := rows.Scan(&id, &size, &modified); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(id) != "" {
+			states[id] = requestLogSyncState{size: size, modified: modified}
+		}
+	}
+	return states, rows.Err()
+}
+
+func (s *requestLogStore) deleteIDs(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM request_log_entries WHERE id = ?`, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func syncRequestLogStore(ctx context.Context, store *requestLogStore, dir string) error {

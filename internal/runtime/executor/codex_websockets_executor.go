@@ -251,15 +251,16 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	wsReqBody := buildCodexWebsocketRequestBody(upstreamBody)
 	wsReqLog := helps.UpstreamRequestLog{
-		URL:       wsURL,
-		Method:    "WEBSOCKET",
-		Headers:   wsHeaders.Clone(),
-		Body:      wsReqBody,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
+		URL:          wsURL,
+		Method:       "WEBSOCKET",
+		Headers:      wsHeaders.Clone(),
+		Body:         wsReqBody,
+		Provider:     e.Identifier(),
+		AuthID:       authID,
+		AuthLabel:    authLabel,
+		ProviderName: helps.RequestLogProviderName(auth),
+		AuthType:     authType,
+		AuthValue:    authValue,
 	}
 	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
 
@@ -312,15 +313,16 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			if errDialRetry == nil && connRetry != nil {
 				wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-					URL:       wsURL,
-					Method:    "WEBSOCKET",
-					Headers:   wsHeaders.Clone(),
-					Body:      wsReqBodyRetry,
-					Provider:  e.Identifier(),
-					AuthID:    authID,
-					AuthLabel: authLabel,
-					AuthType:  authType,
-					AuthValue: authValue,
+					URL:          wsURL,
+					Method:       "WEBSOCKET",
+					Headers:      wsHeaders.Clone(),
+					Body:         wsReqBodyRetry,
+					Provider:     e.Identifier(),
+					AuthID:       authID,
+					AuthLabel:    authLabel,
+					ProviderName: helps.RequestLogProviderName(auth),
+					AuthType:     authType,
+					AuthValue:    authValue,
 				})
 				recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
 				reporter.StartResponseTTFT()
@@ -472,15 +474,16 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	wsReqBody := buildCodexWebsocketRequestBody(upstreamBody)
 	wsReqLog := helps.UpstreamRequestLog{
-		URL:       wsURL,
-		Method:    "WEBSOCKET",
-		Headers:   wsHeaders.Clone(),
-		Body:      wsReqBody,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
+		URL:          wsURL,
+		Method:       "WEBSOCKET",
+		Headers:      wsHeaders.Clone(),
+		Body:         wsReqBody,
+		Provider:     e.Identifier(),
+		AuthID:       authID,
+		AuthLabel:    authLabel,
+		ProviderName: helps.RequestLogProviderName(auth),
+		AuthType:     authType,
+		AuthValue:    authValue,
 	}
 	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
 
@@ -535,15 +538,16 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 			wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 			helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-				URL:       wsURL,
-				Method:    "WEBSOCKET",
-				Headers:   wsHeaders.Clone(),
-				Body:      wsReqBodyRetry,
-				Provider:  e.Identifier(),
-				AuthID:    authID,
-				AuthLabel: authLabel,
-				AuthType:  authType,
-				AuthValue: authValue,
+				URL:          wsURL,
+				Method:       "WEBSOCKET",
+				Headers:      wsHeaders.Clone(),
+				Body:         wsReqBodyRetry,
+				Provider:     e.Identifier(),
+				AuthID:       authID,
+				AuthLabel:    authLabel,
+				ProviderName: helps.RequestLogProviderName(auth),
+				AuthType:     authType,
+				AuthValue:    authValue,
 			})
 			recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
 			reporter.StartResponseTTFT()

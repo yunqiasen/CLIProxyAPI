@@ -39,6 +39,7 @@ type requestLogListItem struct {
 	Method              string `json:"method"`
 	Model               string `json:"model"`
 	Provider            string `json:"provider"`
+	ProtocolProvider    string `json:"-"`
 	AuthID              string `json:"auth_id"`
 	AuthType            string `json:"auth_type"`
 	UpstreamURL         string `json:"upstream_url"`
@@ -94,6 +95,7 @@ type parsedRequestLog struct {
 
 type requestLogUpstreamMetadata struct {
 	Provider      string
+	ProviderName  string
 	AuthID        string
 	AuthType      string
 	UpstreamURL   string
@@ -741,7 +743,8 @@ func parseRequestLogFile(candidate requestLogCandidate) (parsedRequestLog, error
 			URL:                 strings.TrimSpace(info["URL"]),
 			Method:              strings.TrimSpace(info["Method"]),
 			Model:               extractModel(requestBody),
-			Provider:            upstream.Provider,
+			Provider:            firstNonEmptyRequestLogValue(upstream.ProviderName, upstream.Provider),
+			ProtocolProvider:    upstream.Provider,
 			AuthID:              upstream.AuthID,
 			AuthType:            upstream.AuthType,
 			UpstreamURL:         upstream.UpstreamURL,
@@ -871,7 +874,10 @@ func extractUpstreamMetadata(apiRequests, apiResponses, apiErrors []string) requ
 		if authLine := values["Auth"]; authLine != "" {
 			auth := parseRequestLogAuthLine(authLine)
 			if out.Provider == "" {
-				out.Provider = firstNonEmptyRequestLogValue(auth["label"], auth["provider"])
+				out.Provider = auth["provider"]
+			}
+			if out.ProviderName == "" {
+				out.ProviderName = auth["provider_name"]
 			}
 			if out.AuthID == "" {
 				out.AuthID = auth["auth_id"]
@@ -893,7 +899,7 @@ func extractUpstreamMetadata(apiRequests, apiResponses, apiErrors []string) requ
 	if out.Provider == "" {
 		out.Provider = inferProviderFromUpstream(out.UpstreamModel, out.UpstreamURL)
 	}
-	out.ChannelModel = buildChannelModel(out.Provider, out.UpstreamModel, out.UpstreamURL)
+	out.ChannelModel = buildChannelModel(firstNonEmptyRequestLogValue(out.ProviderName, out.Provider), out.UpstreamModel, out.UpstreamURL)
 	return out
 }
 

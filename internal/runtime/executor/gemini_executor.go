@@ -191,15 +191,16 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		authType, authValue = auth.AccountInfo()
 	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
+		URL:          url,
+		Method:       http.MethodPost,
+		Headers:      httpReq.Header.Clone(),
+		Body:         body,
+		Provider:     e.Identifier(),
+		AuthID:       authID,
+		AuthLabel:    authLabel,
+		ProviderName: helps.RequestLogProviderName(auth),
+		AuthType:     authType,
+		AuthValue:    authValue,
 	})
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -300,15 +301,16 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		authType, authValue = auth.AccountInfo()
 	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
+		URL:          url,
+		Method:       http.MethodPost,
+		Headers:      httpReq.Header.Clone(),
+		Body:         body,
+		Provider:     e.Identifier(),
+		AuthID:       authID,
+		AuthLabel:    authLabel,
+		ProviderName: helps.RequestLogProviderName(auth),
+		AuthType:     authType,
+		AuthValue:    authValue,
 	})
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -416,15 +418,16 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 
 	authID, authLabel, authType, authValue := geminiAuthLogFields(auth)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
+		URL:          url,
+		Method:       http.MethodPost,
+		Headers:      httpReq.Header.Clone(),
+		Body:         body,
+		Provider:     e.Identifier(),
+		AuthID:       authID,
+		AuthLabel:    authLabel,
+		ProviderName: helps.RequestLogProviderName(auth),
+		AuthType:     authType,
+		AuthValue:    authValue,
 	})
 
 	httpClient := reporter.TrackHTTPClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
@@ -492,15 +495,16 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 
 	authID, authLabel, authType, authValue := geminiAuthLogFields(auth)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
+		URL:          url,
+		Method:       http.MethodPost,
+		Headers:      httpReq.Header.Clone(),
+		Body:         body,
+		Provider:     e.Identifier(),
+		AuthID:       authID,
+		AuthLabel:    authLabel,
+		ProviderName: helps.RequestLogProviderName(auth),
+		AuthType:     authType,
+		AuthValue:    authValue,
 	})
 
 	httpClient := reporter.TrackHTTPClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
@@ -648,15 +652,16 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		authType, authValue = auth.AccountInfo()
 	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      translatedReq,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
+		URL:          url,
+		Method:       http.MethodPost,
+		Headers:      httpReq.Header.Clone(),
+		Body:         translatedReq,
+		Provider:     e.Identifier(),
+		AuthID:       authID,
+		AuthLabel:    authLabel,
+		ProviderName: helps.RequestLogProviderName(auth),
+		AuthType:     authType,
+		AuthValue:    authValue,
 	})
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)

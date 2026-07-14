@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -29,15 +30,16 @@ const (
 
 // UpstreamRequestLog captures the outbound upstream request details for logging.
 type UpstreamRequestLog struct {
-	URL       string
-	Method    string
-	Headers   http.Header
-	Body      []byte
-	Provider  string
-	AuthID    string
-	AuthLabel string
-	AuthType  string
-	AuthValue string
+	URL          string
+	Method       string
+	Headers      http.Header
+	Body         []byte
+	Provider     string
+	ProviderName string
+	AuthID       string
+	AuthLabel    string
+	AuthType     string
+	AuthValue    string
 }
 
 type upstreamAttempt struct {
@@ -583,10 +585,32 @@ func writeHeaders(builder *strings.Builder, headers http.Header) {
 	}
 }
 
+// RequestLogProviderName returns the configured display name for request-log metadata.
+func RequestLogProviderName(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if name := strings.TrimSpace(auth.Attributes["provider_name"]); name != "" {
+			return name
+		}
+	}
+	label := strings.TrimSpace(auth.Label)
+	switch strings.ToLower(label) {
+	case "claude-apikey", "codex-apikey", "gemini-apikey", "interactions-apikey", "xai-apikey":
+		return ""
+	default:
+		return label
+	}
+}
+
 func formatAuthInfo(info UpstreamRequestLog) string {
 	var parts []string
 	if trimmed := strings.TrimSpace(info.Provider); trimmed != "" {
 		parts = append(parts, fmt.Sprintf("provider=%s", trimmed))
+	}
+	if trimmed := strings.TrimSpace(info.ProviderName); trimmed != "" {
+		parts = append(parts, fmt.Sprintf("provider_name=%s", trimmed))
 	}
 	if trimmed := strings.TrimSpace(info.AuthID); trimmed != "" {
 		parts = append(parts, fmt.Sprintf("auth_id=%s", trimmed))

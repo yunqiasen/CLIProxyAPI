@@ -480,7 +480,7 @@ CREATE TABLE request_log_entries (
 	if err := rows.Err(); err != nil {
 		t.Fatalf("table info rows: %v", err)
 	}
-	for _, column := range []string{"provider", "auth_id", "auth_type", "upstream_url", "upstream_model", "channel_model"} {
+	for _, column := range []string{"provider", "provider_name", "auth_id", "auth_type", "upstream_url", "upstream_model", "channel_model"} {
 		if !columns[column] {
 			t.Fatalf("migrated schema missing column %s", column)
 		}
@@ -597,5 +597,181 @@ func TestExportRequestLogsHonorsPages(t *testing.T) {
 	}
 	if len(records) != 3 {
 		t.Fatalf("csv row count = %d, want header + 2 rows", len(records))
+	}
+}
+
+func TestRequestLogProviderNameParserStoreAndFallback(t *testing.T) {
+	logsDir := t.TempDir()
+	stamp, timestamp := requestLogTestTimestamp(0)
+	writeLog := func(suffix, authLine string) string {
+		t.Helper()
+		path := filepath.Join(logsDir, fmt.Sprintf("v1-responses-%s-%s.log", stamp, suffix))
+		content := strings.Join([]string{
+			"=== REQUEST INFO ===",
+			"Timestamp: " + timestamp,
+			"URL: /v1/responses",
+			"Method: POST",
+			"",
+			"=== REQUEST BODY ===",
+			`{"model":"claude-client","input":"hello"}`,
+			"",
+			"=== API REQUEST 1 ===",
+			"Upstream URL: https://api.anthropic.com/v1/messages",
+			"HTTP Method: POST",
+			"Auth: " + authLine,
+			"",
+			"Body:",
+			`{"model":"claude-upstream","messages":[{"role":"user","content":"hello"}]}`,
+			"",
+			"=== API ERROR RESPONSE 1 ===",
+			"HTTP Status: 500",
+			"",
+			`{"error":{"message":"upstream failed"}}`,
+			"",
+			"=== RESPONSE ===",
+			"Status: 500",
+			"Content-Type: application/json",
+			"",
+			`{"error":{"message":"upstream failed"}}`,
+		}, "\n")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write log: %v", err)
+		}
+		return path
+	}
+
+	namedPath := writeLog("provider-name", "provider=claude, provider_name=relay-a, auth_id=claude:apikey:named, label=relay-a, type=api_key value=sk...named")
+	legacyPath := writeLog("provider-legacy", "provider=claude, auth_id=claude:apikey:legacy, label=claude-apikey, type=api_key value=sk...legacy")
+
+	parse := func(path string) parsedRequestLog {
+		t.Helper()
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat log: %v", err)
+		}
+		parsed, err := parseRequestLogFile(requestLogCandidate{name: filepath.Base(path), path: path, size: info.Size(), modTime: info.ModTime(), logTime: info.ModTime()})
+		if err != nil {
+			t.Fatalf("parse log: %v", err)
+		}
+		return parsed
+	}
+
+	named := parse(namedPath)
+	if named.Provider != "relay-a" || named.ProtocolProvider != "claude" {
+		t.Fatalf("named providers = display:%q protocol:%q", named.Provider, named.ProtocolProvider)
+	}
+	legacy := parse(legacyPath)
+	if legacy.Provider != "claude" || legacy.ProtocolProvider != "claude" {
+		t.Fatalf("legacy providers = display:%q protocol:%q", legacy.Provider, legacy.ProtocolProvider)
+	}
+
+	store, err := openRequestLogStore(logsDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.close()
+	if err := syncRequestLogStore(context.Background(), store, logsDir); err != nil {
+		t.Fatalf("sync store: %v", err)
+	}
+
+	items, total, err := store.list(context.Background(), requestLogQueryOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if total != 2 || len(items) != 2 {
+		t.Fatalf("total/items = %d/%d", total, len(items))
+	}
+	providers := map[string]string{}
+	for _, item := range items {
+		providers[item.AuthID] = item.Provider
+	}
+	if providers["claude:apikey:named"] != "relay-a" || providers["claude:apikey:legacy"] != "claude" {
+		t.Fatalf("list providers = %#v", providers)
+	}
+
+	detail, err := store.detail(context.Background(), named.ID)
+	if err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	if detail.Provider != "relay-a" {
+		t.Fatalf("detail provider = %q, want relay-a", detail.Provider)
+	}
+
+	var exported strings.Builder
+	if err := store.export(context.Background(), &exported, requestLogQueryOptions{Limit: 10}, "csv"); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if !strings.Contains(exported.String(), "relay-a") || !strings.Contains(exported.String(), "claude") {
+		t.Fatalf("export providers missing: %s", exported.String())
+	}
+
+	failures, err := store.failureDetails(context.Background(), "relay-a", 10)
+	if err != nil {
+		t.Fatalf("failure details: %v", err)
+	}
+	if len(failures) != 1 || failures[0].Provider != "relay-a" {
+		t.Fatalf("failure providers = %#v", failures)
+	}
+
+	var protocol, providerName string
+	if err := store.db.QueryRowContext(context.Background(), `SELECT provider, provider_name FROM request_log_entries WHERE auth_id = ?`, "claude:apikey:named").Scan(&protocol, &providerName); err != nil {
+		t.Fatalf("query stored providers: %v", err)
+	}
+	if protocol != "claude" || providerName != "relay-a" {
+		t.Fatalf("stored providers = protocol:%q display:%q", protocol, providerName)
+	}
+}
+
+func TestRequestLogProviderNameMigrationAddsColumnAndCompositeIndexes(t *testing.T) {
+	logsDir := t.TempDir()
+	store, err := openRequestLogStore(logsDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.close()
+
+	rows, err := store.db.QueryContext(context.Background(), `PRAGMA table_info(request_log_entries)`)
+	if err != nil {
+		t.Fatalf("table info: %v", err)
+	}
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatalf("scan table info: %v", err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("close table info: %v", err)
+	}
+	if !columns["provider_name"] {
+		t.Fatal("provider_name column missing")
+	}
+
+	indexRows, err := store.db.QueryContext(context.Background(), `PRAGMA index_list(request_log_entries)`)
+	if err != nil {
+		t.Fatalf("index list: %v", err)
+	}
+	indexes := map[string]bool{}
+	for indexRows.Next() {
+		var seq, unique, partial int
+		var name, origin string
+		if err := indexRows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			t.Fatalf("scan index list: %v", err)
+		}
+		indexes[name] = true
+	}
+	if err := indexRows.Close(); err != nil {
+		t.Fatalf("close index list: %v", err)
+	}
+	for _, name := range []string{"idx_request_log_entries_auth_time", "idx_request_log_entries_provider_time"} {
+		if !indexes[name] {
+			t.Fatalf("index %s missing: %#v", name, indexes)
+		}
 	}
 }

@@ -677,15 +677,16 @@ func recordCodexOpenAIImageRequest(ctx context.Context, cfg *config.Config, prov
 		authType, authValue = auth.AccountInfo()
 	}
 	helps.RecordAPIRequest(ctx, cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   headers,
-		Body:      body,
-		Provider:  provider,
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
+		URL:          url,
+		Method:       http.MethodPost,
+		Headers:      headers,
+		Body:         body,
+		Provider:     provider,
+		AuthID:       authID,
+		AuthLabel:    authLabel,
+		ProviderName: helps.RequestLogProviderName(auth),
+		AuthType:     authType,
+		AuthValue:    authValue,
 	})
 }
 

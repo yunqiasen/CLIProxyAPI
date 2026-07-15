@@ -35,7 +35,15 @@ type apiKeyUsageFailureDetail struct {
 
 type apiKeyUsageLookupKey struct {
 	Provider  string
+	Protocol  string
+	BaseURL   string
 	Composite string
+}
+
+type apiKeyUsageHistoricalIdentity struct {
+	Provider    string
+	Protocol    string
+	UpstreamURL string
 }
 
 const (
@@ -79,6 +87,38 @@ func requestLogCutoffSQL(cutoff *int64) (string, []any) {
 		return "", nil
 	}
 	return " AND timestamp_unix >= ?", []any{*cutoff}
+}
+
+func (s *requestLogStore) apiKeyUsageIdentityByAuthID(ctx context.Context, cutoff *int64) (map[string]apiKeyUsageHistoricalIdentity, error) {
+	cutoffSQL, cutoffArgs := requestLogCutoffSQL(cutoff)
+	rows, err := s.db.QueryContext(ctx, `SELECT COALESCE(auth_id, ''), COALESCE(NULLIF(TRIM(provider_name), ''), NULLIF(TRIM(provider), ''), ''), COALESCE(provider, ''), COALESCE(upstream_url, '') FROM request_log_entries WHERE COALESCE(auth_id, '') != ''`+cutoffSQL+` ORDER BY timestamp_unix DESC`, cutoffArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]apiKeyUsageHistoricalIdentity)
+	for rows.Next() {
+		var authID string
+		var provider string
+		var protocol string
+		var upstreamURL string
+		if err := rows.Scan(&authID, &provider, &protocol, &upstreamURL); err != nil {
+			return nil, err
+		}
+		authID = strings.TrimSpace(authID)
+		if authID == "" {
+			continue
+		}
+		if _, exists := out[authID]; !exists {
+			out[authID] = apiKeyUsageHistoricalIdentity{
+				Provider:    strings.ToLower(strings.TrimSpace(provider)),
+				Protocol:    strings.ToLower(strings.TrimSpace(protocol)),
+				UpstreamURL: strings.TrimSpace(upstreamURL),
+			}
+		}
+	}
+	return out, rows.Err()
 }
 
 func (s *requestLogStore) apiKeyUsageByAuthID(ctx context.Context, now time.Time, cutoff *int64) (map[string]apiKeyUsageEntry, error) {
@@ -240,6 +280,37 @@ func apiKeyUsageText(value, fallback string) string {
 	return string(runes[:240]) + "..."
 }
 
+func uniqueAPIKeyUsageProtocolBaseMatch(lookup map[string]apiKeyUsageLookupKey, identity apiKeyUsageHistoricalIdentity) (apiKeyUsageLookupKey, bool) {
+	matches := make(map[string]apiKeyUsageLookupKey)
+	customMatches := make(map[string]apiKeyUsageLookupKey)
+	for _, candidate := range lookup {
+		if identity.Protocol == "" || candidate.Protocol != identity.Protocol {
+			continue
+		}
+		upstreamURL := strings.TrimRight(strings.ToLower(identity.UpstreamURL), "/")
+		baseURL := strings.TrimRight(strings.ToLower(candidate.BaseURL), "/")
+		if baseURL != "" && upstreamURL != baseURL && !strings.HasPrefix(upstreamURL, baseURL+"/") {
+			continue
+		}
+		groupKey := candidate.Provider + "\x00" + candidate.BaseURL
+		matches[groupKey] = candidate
+		if candidate.Provider != candidate.Protocol {
+			customMatches[groupKey] = candidate
+		}
+	}
+	if len(customMatches) == 1 {
+		for _, candidate := range customMatches {
+			return candidate, true
+		}
+	}
+	if len(matches) == 1 {
+		for _, candidate := range matches {
+			return candidate, true
+		}
+	}
+	return apiKeyUsageLookupKey{}, false
+}
+
 func (h *Handler) persistedAPIKeyUsage(ctx context.Context, now time.Time, lookup map[string]apiKeyUsageLookupKey) map[apiKeyUsageLookupKey]apiKeyUsageEntry {
 	if h == nil || len(lookup) == 0 {
 		return nil
@@ -254,10 +325,33 @@ func (h *Handler) persistedAPIKeyUsage(ctx context.Context, now time.Time, looku
 	if errUsage != nil {
 		return nil
 	}
+	identityByAuthID, errIdentity := manager.APIKeyUsageIdentityByAuthID(ctx, cutoff)
+	if errIdentity != nil {
+		return nil
+	}
+	providerFallback := make(map[string]apiKeyUsageLookupKey)
+	for _, key := range lookup {
+		if key.Provider != "" && key.Composite != "" {
+			if _, exists := providerFallback[key.Provider]; !exists {
+				providerFallback[key.Provider] = key
+			}
+		}
+	}
 
 	out := make(map[apiKeyUsageLookupKey]apiKeyUsageEntry)
 	for authID, usage := range byAuthID {
+		identity := identityByAuthID[authID]
 		key, ok := lookup[authID]
+		if remapped, matched := uniqueAPIKeyUsageProtocolBaseMatch(lookup, identity); matched && remapped.Provider != key.Provider {
+			key = remapped
+			ok = true
+		}
+		if !ok {
+			key, ok = providerFallback[identity.Provider]
+			if !ok {
+				key, ok = uniqueAPIKeyUsageProtocolBaseMatch(lookup, identity)
+			}
+		}
 		if !ok || key.Provider == "" || key.Composite == "" {
 			continue
 		}
@@ -381,6 +475,8 @@ func apiKeyUsageProviderKey(auth *coreauth.Auth) string {
 	if auth.Attributes != nil {
 		if compatName := strings.TrimSpace(auth.Attributes["compat_name"]); compatName != "" {
 			provider = strings.ToLower(compatName)
+		} else if providerName := strings.TrimSpace(auth.Attributes["provider_name"]); providerName != "" {
+			provider = strings.ToLower(providerName)
 		}
 	}
 	if provider == "" {
@@ -430,7 +526,7 @@ func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 		compositeKey := baseURL + "|" + apiKey
 		provider := apiKeyUsageProviderKey(auth)
 		if authID := strings.TrimSpace(auth.ID); authID != "" {
-			lookup[authID] = apiKeyUsageLookupKey{Provider: provider, Composite: compositeKey}
+			lookup[authID] = apiKeyUsageLookupKey{Provider: provider, Protocol: strings.ToLower(strings.TrimSpace(auth.Provider)), BaseURL: baseURL, Composite: compositeKey}
 		}
 
 		recent := auth.RecentRequestsSnapshot(now)

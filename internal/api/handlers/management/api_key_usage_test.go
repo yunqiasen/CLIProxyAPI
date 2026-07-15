@@ -104,6 +104,80 @@ func TestGetAPIKeyUsage_IncludesPersistedRequestLogCounts(t *testing.T) {
 	}
 }
 
+func TestUniqueAPIKeyUsageProtocolBaseMatch_AllowsUniqueNamedDefaultBase(t *testing.T) {
+	lookup := map[string]apiKeyUsageLookupKey{
+		"current": {Provider: "new relay", Protocol: "claude", Composite: "|new-key"},
+	}
+	got, ok := uniqueAPIKeyUsageProtocolBaseMatch(lookup, apiKeyUsageHistoricalIdentity{
+		Provider: "old relay", Protocol: "claude", UpstreamURL: "https://api.anthropic.com/v1/messages",
+	})
+	if !ok || got.Provider != "new relay" {
+		t.Fatalf("default-base match = %#v, %v", got, ok)
+	}
+}
+
+func TestGetAPIKeyUsage_RetainsNamedProviderHistoryAfterAPIKeyChange(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "old-auth",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":  "old-key",
+			"base_url": "https://relay.example.com",
+		},
+	}); err != nil {
+		t.Fatalf("register retained old auth: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "new-auth",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":       "new-key",
+			"base_url":      "https://relay.example.com",
+			"provider_name": "Relay A",
+		},
+	}); err != nil {
+		t.Fatalf("register current auth: %v", err)
+	}
+
+	logsDir := t.TempDir()
+	store, err := openRequestLogStore(logsDir)
+	if err != nil {
+		t.Fatalf("open request log store: %v", err)
+	}
+	now := time.Now()
+	_, err = store.db.ExecContext(context.Background(), `INSERT INTO request_log_entries (id, name, raw_log_path, size, modified, timestamp_text, timestamp_unix, provider, provider_name, auth_id, upstream_url, status, success, has_error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, "old-request", "old-request.log", "old-request.log", 1, now.Unix(), now.Format(time.RFC3339Nano), now.Unix(), "codex", "Old Relay Name", "old-auth", "https://relay.example.com/v1/responses", 200, 1, 0, now.Unix(), now.Unix())
+	if err != nil {
+		t.Fatalf("insert historical request: %v", err)
+	}
+	if err := store.close(); err != nil {
+		t.Fatalf("close request log store: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	h.SetLogDirectory(logsDir)
+	attachTestRequestLogSnapshot(t, h, logsDir)
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/api-key-usage", nil)
+	h.GetAPIKeyUsage(ginCtx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]map[string]apiKeyUsageEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	entry := payload["relay a"]["https://relay.example.com|new-key"]
+	if entry.Success != 1 || entry.Failed != 0 {
+		t.Fatalf("history after key change = %d/%d, want 1/0", entry.Success, entry.Failed)
+	}
+}
+
 func TestGetAPIKeyUsage_IncludesPersistedSuccessAndFailureDetails(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
@@ -252,6 +326,45 @@ func TestGetAPIKeyUsage_GroupsByProviderAndAPIKey(t *testing.T) {
 	claudeSuccess, claudeFailed := sumRecentRequestBuckets(claudeEntry.RecentRequests)
 	if claudeSuccess != 1 || claudeFailed != 0 {
 		t.Fatalf("claude totals = %d/%d, want 1/0", claudeSuccess, claudeFailed)
+	}
+}
+
+func TestGetAPIKeyUsage_GroupsNativeProviderByConfiguredName(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "relay-auth",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key":       "relay-key",
+			"base_url":      "https://relay.example.com",
+			"provider_name": "Relay A",
+		},
+	}); err != nil {
+		t.Fatalf("register relay auth: %v", err)
+	}
+	manager.MarkResult(context.Background(), coreauth.Result{AuthID: "relay-auth", Provider: "claude", Model: "claude-4", Success: true})
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/api-key-usage", nil)
+	h.GetAPIKeyUsage(ginCtx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var payload map[string]map[string]apiKeyUsageEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if _, exists := payload["claude"]; exists {
+		t.Fatalf("unexpected protocol provider bucket in payload: %#v", payload)
+	}
+	entry := payload["relay a"]["https://relay.example.com|relay-key"]
+	if entry.Success != 1 || entry.Failed != 0 {
+		t.Fatalf("relay totals = %d/%d, want 1/0", entry.Success, entry.Failed)
 	}
 }
 

@@ -175,6 +175,13 @@ func (m *requestLogIndexManager) FailureDetails(ctx context.Context, provider st
 	return m.store.failureDetails(ctx, provider, limit)
 }
 
+func (m *requestLogIndexManager) APIKeyUsageIdentityByAuthID(ctx context.Context, cutoff *int64) (map[string]apiKeyUsageHistoricalIdentity, error) {
+	if m == nil || m.store == nil {
+		return nil, fmt.Errorf("request log index unavailable")
+	}
+	return m.store.apiKeyUsageIdentityByAuthID(ctx, cutoff)
+}
+
 func (m *requestLogIndexManager) APIKeyUsageByAuthID(ctx context.Context, now time.Time, cutoff *int64) (map[string]apiKeyUsageEntry, error) {
 	if m == nil || m.store == nil {
 		return nil, fmt.Errorf("request log index unavailable")

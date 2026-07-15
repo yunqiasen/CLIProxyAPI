@@ -147,12 +147,17 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 }
 func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	type geminiKeyPatch struct {
-		APIKey         *string            `json:"api-key"`
-		Prefix         *string            `json:"prefix"`
-		BaseURL        *string            `json:"base-url"`
-		ProxyURL       *string            `json:"proxy-url"`
-		Headers        *map[string]string `json:"headers"`
-		ExcludedModels *[]string          `json:"excluded-models"`
+		Name           *string                     `json:"name"`
+		APIKeyEntries  *[]config.NativeAPIKeyEntry `json:"api-key-entries"`
+		APIKey         *string                     `json:"api-key"`
+		Priority       *int                        `json:"priority"`
+		Prefix         *string                     `json:"prefix"`
+		BaseURL        *string                     `json:"base-url"`
+		ProxyURL       *string                     `json:"proxy-url"`
+		Models         *[]config.GeminiModel       `json:"models"`
+		Headers        *map[string]string          `json:"headers"`
+		ExcludedModels *[]string                   `json:"excluded-models"`
+		DisableCooling *bool                       `json:"disable-cooling"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -187,15 +192,17 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	}
 
 	entry := h.cfg.GeminiKey[targetIndex]
+	if body.Value.Name != nil {
+		entry.Name = strings.TrimSpace(*body.Value.Name)
+	}
+	if body.Value.APIKeyEntries != nil {
+		entry.APIKeyEntries = normalizeNativeAPIKeyEntries(*body.Value.APIKeyEntries)
+	}
 	if body.Value.APIKey != nil {
-		trimmed := strings.TrimSpace(*body.Value.APIKey)
-		if trimmed == "" {
-			h.cfg.GeminiKey = append(h.cfg.GeminiKey[:targetIndex], h.cfg.GeminiKey[targetIndex+1:]...)
-			h.cfg.SanitizeGeminiKeys()
-			h.persistLocked(c)
-			return
-		}
-		entry.APIKey = trimmed
+		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
@@ -206,13 +213,23 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	if body.Value.ProxyURL != nil {
 		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
 	}
+	if body.Value.Models != nil {
+		entry.Models = append([]config.GeminiModel(nil), (*body.Value.Models)...)
+	}
 	if body.Value.Headers != nil {
 		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
 	}
-	h.cfg.GeminiKey[targetIndex] = entry
+	if body.Value.DisableCooling != nil {
+		entry.DisableCooling = *body.Value.DisableCooling
+	}
+	if len(config.EffectiveNativeAPIKeys(entry.APIKey, entry.Priority, entry.ProxyURL, entry.APIKeyEntries)) == 0 {
+		h.cfg.GeminiKey = append(h.cfg.GeminiKey[:targetIndex], h.cfg.GeminiKey[targetIndex+1:]...)
+	} else {
+		h.cfg.GeminiKey[targetIndex] = entry
+	}
 	h.cfg.SanitizeGeminiKeys()
 	h.persistLocked(c)
 }
@@ -468,14 +485,20 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 }
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
-		APIKey                  *string               `json:"api-key"`
-		Prefix                  *string               `json:"prefix"`
-		BaseURL                 *string               `json:"base-url"`
-		ProxyURL                *string               `json:"proxy-url"`
-		Models                  *[]config.ClaudeModel `json:"models"`
-		Headers                 *map[string]string    `json:"headers"`
-		ExcludedModels          *[]string             `json:"excluded-models"`
-		RebuildMidSystemMessage *bool                 `json:"rebuild-mid-system-message"`
+		Name                    *string                     `json:"name"`
+		APIKeyEntries           *[]config.NativeAPIKeyEntry `json:"api-key-entries"`
+		APIKey                  *string                     `json:"api-key"`
+		Priority                *int                        `json:"priority"`
+		Prefix                  *string                     `json:"prefix"`
+		BaseURL                 *string                     `json:"base-url"`
+		ProxyURL                *string                     `json:"proxy-url"`
+		Models                  *[]config.ClaudeModel       `json:"models"`
+		Headers                 *map[string]string          `json:"headers"`
+		ExcludedModels          *[]string                   `json:"excluded-models"`
+		RebuildMidSystemMessage *bool                       `json:"rebuild-mid-system-message"`
+		DisableCooling          *bool                       `json:"disable-cooling"`
+		Cloak                   *config.CloakConfig         `json:"cloak"`
+		ExperimentalCCHSigning  *bool                       `json:"experimental-cch-signing"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -508,8 +531,17 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	}
 
 	entry := h.cfg.ClaudeKey[targetIndex]
+	if body.Value.Name != nil {
+		entry.Name = strings.TrimSpace(*body.Value.Name)
+	}
+	if body.Value.APIKeyEntries != nil {
+		entry.APIKeyEntries = normalizeNativeAPIKeyEntries(*body.Value.APIKeyEntries)
+	}
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
@@ -532,8 +564,22 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	if body.Value.RebuildMidSystemMessage != nil {
 		entry.RebuildMidSystemMessage = *body.Value.RebuildMidSystemMessage
 	}
+	if body.Value.DisableCooling != nil {
+		entry.DisableCooling = *body.Value.DisableCooling
+	}
+	if body.Value.Cloak != nil {
+		cloak := *body.Value.Cloak
+		entry.Cloak = &cloak
+	}
+	if body.Value.ExperimentalCCHSigning != nil {
+		entry.ExperimentalCCHSigning = *body.Value.ExperimentalCCHSigning
+	}
 	normalizeClaudeKey(&entry)
-	h.cfg.ClaudeKey[targetIndex] = entry
+	if len(config.EffectiveNativeAPIKeys(entry.APIKey, entry.Priority, entry.ProxyURL, entry.APIKeyEntries)) == 0 {
+		h.cfg.ClaudeKey = append(h.cfg.ClaudeKey[:targetIndex], h.cfg.ClaudeKey[targetIndex+1:]...)
+	} else {
+		h.cfg.ClaudeKey[targetIndex] = entry
+	}
 	h.cfg.SanitizeClaudeKeys()
 	h.persistLocked(c)
 }
@@ -1124,13 +1170,18 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
-		APIKey         *string              `json:"api-key"`
-		Prefix         *string              `json:"prefix"`
-		BaseURL        *string              `json:"base-url"`
-		ProxyURL       *string              `json:"proxy-url"`
-		Models         *[]config.CodexModel `json:"models"`
-		Headers        *map[string]string   `json:"headers"`
-		ExcludedModels *[]string            `json:"excluded-models"`
+		Name           *string                     `json:"name"`
+		APIKeyEntries  *[]config.NativeAPIKeyEntry `json:"api-key-entries"`
+		APIKey         *string                     `json:"api-key"`
+		Priority       *int                        `json:"priority"`
+		Prefix         *string                     `json:"prefix"`
+		BaseURL        *string                     `json:"base-url"`
+		Websockets     *bool                       `json:"websockets"`
+		ProxyURL       *string                     `json:"proxy-url"`
+		Models         *[]config.CodexModel        `json:"models"`
+		Headers        *map[string]string          `json:"headers"`
+		ExcludedModels *[]string                   `json:"excluded-models"`
+		DisableCooling *bool                       `json:"disable-cooling"`
 	}
 	var body struct {
 		Index *int           `json:"index"`
@@ -1163,8 +1214,17 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	}
 
 	entry := h.cfg.CodexKey[targetIndex]
+	if body.Value.Name != nil {
+		entry.Name = strings.TrimSpace(*body.Value.Name)
+	}
+	if body.Value.APIKeyEntries != nil {
+		entry.APIKeyEntries = normalizeNativeAPIKeyEntries(*body.Value.APIKeyEntries)
+	}
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
@@ -1179,6 +1239,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		}
 		entry.BaseURL = trimmed
 	}
+	if body.Value.Websockets != nil {
+		entry.Websockets = *body.Value.Websockets
+	}
 	if body.Value.ProxyURL != nil {
 		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
 	}
@@ -1191,8 +1254,15 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
 	}
+	if body.Value.DisableCooling != nil {
+		entry.DisableCooling = *body.Value.DisableCooling
+	}
 	normalizeCodexKey(&entry)
-	h.cfg.CodexKey[targetIndex] = entry
+	if len(config.EffectiveNativeAPIKeys(entry.APIKey, entry.Priority, entry.ProxyURL, entry.APIKeyEntries)) == 0 {
+		h.cfg.CodexKey = append(h.cfg.CodexKey[:targetIndex], h.cfg.CodexKey[targetIndex+1:]...)
+	} else {
+		h.cfg.CodexKey[targetIndex] = entry
+	}
 	h.cfg.SanitizeCodexKeys()
 	h.persistLocked(c)
 }
@@ -1457,6 +1527,19 @@ func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) 
 		}
 		normalizeOpenAICompatibilityEntry(&copyEntry)
 		out[i] = copyEntry
+	}
+	return out
+}
+
+func normalizeNativeAPIKeyEntries(entries []config.NativeAPIKeyEntry) []config.NativeAPIKeyEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]config.NativeAPIKeyEntry, len(entries))
+	copy(out, entries)
+	for i := range out {
+		out[i].APIKey = strings.TrimSpace(out[i].APIKey)
+		out[i].ProxyURL = strings.TrimSpace(out[i].ProxyURL)
 	}
 	return out
 }

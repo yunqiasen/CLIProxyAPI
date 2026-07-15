@@ -4,12 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -480,7 +483,7 @@ CREATE TABLE request_log_entries (
 	if err := rows.Err(); err != nil {
 		t.Fatalf("table info rows: %v", err)
 	}
-	for _, column := range []string{"provider", "auth_id", "auth_type", "upstream_url", "upstream_model", "channel_model"} {
+	for _, column := range []string{"provider", "provider_name", "auth_id", "auth_type", "upstream_url", "upstream_model", "channel_model"} {
 		if !columns[column] {
 			t.Fatalf("migrated schema missing column %s", column)
 		}
@@ -581,8 +584,16 @@ func TestExportRequestLogsHonorsPages(t *testing.T) {
 		}
 	}
 
-	h := NewHandlerWithoutConfigFilePath(&config.Config{}, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{RequestLogRetentionDays: 7}, nil)
 	h.SetLogDirectory(logsDir)
+	if err := h.StartRequestLogIndex(); err != nil {
+		t.Fatalf("start request log index: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	manager, _ := h.requestLogIndexSnapshot()
+	waitForRequestLogManager(t, manager, func(status requestLogSyncStatus) bool {
+		return !status.Syncing && !status.LastSyncedAt.IsZero()
+	})
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/request-logs/export?limit=1&pages=2&format=csv", nil)
@@ -597,5 +608,403 @@ func TestExportRequestLogsHonorsPages(t *testing.T) {
 	}
 	if len(records) != 3 {
 		t.Fatalf("csv row count = %d, want header + 2 rows", len(records))
+	}
+}
+
+func TestRequestLogProviderNameParserStoreAndFallback(t *testing.T) {
+	logsDir := t.TempDir()
+	stamp, timestamp := requestLogTestTimestamp(0)
+	writeLog := func(suffix, authLine string) string {
+		t.Helper()
+		path := filepath.Join(logsDir, fmt.Sprintf("v1-responses-%s-%s.log", stamp, suffix))
+		content := strings.Join([]string{
+			"=== REQUEST INFO ===",
+			"Timestamp: " + timestamp,
+			"URL: /v1/responses",
+			"Method: POST",
+			"",
+			"=== REQUEST BODY ===",
+			`{"model":"claude-client","input":"hello"}`,
+			"",
+			"=== API REQUEST 1 ===",
+			"Upstream URL: https://api.anthropic.com/v1/messages",
+			"HTTP Method: POST",
+			"Auth: " + authLine,
+			"",
+			"Body:",
+			`{"model":"claude-upstream","messages":[{"role":"user","content":"hello"}]}`,
+			"",
+			"=== API ERROR RESPONSE 1 ===",
+			"HTTP Status: 500",
+			"",
+			`{"error":{"message":"upstream failed"}}`,
+			"",
+			"=== RESPONSE ===",
+			"Status: 500",
+			"Content-Type: application/json",
+			"",
+			`{"error":{"message":"upstream failed"}}`,
+		}, "\n")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write log: %v", err)
+		}
+		return path
+	}
+
+	namedPath := writeLog("provider-name", "provider=claude, provider_name=relay-a, auth_id=claude:apikey:named, label=relay-a, type=api_key value=sk...named")
+	legacyPath := writeLog("provider-legacy", "provider=claude, auth_id=claude:apikey:legacy, label=claude-apikey, type=api_key value=sk...legacy")
+
+	parse := func(path string) parsedRequestLog {
+		t.Helper()
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat log: %v", err)
+		}
+		parsed, err := parseRequestLogFile(requestLogCandidate{name: filepath.Base(path), path: path, size: info.Size(), modTime: info.ModTime(), logTime: info.ModTime()})
+		if err != nil {
+			t.Fatalf("parse log: %v", err)
+		}
+		return parsed
+	}
+
+	named := parse(namedPath)
+	if named.Provider != "relay-a" || named.ProtocolProvider != "claude" {
+		t.Fatalf("named providers = display:%q protocol:%q", named.Provider, named.ProtocolProvider)
+	}
+	legacy := parse(legacyPath)
+	if legacy.Provider != "claude" || legacy.ProtocolProvider != "claude" {
+		t.Fatalf("legacy providers = display:%q protocol:%q", legacy.Provider, legacy.ProtocolProvider)
+	}
+
+	store, err := openRequestLogStore(logsDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.close()
+	if err := syncRequestLogStore(context.Background(), store, logsDir); err != nil {
+		t.Fatalf("sync store: %v", err)
+	}
+
+	items, total, err := store.list(context.Background(), requestLogQueryOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if total != 2 || len(items) != 2 {
+		t.Fatalf("total/items = %d/%d", total, len(items))
+	}
+	providers := map[string]string{}
+	for _, item := range items {
+		providers[item.AuthID] = item.Provider
+	}
+	if providers["claude:apikey:named"] != "relay-a" || providers["claude:apikey:legacy"] != "claude" {
+		t.Fatalf("list providers = %#v", providers)
+	}
+
+	detail, err := store.detail(context.Background(), named.ID)
+	if err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	if detail.Provider != "relay-a" {
+		t.Fatalf("detail provider = %q, want relay-a", detail.Provider)
+	}
+
+	var exported strings.Builder
+	if err := store.export(context.Background(), &exported, requestLogQueryOptions{Limit: 10}, "csv"); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if !strings.Contains(exported.String(), "relay-a") || !strings.Contains(exported.String(), "claude") {
+		t.Fatalf("export providers missing: %s", exported.String())
+	}
+
+	failures, err := store.failureDetails(context.Background(), "relay-a", 10)
+	if err != nil {
+		t.Fatalf("failure details: %v", err)
+	}
+	if len(failures) != 1 || failures[0].Provider != "relay-a" {
+		t.Fatalf("failure providers = %#v", failures)
+	}
+
+	var protocol, providerName string
+	if err := store.db.QueryRowContext(context.Background(), `SELECT provider, provider_name FROM request_log_entries WHERE auth_id = ?`, "claude:apikey:named").Scan(&protocol, &providerName); err != nil {
+		t.Fatalf("query stored providers: %v", err)
+	}
+	if protocol != "claude" || providerName != "relay-a" {
+		t.Fatalf("stored providers = protocol:%q display:%q", protocol, providerName)
+	}
+}
+
+func TestRequestLogProviderNameMigrationAddsColumnAndCompositeIndexes(t *testing.T) {
+	logsDir := t.TempDir()
+	store, err := openRequestLogStore(logsDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.close()
+
+	rows, err := store.db.QueryContext(context.Background(), `PRAGMA table_info(request_log_entries)`)
+	if err != nil {
+		t.Fatalf("table info: %v", err)
+	}
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatalf("scan table info: %v", err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("close table info: %v", err)
+	}
+	if !columns["provider_name"] {
+		t.Fatal("provider_name column missing")
+	}
+
+	indexRows, err := store.db.QueryContext(context.Background(), `PRAGMA index_list(request_log_entries)`)
+	if err != nil {
+		t.Fatalf("index list: %v", err)
+	}
+	indexes := map[string]bool{}
+	for indexRows.Next() {
+		var seq, unique, partial int
+		var name, origin string
+		if err := indexRows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			t.Fatalf("scan index list: %v", err)
+		}
+		indexes[name] = true
+	}
+	if err := indexRows.Close(); err != nil {
+		t.Fatalf("close index list: %v", err)
+	}
+	for _, name := range []string{"idx_request_log_entries_auth_time", "idx_request_log_entries_provider_time"} {
+		if !indexes[name] {
+			t.Fatalf("index %s missing: %#v", name, indexes)
+		}
+	}
+}
+
+func writeSnapshotRequestLog(t *testing.T, dir, suffix, authID string, timestamp time.Time, status int) string {
+	t.Helper()
+	name := fmt.Sprintf("v1-responses-%s-%s.log", timestamp.Format("2006-01-02T150405"), suffix)
+	path := filepath.Join(dir, name)
+	responseBody := `{"output_text":"ok"}`
+	if status >= 400 {
+		responseBody = fmt.Sprintf(`{"error":{"message":"status %d"}}`, status)
+	}
+	content := strings.Join([]string{
+		"=== REQUEST INFO ===",
+		"Timestamp: " + timestamp.Format(time.RFC3339),
+		"URL: /v1/responses",
+		"Method: POST",
+		"",
+		"=== REQUEST BODY ===",
+		`{"model":"client-model","input":"hello"}`,
+		"",
+		"=== API REQUEST 1 ===",
+		"Upstream URL: https://api.example.com/v1/responses",
+		"HTTP Method: POST",
+		"Auth: provider=claude, provider_name=relay-a, auth_id=" + authID + ", type=api_key",
+		"",
+		"Body:",
+		`{"model":"upstream-model","input":"hello"}`,
+		"",
+		"=== RESPONSE ===",
+		fmt.Sprintf("Status: %d", status),
+		"Content-Type: application/json",
+		"",
+		responseBody,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write snapshot log: %v", err)
+	}
+	return path
+}
+
+func newBlockedSnapshotHandler(t *testing.T, dir string) (*Handler, *requestLogIndexManager, func()) {
+	t.Helper()
+	var block atomic.Bool
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	manager := newTestRequestLogIndexManager(t, dir, requestLogIndexManagerOptions{
+		RetentionDays: func() int { return 7 },
+		ScanHook: func(ctx context.Context) error {
+			if !block.Load() {
+				return nil
+			}
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	})
+	waitForRequestLogManager(t, manager, func(status requestLogSyncStatus) bool {
+		return !status.Syncing && !status.LastSyncedAt.IsZero()
+	})
+	h := NewHandlerWithoutConfigFilePath(&config.Config{RequestLogRetentionDays: 7}, nil)
+	h.SetLogDirectory(dir)
+	h.requestLogIndex = manager
+	startBlocked := func() {
+		block.Store(true)
+		manager.TriggerSync()
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("blocked snapshot scan did not start")
+		}
+	}
+	releaseBlocked := func() {
+		block.Store(false)
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}
+	t.Cleanup(releaseBlocked)
+	return h, manager, func() {
+		startBlocked()
+	}
+}
+
+func TestRequestLogsListSnapshotDoesNotWaitForBlockedScan(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	writeSnapshotRequestLog(t, dir, "baseline", "auth-baseline", time.Now().Add(-time.Minute), 200)
+	h, _, block := newBlockedSnapshotHandler(t, dir)
+	writeSnapshotRequestLog(t, dir, "pending", "auth-pending", time.Now(), 200)
+	block()
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/request-logs?limit=10", nil)
+	started := time.Now()
+	h.GetRequestLogs(ctx)
+	if elapsed := time.Since(started); elapsed > 300*time.Millisecond {
+		t.Fatalf("snapshot list waited %s for blocked scan", elapsed)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Items         []requestLogListItem `json:"items"`
+		Total         int                  `json:"total"`
+		Syncing       bool                 `json:"syncing"`
+		LastSyncedAt  string               `json:"last_synced_at"`
+		LastSyncError string               `json:"last_sync_error"`
+		RetentionDays int                  `json:"retention_days"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if payload.Total != 1 || len(payload.Items) != 1 || !payload.Syncing || payload.LastSyncedAt == "" || payload.RetentionDays != 7 {
+		t.Fatalf("snapshot list payload = %#v", payload)
+	}
+}
+
+func TestRequestLogsFailureSnapshotDoesNotWaitForBlockedScan(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	writeSnapshotRequestLog(t, dir, "baseline-failure001", "auth-baseline", time.Now().Add(-time.Minute), 500)
+	h, _, block := newBlockedSnapshotHandler(t, dir)
+	writeSnapshotRequestLog(t, dir, "pending-failure002", "auth-pending", time.Now(), 500)
+	block()
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/request-logs/failures?provider=relay-a", nil)
+	h.GetRequestLogFailureDetails(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Items   []requestLogFailureDetail `json:"items"`
+		Syncing bool                      `json:"syncing"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode failures: %v", err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].Count != 1 || !payload.Syncing {
+		t.Fatalf("failure snapshot payload = %#v", payload)
+	}
+}
+
+func TestRequestLogsExportSnapshotDoesNotWaitForBlockedScan(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	writeSnapshotRequestLog(t, dir, "baseline-export", "auth-baseline", time.Now().Add(-time.Minute), 200)
+	h, _, block := newBlockedSnapshotHandler(t, dir)
+	writeSnapshotRequestLog(t, dir, "pending-export", "auth-pending", time.Now(), 200)
+	block()
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/request-logs/export?limit=10&format=csv", nil)
+	h.ExportRequestLogs(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	records, err := csv.NewReader(strings.NewReader(rec.Body.String())).ReadAll()
+	if err != nil {
+		t.Fatalf("read export: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("export row count = %d, want header + snapshot row", len(records))
+	}
+	if rec.Header().Get("X-Request-Log-Syncing") != "true" || rec.Header().Get("X-Request-Log-Last-Synced-At") == "" {
+		t.Fatalf("export sync headers = %#v", rec.Header())
+	}
+}
+
+func TestRequestLogDetailBackfillIndexesOnlyRequestedFile(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	manager := newTestRequestLogIndexManager(t, dir, requestLogIndexManagerOptions{RetentionDays: func() int { return 7 }})
+	waitForRequestLogManager(t, manager, func(status requestLogSyncStatus) bool {
+		return !status.Syncing && !status.LastSyncedAt.IsZero()
+	})
+	requestedPath := writeSnapshotRequestLog(t, dir, "requested-detail001", "auth-requested", time.Now().Add(-time.Minute), 200)
+	writeSnapshotRequestLog(t, dir, "unrelated-detail002", "auth-unrelated", time.Now(), 200)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{RequestLogRetentionDays: 7}, nil)
+	h.SetLogDirectory(dir)
+	h.requestLogIndex = manager
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Params = gin.Params{{Key: "id", Value: requestLogIDFromFilename(filepath.Base(requestedPath))}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/request-logs/detail", nil)
+	h.GetRequestLogDetail(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	_, total, err := manager.List(context.Background(), requestLogQueryOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("list after backfill: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("detail backfill indexed %d rows, want only requested file", total)
+	}
+}
+
+func TestParseRequestLogAuthLineDecodesURLFieldsAndKeepsLegacyFormat(t *testing.T) {
+	providerName := "relay,a=b+c%2C d/中文"
+	encoded := "encoding=url, provider=claude, provider_name=" + url.PathEscape(providerName) + ", auth_id=" + url.PathEscape("auth,1") + ", type=api_key%20value=masked"
+	parsed := parseRequestLogAuthLine(encoded)
+	if parsed["provider_name"] != providerName || parsed["auth_id"] != "auth,1" || parsed["type"] != "api_key" {
+		t.Fatalf("parsed URL auth fields = %#v", parsed)
+	}
+
+	legacy := parseRequestLogAuthLine("provider=claude, provider_name=relay-a, auth_id=auth-1, type=api_key value=masked")
+	if legacy["provider_name"] != "relay-a" || legacy["auth_id"] != "auth-1" || legacy["type"] != "api_key" {
+		t.Fatalf("parsed legacy auth fields = %#v", legacy)
 	}
 }

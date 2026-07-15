@@ -283,6 +283,29 @@ func (h *Handler) PutRequestLog(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.RequestLog = v })
 }
 
+// RequestLogRetentionDays
+func (h *Handler) GetRequestLogRetentionDays(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"request-log-retention-days": h.cfg.RequestLogRetentionDays})
+}
+
+func (h *Handler) PutRequestLogRetentionDays(c *gin.Context) {
+	var body struct {
+		Value *int `json:"value"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	if *body.Value < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request-log-retention-days must be greater than or equal to 0"})
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cfg.RequestLogRetentionDays = *body.Value
+	h.persistLocked(c)
+}
+
 // Websocket auth
 func (h *Handler) GetWebsocketAuth(c *gin.Context) {
 	c.JSON(200, gin.H{"ws-auth": h.cfg.WebsocketAuth})

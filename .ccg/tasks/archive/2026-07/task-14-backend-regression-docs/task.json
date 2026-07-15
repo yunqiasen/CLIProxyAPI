@@ -1,0 +1,28 @@
+{
+  "id": "task-14-backend-regression-docs",
+  "title": "Complete backend regression and documentation",
+  "status": "completed",
+  "plan": "docs/superpowers/plans/2026-07-14-native-provider-multikey-request-log.md#task-14-complete-backend-regression-and-documentation",
+  "scope": [
+    "Preserve legacy Claude/Codex/Gemini native Auth IDs",
+    "Add grouped-entry index discriminator only for api-key-entries",
+    "Keep management auth-index generation aligned",
+    "Run backend regression and synchronize configuration and README documentation"
+  ],
+  "constraints": [
+    "TDD",
+    "Do not modify static/management.html",
+    "Independent commits for code fix and documentation"
+  ],
+  "commits": [
+    "8d352e5f",
+    "f207d54d"
+  ],
+  "verification": [
+    "gofmt -w internal cmd sdk test",
+    "go test ./...",
+    "go build -o /tmp/cli-proxy-api-feature-check ./cmd/server",
+    "node test/provider_usage_match_test.mjs",
+    "git diff --check"
+  ]
+}

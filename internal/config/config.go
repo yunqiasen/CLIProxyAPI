@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -69,6 +70,9 @@ type Config struct {
 	// ErrorLogsMaxFiles limits the number of error log files retained when request logging is disabled.
 	// When exceeded, the oldest error log files are deleted. Default is 10. Set to 0 to disable cleanup.
 	ErrorLogsMaxFiles int `yaml:"error-logs-max-files" json:"error-logs-max-files"`
+
+	// RequestLogRetentionDays controls structured request-log retention. Zero keeps entries indefinitely.
+	RequestLogRetentionDays int `yaml:"request-log-retention-days" json:"request-log-retention-days"`
 
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
@@ -441,6 +445,12 @@ type CloakConfig struct {
 // ClaudeKey represents the configuration for a Claude API key,
 // including the API key itself and an optional base URL for the API endpoint.
 type ClaudeKey struct {
+	// Name identifies this provider group in management views and structured logs.
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+
+	// APIKeyEntries defines grouped credentials with per-key routing overrides.
+	APIKeyEntries []NativeAPIKeyEntry `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
+
 	// APIKey is the authentication key for accessing Claude API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
@@ -484,6 +494,9 @@ type ClaudeKey struct {
 
 func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }
 func (k ClaudeKey) GetBaseURL() string { return k.BaseURL }
+func (k ClaudeKey) GetEffectiveAPIKeys() []EffectiveNativeAPIKey {
+	return EffectiveNativeAPIKeys(k.APIKey, k.Priority, k.ProxyURL, k.APIKeyEntries)
+}
 
 // ClaudeModel describes a mapping between an alias and the actual upstream model name.
 type ClaudeModel struct {
@@ -508,6 +521,12 @@ func (m ClaudeModel) GetForceMapping() bool  { return m.ForceMapping }
 // CodexKey represents the configuration for a Codex API key,
 // including the API key itself and an optional base URL for the API endpoint.
 type CodexKey struct {
+	// Name identifies this provider group in management views and structured logs.
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+
+	// APIKeyEntries defines grouped credentials with per-key routing overrides.
+	APIKeyEntries []NativeAPIKeyEntry `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
+
 	// APIKey is the authentication key for accessing Codex API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
@@ -543,6 +562,9 @@ type CodexKey struct {
 
 func (k CodexKey) GetAPIKey() string  { return k.APIKey }
 func (k CodexKey) GetBaseURL() string { return k.BaseURL }
+func (k CodexKey) GetEffectiveAPIKeys() []EffectiveNativeAPIKey {
+	return EffectiveNativeAPIKeys(k.APIKey, k.Priority, k.ProxyURL, k.APIKeyEntries)
+}
 
 // CodexModel describes a mapping between an alias and the actual upstream model name.
 type CodexModel struct {
@@ -573,6 +595,12 @@ type XAIModel = CodexModel
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
 type GeminiKey struct {
+	// Name identifies this provider group in management views and structured logs.
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+
+	// APIKeyEntries defines grouped credentials with per-key routing overrides.
+	APIKeyEntries []NativeAPIKeyEntry `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
+
 	// APIKey is the authentication key for accessing Gemini API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
@@ -604,6 +632,107 @@ type GeminiKey struct {
 
 func (k GeminiKey) GetAPIKey() string  { return k.APIKey }
 func (k GeminiKey) GetBaseURL() string { return k.BaseURL }
+func (k GeminiKey) GetEffectiveAPIKeys() []EffectiveNativeAPIKey {
+	return EffectiveNativeAPIKeys(k.APIKey, k.Priority, k.ProxyURL, k.APIKeyEntries)
+}
+
+// NativeAPIKeyEntry is one credential in a native provider group.
+type NativeAPIKeyEntry struct {
+	APIKey   string `yaml:"api-key" json:"api-key"`
+	Priority *int   `yaml:"priority,omitempty" json:"priority,omitempty"`
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+}
+
+// EffectiveNativeAPIKey contains the resolved per-key routing values used at runtime.
+type EffectiveNativeAPIKey struct {
+	APIKey   string
+	Priority int
+	ProxyURL string
+	Index    int
+}
+
+// EffectiveNativeAPIKeys resolves grouped credentials, falling back to the legacy key.
+func EffectiveNativeAPIKeys(legacyKey string, defaultPriority int, defaultProxy string, entries []NativeAPIKeyEntry) []EffectiveNativeAPIKey {
+	out := make([]EffectiveNativeAPIKey, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	defaultProxy = strings.TrimSpace(defaultProxy)
+	for index := range entries {
+		key := strings.TrimSpace(entries[index].APIKey)
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		priority := defaultPriority
+		if entries[index].Priority != nil {
+			priority = *entries[index].Priority
+		}
+		proxyURL := strings.TrimSpace(entries[index].ProxyURL)
+		if proxyURL == "" {
+			proxyURL = defaultProxy
+		}
+		out = append(out, EffectiveNativeAPIKey{APIKey: key, Priority: priority, ProxyURL: proxyURL, Index: index})
+	}
+	if len(out) > 0 {
+		return out
+	}
+	legacyKey = strings.TrimSpace(legacyKey)
+	if legacyKey == "" {
+		return nil
+	}
+	return []EffectiveNativeAPIKey{{APIKey: legacyKey, Priority: defaultPriority, ProxyURL: defaultProxy, Index: -1}}
+}
+
+// NativeAPIKeyConfigEntry exposes the shared identity fields of grouped native providers.
+type NativeAPIKeyConfigEntry interface {
+	GetBaseURL() string
+	GetEffectiveAPIKeys() []EffectiveNativeAPIKey
+}
+
+// ResolveNativeAPIKeyConfig finds a native provider group and its matching effective key.
+func ResolveNativeAPIKeyConfig[T NativeAPIKeyConfigEntry](entries []T, apiKey, baseURL string) (*T, *EffectiveNativeAPIKey) {
+	apiKey = strings.TrimSpace(apiKey)
+	baseURL = strings.TrimSpace(baseURL)
+	for i := range entries {
+		entry := &entries[i]
+		entryBaseURL := strings.TrimSpace((*entry).GetBaseURL())
+		effectiveKeys := (*entry).GetEffectiveAPIKeys()
+		if apiKey != "" {
+			for keyIndex := range effectiveKeys {
+				if !strings.EqualFold(effectiveKeys[keyIndex].APIKey, apiKey) {
+					continue
+				}
+				if baseURL != "" {
+					if strings.EqualFold(entryBaseURL, baseURL) {
+						return entry, &effectiveKeys[keyIndex]
+					}
+					continue
+				}
+				if entryBaseURL == "" {
+					return entry, &effectiveKeys[keyIndex]
+				}
+			}
+			continue
+		}
+		if baseURL != "" && strings.EqualFold(entryBaseURL, baseURL) && len(effectiveKeys) > 0 {
+			return entry, &effectiveKeys[0]
+		}
+	}
+	if apiKey != "" {
+		for i := range entries {
+			entry := &entries[i]
+			effectiveKeys := (*entry).GetEffectiveAPIKeys()
+			for keyIndex := range effectiveKeys {
+				if strings.EqualFold(effectiveKeys[keyIndex].APIKey, apiKey) {
+					return entry, &effectiveKeys[keyIndex]
+				}
+			}
+		}
+	}
+	return nil, nil
+}
 
 // GeminiModel describes a mapping between an alias and the actual upstream model name.
 type GeminiModel struct {
@@ -747,6 +876,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LoggingToFile = false
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
+	cfg.RequestLogRetentionDays = 7
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
@@ -797,6 +927,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.ErrorLogsMaxFiles < 0 {
 		cfg.ErrorLogsMaxFiles = 10
+	}
+
+	if cfg.RequestLogRetentionDays < 0 {
+		cfg.RequestLogRetentionDays = 7
 	}
 
 	if cfg.RedisUsageQueueRetentionSeconds <= 0 {
@@ -1033,14 +1167,14 @@ func (cfg *Config) SanitizeXAIKeys() {
 	if cfg == nil {
 		return
 	}
-	cfg.XAIKey = sanitizeCodexKeyEntries(cfg.XAIKey)
+	cfg.XAIKey = sanitizeXAIKeyEntries(cfg.XAIKey)
 }
 
-func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
+func sanitizeXAIKeyEntries(entries []XAIKey) []XAIKey {
 	if len(entries) == 0 {
 		return entries
 	}
-	out := make([]CodexKey, 0, len(entries))
+	out := make([]XAIKey, 0, len(entries))
 	for i := range entries {
 		e := entries[i]
 		e.Prefix = normalizeModelPrefix(e.Prefix)
@@ -1055,6 +1189,29 @@ func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 	return out
 }
 
+func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
+	if len(entries) == 0 {
+		return entries
+	}
+	out := make([]CodexKey, 0, len(entries))
+	for i := range entries {
+		e := entries[i]
+		e.Name = strings.TrimSpace(e.Name)
+		e.APIKey = strings.TrimSpace(e.APIKey)
+		e.APIKeyEntries = sanitizeNativeAPIKeyEntries(e.APIKeyEntries)
+		e.Prefix = normalizeModelPrefix(e.Prefix)
+		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.ProxyURL = strings.TrimSpace(e.ProxyURL)
+		e.Headers = NormalizeHeaders(e.Headers)
+		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
+		if e.BaseURL == "" || len(EffectiveNativeAPIKeys(e.APIKey, e.Priority, e.ProxyURL, e.APIKeyEntries)) == 0 {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 // SanitizeClaudeKeys normalizes headers for Claude credentials.
 func (cfg *Config) SanitizeClaudeKeys() {
 	if cfg == nil || len(cfg.ClaudeKey) == 0 {
@@ -1062,27 +1219,66 @@ func (cfg *Config) SanitizeClaudeKeys() {
 	}
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
+		entry.Name = strings.TrimSpace(entry.Name)
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.APIKeyEntries = sanitizeNativeAPIKeyEntries(entry.APIKeyEntries)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 	}
 }
 
-func sanitizeGeminiKeyEntries(entries []GeminiKey) []GeminiKey {
+func sanitizeNativeAPIKeyEntries(entries []NativeAPIKeyEntry) []NativeAPIKeyEntry {
+	if len(entries) == 0 {
+		return entries
+	}
 	seen := make(map[string]struct{}, len(entries))
-	out := entries[:0]
-	for i := range entries {
-		entry := entries[i]
+	out := make([]NativeAPIKeyEntry, 0, len(entries))
+	for index := range entries {
+		entry := entries[index]
 		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		if entry.APIKey == "" {
 			continue
 		}
+		if _, exists := seen[entry.APIKey]; exists {
+			continue
+		}
+		seen[entry.APIKey] = struct{}{}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func sanitizeGeminiKeyEntries(entries []GeminiKey) []GeminiKey {
+	seen := make(map[string]struct{}, len(entries))
+	out := make([]GeminiKey, 0, len(entries))
+	for i := range entries {
+		entry := entries[i]
+		entry.Name = strings.TrimSpace(entry.Name)
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.APIKeyEntries = sanitizeNativeAPIKeyEntries(entry.APIKeyEntries)
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
-		uniqueKey := entry.APIKey + "|" + entry.BaseURL
+		effective := EffectiveNativeAPIKeys(entry.APIKey, entry.Priority, entry.ProxyURL, entry.APIKeyEntries)
+		if len(effective) == 0 {
+			continue
+		}
+		keys := make([]string, 0, len(effective))
+		for keyIndex := range effective {
+			keys = append(keys, effective[keyIndex].APIKey)
+		}
+		sort.Strings(keys)
+		identity, _ := json.Marshal(struct {
+			BaseURL string   `json:"base_url"`
+			APIKeys []string `json:"api_keys"`
+		}{BaseURL: entry.BaseURL, APIKeys: keys})
+		uniqueKey := string(identity)
 		if _, exists := seen[uniqueKey]; exists {
 			continue
 		}

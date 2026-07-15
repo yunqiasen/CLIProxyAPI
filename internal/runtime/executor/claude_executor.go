@@ -296,15 +296,16 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		authType, authValue = auth.AccountInfo()
 	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      bodyForUpstream,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
+		URL:          url,
+		Method:       http.MethodPost,
+		Headers:      httpReq.Header.Clone(),
+		Body:         bodyForUpstream,
+		Provider:     e.Identifier(),
+		AuthID:       authID,
+		AuthLabel:    authLabel,
+		ProviderName: helps.RequestLogProviderName(auth),
+		AuthType:     authType,
+		AuthValue:    authValue,
 	})
 
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
@@ -485,15 +486,16 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		authType, authValue = auth.AccountInfo()
 	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      bodyForUpstream,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
+		URL:          url,
+		Method:       http.MethodPost,
+		Headers:      httpReq.Header.Clone(),
+		Body:         bodyForUpstream,
+		Provider:     e.Identifier(),
+		AuthID:       authID,
+		AuthLabel:    authLabel,
+		ProviderName: helps.RequestLogProviderName(auth),
+		AuthType:     authType,
+		AuthValue:    authValue,
 	})
 
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
@@ -741,15 +743,16 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		authType, authValue = auth.AccountInfo()
 	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
+		URL:          url,
+		Method:       http.MethodPost,
+		Headers:      httpReq.Header.Clone(),
+		Body:         body,
+		Provider:     e.Identifier(),
+		AuthID:       authID,
+		AuthLabel:    authLabel,
+		ProviderName: helps.RequestLogProviderName(auth),
+		AuthType:     authType,
+		AuthValue:    authValue,
 	})
 
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)

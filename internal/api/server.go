@@ -364,6 +364,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 	logDir := logging.ResolveLogDirectory(cfg)
 	s.mgmt.SetLogDirectory(logDir)
+	if errStartIndex := s.mgmt.StartRequestLogIndex(); errStartIndex != nil {
+		log.WithError(errStartIndex).Warn("failed to start request log index; file fallback remains available")
+	}
 	if optionState.postAuthHook != nil {
 		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
 	}
@@ -891,6 +894,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/request-log", s.mgmt.GetRequestLog)
 		mgmt.PUT("/request-log", s.mgmt.PutRequestLog)
 		mgmt.PATCH("/request-log", s.mgmt.PutRequestLog)
+		mgmt.GET("/request-log-retention-days", s.mgmt.GetRequestLogRetentionDays)
+		mgmt.PUT("/request-log-retention-days", s.mgmt.PutRequestLogRetentionDays)
 		mgmt.GET("/ws-auth", s.mgmt.GetWebsocketAuth)
 		mgmt.PUT("/ws-auth", s.mgmt.PutWebsocketAuth)
 		mgmt.PATCH("/ws-auth", s.mgmt.PutWebsocketAuth)
@@ -1775,8 +1780,16 @@ func (s *Server) Stop(ctx context.Context) error {
 	}
 
 	// Shutdown the HTTP server.
-	if err := s.server.Shutdown(ctx); err != nil {
-		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
+	errShutdown := s.server.Shutdown(ctx)
+	var errManagement error
+	if s.mgmt != nil {
+		errManagement = s.mgmt.Close()
+	}
+	if errShutdown != nil {
+		return fmt.Errorf("failed to shutdown HTTP server: %v", errShutdown)
+	}
+	if errManagement != nil {
+		return fmt.Errorf("failed to close management handler: %v", errManagement)
 	}
 
 	log.Debug("API server stopped")

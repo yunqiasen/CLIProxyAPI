@@ -10,15 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
 const requestLogDBFilename = "request_logs.db"
-
-var requestLogStoreMu sync.Mutex
 
 type requestLogStore struct {
 	path string
@@ -43,8 +40,8 @@ func openRequestLogStore(logDir string) (*requestLogStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 	store := &requestLogStore{path: path, db: db}
 	if err := store.ensureSchema(context.Background()); err != nil {
 		_ = db.Close()
@@ -53,10 +50,11 @@ func openRequestLogStore(logDir string) (*requestLogStore, error) {
 	return store, nil
 }
 
-func (s *requestLogStore) close() {
+func (s *requestLogStore) close() error {
 	if s != nil && s.db != nil {
-		_ = s.db.Close()
+		return s.db.Close()
 	}
+	return nil
 }
 
 func (s *requestLogStore) ensureSchema(ctx context.Context) error {
@@ -75,6 +73,7 @@ CREATE TABLE IF NOT EXISTS request_log_entries (
   method TEXT,
   model TEXT,
   provider TEXT,
+  provider_name TEXT,
   auth_id TEXT,
   auth_type TEXT,
   upstream_url TEXT,
@@ -139,7 +138,7 @@ func (s *requestLogStore) ensureSchemaColumns(ctx context.Context) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	columns := []string{"provider", "auth_id", "auth_type", "upstream_url", "upstream_model", "channel_model"}
+	columns := []string{"provider", "provider_name", "auth_id", "auth_type", "upstream_url", "upstream_model", "channel_model"}
 	for _, column := range columns {
 		if _, ok := existing[column]; ok {
 			continue
@@ -151,6 +150,8 @@ func (s *requestLogStore) ensureSchemaColumns(ctx context.Context) error {
 	_, err = s.db.ExecContext(ctx, `
 CREATE INDEX IF NOT EXISTS idx_request_log_entries_provider ON request_log_entries(provider);
 CREATE INDEX IF NOT EXISTS idx_request_log_entries_upstream_model ON request_log_entries(upstream_model);
+CREATE INDEX IF NOT EXISTS idx_request_log_entries_auth_time ON request_log_entries(auth_id, timestamp_unix DESC);
+CREATE INDEX IF NOT EXISTS idx_request_log_entries_provider_time ON request_log_entries(provider, timestamp_unix DESC);
 `)
 	return err
 }
@@ -160,7 +161,15 @@ func (s *requestLogStore) pruneBefore(ctx context.Context, cutoff time.Time) err
 	return err
 }
 
+type requestLogExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 func (s *requestLogStore) upsertParsed(ctx context.Context, parsed parsedRequestLog, candidate requestLogCandidate) error {
+	return upsertParsedWithExecer(ctx, s.db, parsed, candidate)
+}
+
+func upsertParsedWithExecer(ctx context.Context, execer requestLogExecer, parsed parsedRequestLog, candidate requestLogCandidate) error {
 	now := time.Now().Unix()
 	item := parsed.requestLogListItem
 	availableTools, _ := json.Marshal(parsed.promptMetadata.AvailableTools)
@@ -171,15 +180,23 @@ func (s *requestLogStore) upsertParsed(ctx context.Context, parsed parsedRequest
 	requestMetadata, _ := json.Marshal(parsed.requestMetadata)
 	success := boolInt(item.Success)
 	hasError := boolInt(item.HasError)
-	_, err := s.db.ExecContext(ctx, `
+	protocolProvider := strings.TrimSpace(item.ProtocolProvider)
+	if protocolProvider == "" {
+		protocolProvider = strings.TrimSpace(item.Provider)
+	}
+	providerName := ""
+	if strings.TrimSpace(item.Provider) != "" && !strings.EqualFold(strings.TrimSpace(item.Provider), protocolProvider) {
+		providerName = strings.TrimSpace(item.Provider)
+	}
+	_, err := execer.ExecContext(ctx, `
 INSERT INTO request_log_entries (
   id, name, raw_log_path, size, modified, timestamp_text, timestamp_unix,
-  url, method, model, provider, auth_id, auth_type, upstream_url, upstream_model, channel_model, ip, ip_location, status, success,
+  url, method, model, provider, provider_name, auth_id, auth_type, upstream_url, upstream_model, channel_model, ip, ip_location, status, success,
   prompt, output, error, system_prompt,
   available_tools_json, mcps_json, skills_json, called_tools_json, prompt_metadata_json, request_metadata_json,
   prompt_preview, output_preview, error_preview, tool_preview, system_prompt_preview, called_tools_preview,
   session_id, thread_id, turn_id, has_error, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   name=excluded.name,
   raw_log_path=excluded.raw_log_path,
@@ -191,6 +208,7 @@ ON CONFLICT(id) DO UPDATE SET
   method=excluded.method,
   model=excluded.model,
   provider=excluded.provider,
+  provider_name=excluded.provider_name,
   auth_id=excluded.auth_id,
   auth_type=excluded.auth_type,
   upstream_url=excluded.upstream_url,
@@ -221,8 +239,62 @@ ON CONFLICT(id) DO UPDATE SET
   turn_id=excluded.turn_id,
   has_error=excluded.has_error,
   updated_at=excluded.updated_at
-	`, item.ID, item.Name, candidate.path, item.Size, item.Modified, item.Timestamp, candidate.logTime.Unix(), item.URL, item.Method, item.Model, item.Provider, item.AuthID, item.AuthType, item.UpstreamURL, item.UpstreamModel, item.ChannelModel, item.IP, item.IPLocation, item.Status, success, parsed.prompt, parsed.output, parsed.error, parsed.promptMetadata.SystemPrompt, string(availableTools), string(mcps), string(skills), string(calledTools), string(promptMetadata), string(requestMetadata), item.PromptPreview, item.OutputPreview, item.ErrorPreview, item.ToolPreview, item.SystemPromptPreview, item.CalledToolsPreview, item.SessionID, item.ThreadID, item.TurnID, hasError, now, now)
+	`, item.ID, item.Name, candidate.path, item.Size, item.Modified, item.Timestamp, candidate.logTime.Unix(), item.URL, item.Method, item.Model, protocolProvider, providerName, item.AuthID, item.AuthType, item.UpstreamURL, item.UpstreamModel, item.ChannelModel, item.IP, item.IPLocation, item.Status, success, parsed.prompt, parsed.output, parsed.error, parsed.promptMetadata.SystemPrompt, string(availableTools), string(mcps), string(skills), string(calledTools), string(promptMetadata), string(requestMetadata), item.PromptPreview, item.OutputPreview, item.ErrorPreview, item.ToolPreview, item.SystemPromptPreview, item.CalledToolsPreview, item.SessionID, item.ThreadID, item.TurnID, hasError, now, now)
 	return err
+}
+
+func (s *requestLogStore) upsertParsedBatch(ctx context.Context, batch []parsedRequestLogCandidate) error {
+	if len(batch) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, item := range batch {
+		if err := upsertParsedWithExecer(ctx, tx, item.parsed, item.candidate); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *requestLogStore) compactSyncStates(ctx context.Context) (map[string]requestLogSyncState, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, size, modified FROM request_log_entries`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	states := make(map[string]requestLogSyncState)
+	for rows.Next() {
+		var id string
+		var size, modified int64
+		if err := rows.Scan(&id, &size, &modified); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(id) != "" {
+			states[id] = requestLogSyncState{size: size, modified: modified}
+		}
+	}
+	return states, rows.Err()
+}
+
+func (s *requestLogStore) deleteIDs(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM request_log_entries WHERE id = ?`, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func syncRequestLogStore(ctx context.Context, store *requestLogStore, dir string) error {
@@ -255,7 +327,7 @@ func syncRequestLogStore(ctx context.Context, store *requestLogStore, dir string
 }
 
 func (s *requestLogStore) syncStates(ctx context.Context) (map[string]requestLogSyncState, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, size, modified, timestamp_text, url, method, model, provider, auth_id, auth_type, upstream_url, upstream_model, channel_model, ip, ip_location, status, success, prompt_preview, output_preview, error_preview, tool_preview, system_prompt_preview, called_tools_preview, session_id, thread_id, turn_id, has_error FROM request_log_entries`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, size, modified, timestamp_text, url, method, model, provider, provider_name, auth_id, auth_type, upstream_url, upstream_model, channel_model, ip, ip_location, status, success, prompt_preview, output_preview, error_preview, tool_preview, system_prompt_preview, called_tools_preview, session_id, thread_id, turn_id, has_error FROM request_log_entries`)
 	if err != nil {
 		return nil, err
 	}
@@ -265,10 +337,10 @@ func (s *requestLogStore) syncStates(ctx context.Context) (map[string]requestLog
 	for rows.Next() {
 		var id sql.NullString
 		var size, modified, status, success, hasError sql.NullInt64
-		var timestampText, url, method, model, provider, authID, authType, upstreamURL, upstreamModel, channelModel, ip, ipLocation sql.NullString
+		var timestampText, url, method, model, provider, providerName, authID, authType, upstreamURL, upstreamModel, channelModel, ip, ipLocation sql.NullString
 		var promptPreview, outputPreview, errorPreview, toolPreview, systemPromptPreview, calledToolsPreview sql.NullString
 		var sessionID, threadID, turnID sql.NullString
-		if err := rows.Scan(&id, &size, &modified, &timestampText, &url, &method, &model, &provider, &authID, &authType, &upstreamURL, &upstreamModel, &channelModel, &ip, &ipLocation, &status, &success, &promptPreview, &outputPreview, &errorPreview, &toolPreview, &systemPromptPreview, &calledToolsPreview, &sessionID, &threadID, &turnID, &hasError); err != nil {
+		if err := rows.Scan(&id, &size, &modified, &timestampText, &url, &method, &model, &provider, &providerName, &authID, &authType, &upstreamURL, &upstreamModel, &channelModel, &ip, &ipLocation, &status, &success, &promptPreview, &outputPreview, &errorPreview, &toolPreview, &systemPromptPreview, &calledToolsPreview, &sessionID, &threadID, &turnID, &hasError); err != nil {
 			return nil, err
 		}
 		if !id.Valid || strings.TrimSpace(id.String) == "" {
@@ -296,7 +368,7 @@ func (s *requestLogStore) list(ctx context.Context, opts requestLogQueryOptions)
 	}
 	queryArgs := append([]any{}, args...)
 	queryArgs = append(queryArgs, opts.Limit, opts.Offset)
-	rows, err := s.db.QueryContext(ctx, `SELECT COALESCE(id, ''), COALESCE(name, ''), COALESCE(size, 0), COALESCE(modified, 0), COALESCE(timestamp_text, ''), COALESCE(url, ''), COALESCE(method, ''), COALESCE(model, ''), COALESCE(provider, ''), COALESCE(auth_id, ''), COALESCE(auth_type, ''), COALESCE(upstream_url, ''), COALESCE(upstream_model, ''), COALESCE(channel_model, ''), COALESCE(ip, ''), COALESCE(ip_location, ''), COALESCE(status, 0), COALESCE(success, 0), COALESCE(prompt_preview, ''), COALESCE(output_preview, ''), COALESCE(error_preview, ''), COALESCE(tool_preview, ''), COALESCE(system_prompt_preview, ''), COALESCE(called_tools_preview, ''), COALESCE(session_id, ''), COALESCE(thread_id, ''), COALESCE(turn_id, ''), COALESCE(has_error, 0) FROM request_log_entries`+where+` ORDER BY timestamp_unix DESC, name DESC LIMIT ? OFFSET ?`, queryArgs...)
+	rows, err := s.db.QueryContext(ctx, `SELECT COALESCE(id, ''), COALESCE(name, ''), COALESCE(size, 0), COALESCE(modified, 0), COALESCE(timestamp_text, ''), COALESCE(url, ''), COALESCE(method, ''), COALESCE(model, ''), COALESCE(NULLIF(TRIM(provider_name), ''), COALESCE(provider, '')), COALESCE(auth_id, ''), COALESCE(auth_type, ''), COALESCE(upstream_url, ''), COALESCE(upstream_model, ''), COALESCE(channel_model, ''), COALESCE(ip, ''), COALESCE(ip_location, ''), COALESCE(status, 0), COALESCE(success, 0), COALESCE(prompt_preview, ''), COALESCE(output_preview, ''), COALESCE(error_preview, ''), COALESCE(tool_preview, ''), COALESCE(system_prompt_preview, ''), COALESCE(called_tools_preview, ''), COALESCE(session_id, ''), COALESCE(thread_id, ''), COALESCE(turn_id, ''), COALESCE(has_error, 0) FROM request_log_entries`+where+` ORDER BY timestamp_unix DESC, name DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -316,7 +388,13 @@ func (s *requestLogStore) list(ctx context.Context, opts requestLogQueryOptions)
 }
 
 func (s *requestLogStore) detail(ctx context.Context, id string) (requestLogDetail, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT COALESCE(id, ''), COALESCE(name, ''), COALESCE(size, 0), COALESCE(modified, 0), COALESCE(timestamp_text, ''), COALESCE(url, ''), COALESCE(method, ''), COALESCE(model, ''), COALESCE(provider, ''), COALESCE(auth_id, ''), COALESCE(auth_type, ''), COALESCE(upstream_url, ''), COALESCE(upstream_model, ''), COALESCE(channel_model, ''), COALESCE(ip, ''), COALESCE(ip_location, ''), COALESCE(status, 0), COALESCE(success, 0), COALESCE(prompt_preview, ''), COALESCE(output_preview, ''), COALESCE(error_preview, ''), COALESCE(tool_preview, ''), COALESCE(system_prompt_preview, ''), COALESCE(called_tools_preview, ''), COALESCE(session_id, ''), COALESCE(thread_id, ''), COALESCE(turn_id, ''), COALESCE(has_error, 0), COALESCE(prompt, ''), COALESCE(output, ''), COALESCE(error, ''), COALESCE(system_prompt, ''), COALESCE(available_tools_json, '[]'), COALESCE(mcps_json, '[]'), COALESCE(skills_json, '[]'), COALESCE(called_tools_json, '[]'), COALESCE(prompt_metadata_json, '{}'), COALESCE(request_metadata_json, '{}') FROM request_log_entries WHERE id = ?`, id)
+	return s.detailWithCutoff(ctx, id, nil)
+}
+
+func (s *requestLogStore) detailWithCutoff(ctx context.Context, id string, cutoff *int64) (requestLogDetail, error) {
+	cutoffSQL, cutoffArgs := requestLogCutoffSQL(cutoff)
+	args := append([]any{id}, cutoffArgs...)
+	row := s.db.QueryRowContext(ctx, `SELECT COALESCE(id, ''), COALESCE(name, ''), COALESCE(size, 0), COALESCE(modified, 0), COALESCE(timestamp_text, ''), COALESCE(url, ''), COALESCE(method, ''), COALESCE(model, ''), COALESCE(NULLIF(TRIM(provider_name), ''), COALESCE(provider, '')), COALESCE(auth_id, ''), COALESCE(auth_type, ''), COALESCE(upstream_url, ''), COALESCE(upstream_model, ''), COALESCE(channel_model, ''), COALESCE(ip, ''), COALESCE(ip_location, ''), COALESCE(status, 0), COALESCE(success, 0), COALESCE(prompt_preview, ''), COALESCE(output_preview, ''), COALESCE(error_preview, ''), COALESCE(tool_preview, ''), COALESCE(system_prompt_preview, ''), COALESCE(called_tools_preview, ''), COALESCE(session_id, ''), COALESCE(thread_id, ''), COALESCE(turn_id, ''), COALESCE(has_error, 0), COALESCE(prompt, ''), COALESCE(output, ''), COALESCE(error, ''), COALESCE(system_prompt, ''), COALESCE(available_tools_json, '[]'), COALESCE(mcps_json, '[]'), COALESCE(skills_json, '[]'), COALESCE(called_tools_json, '[]'), COALESCE(prompt_metadata_json, '{}'), COALESCE(request_metadata_json, '{}') FROM request_log_entries WHERE id = ?`+cutoffSQL, args...)
 	var detail requestLogDetail
 	var success, hasError int
 	var availableToolsJSON, mcpsJSON, skillsJSON, calledToolsJSON, promptMetadataJSON, requestMetadataJSON string
@@ -338,7 +416,7 @@ func (s *requestLogStore) export(ctx context.Context, w io.Writer, opts requestL
 	where, args := requestLogWhereClause(opts.Query)
 	queryArgs := append([]any{}, args...)
 	queryArgs = append(queryArgs, opts.Limit, opts.Offset)
-	rows, err := s.db.QueryContext(ctx, `SELECT COALESCE(id, ''), COALESCE(timestamp_text, ''), COALESCE(url, ''), COALESCE(method, ''), COALESCE(model, ''), COALESCE(provider, ''), COALESCE(upstream_url, ''), COALESCE(upstream_model, ''), COALESCE(channel_model, ''), COALESCE(ip, ''), COALESCE(ip_location, ''), COALESCE(status, 0), COALESCE(success, 0), COALESCE(prompt, ''), COALESCE(output, ''), COALESCE(error, ''), COALESCE(system_prompt, ''), COALESCE(called_tools_preview, ''), COALESCE(session_id, ''), COALESCE(thread_id, ''), COALESCE(turn_id, '') FROM request_log_entries`+where+` ORDER BY timestamp_unix DESC, name DESC LIMIT ? OFFSET ?`, queryArgs...)
+	rows, err := s.db.QueryContext(ctx, `SELECT COALESCE(id, ''), COALESCE(timestamp_text, ''), COALESCE(url, ''), COALESCE(method, ''), COALESCE(model, ''), COALESCE(NULLIF(TRIM(provider_name), ''), COALESCE(provider, '')), COALESCE(upstream_url, ''), COALESCE(upstream_model, ''), COALESCE(channel_model, ''), COALESCE(ip, ''), COALESCE(ip_location, ''), COALESCE(status, 0), COALESCE(success, 0), COALESCE(prompt, ''), COALESCE(output, ''), COALESCE(error, ''), COALESCE(system_prompt, ''), COALESCE(called_tools_preview, ''), COALESCE(session_id, ''), COALESCE(thread_id, ''), COALESCE(turn_id, '') FROM request_log_entries`+where+` ORDER BY timestamp_unix DESC, name DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		return err
 	}
@@ -384,19 +462,19 @@ func (s *requestLogStore) failureDetails(ctx context.Context, provider string, l
 	where := ` WHERE (COALESCE(success, 0) = 0 OR COALESCE(has_error, 0) != 0) AND TRIM(COALESCE(error_preview, error, '')) != ''`
 	args := []any{}
 	if provider != "" {
-		where += ` AND lower(COALESCE(provider, '')) LIKE ?`
+		where += ` AND lower(COALESCE(NULLIF(TRIM(provider_name), ''), COALESCE(provider, ''))) LIKE ?`
 		args = append(args, "%"+provider+"%")
 	}
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `
 SELECT
-  COALESCE(NULLIF(TRIM(provider), ''), 'unknown') AS provider_name,
+  COALESCE(NULLIF(TRIM(provider_name), ''), NULLIF(TRIM(provider), ''), 'unknown') AS provider_display_name,
   COALESCE(NULLIF(TRIM(upstream_model), ''), NULLIF(TRIM(model), ''), 'unknown') AS model_name,
   COALESCE(NULLIF(TRIM(error_preview), ''), NULLIF(TRIM(error), ''), 'unknown') AS error_text,
   COUNT(1) AS failure_count
 FROM request_log_entries`+where+`
-GROUP BY provider_name, model_name, error_text
-ORDER BY failure_count DESC, provider_name ASC, model_name ASC
+GROUP BY provider_display_name, model_name, error_text
+ORDER BY failure_count DESC, provider_display_name ASC, model_name ASC
 LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
@@ -442,6 +520,7 @@ func requestLogWhereClause(query string) (string, []any) {
 		"method",
 		"model",
 		"provider",
+		"provider_name",
 		"auth_id",
 		"auth_type",
 		"upstream_url",

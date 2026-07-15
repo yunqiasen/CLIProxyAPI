@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -991,5 +992,19 @@ func TestRequestLogDetailBackfillIndexesOnlyRequestedFile(t *testing.T) {
 	}
 	if total != 1 {
 		t.Fatalf("detail backfill indexed %d rows, want only requested file", total)
+	}
+}
+
+func TestParseRequestLogAuthLineDecodesURLFieldsAndKeepsLegacyFormat(t *testing.T) {
+	providerName := "relay,a=b+c%2C d/中文"
+	encoded := "encoding=url, provider=claude, provider_name=" + url.PathEscape(providerName) + ", auth_id=" + url.PathEscape("auth,1") + ", type=api_key%20value=masked"
+	parsed := parseRequestLogAuthLine(encoded)
+	if parsed["provider_name"] != providerName || parsed["auth_id"] != "auth,1" || parsed["type"] != "api_key" {
+		t.Fatalf("parsed URL auth fields = %#v", parsed)
+	}
+
+	legacy := parseRequestLogAuthLine("provider=claude, provider_name=relay-a, auth_id=auth-1, type=api_key value=masked")
+	if legacy["provider_name"] != "relay-a" || legacy["auth_id"] != "auth-1" || legacy["type"] != "api_key" {
+		t.Fatalf("parsed legacy auth fields = %#v", legacy)
 	}
 }

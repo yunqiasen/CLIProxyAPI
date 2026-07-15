@@ -1019,12 +1019,24 @@ func parseRequestLogAuthLine(line string) map[string]string {
 		}
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
-		if key == "type" {
-			value = strings.TrimSpace(strings.Split(value, " ")[0])
-		}
 		if key != "" && value != "" {
 			out[key] = value
 		}
+	}
+	if strings.EqualFold(out["encoding"], "url") {
+		for key, value := range out {
+			if key == "encoding" {
+				continue
+			}
+			decoded, errDecode := url.PathUnescape(value)
+			if errDecode == nil {
+				out[key] = decoded
+			}
+		}
+		delete(out, "encoding")
+	}
+	if value := out["type"]; value != "" {
+		out["type"] = strings.TrimSpace(strings.Split(value, " ")[0])
 	}
 	return out
 }

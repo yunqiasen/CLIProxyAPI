@@ -222,3 +222,45 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
 	}
 }
+
+func TestProxyURLFromAPIKeyConfigResolvesGroupedNativeKeys(t *testing.T) {
+	baseURL := "https://native.example/v1"
+	cfg := &config.Config{
+		GeminiKey: []config.GeminiKey{{
+			BaseURL: baseURL, ProxyURL: "http://gemini-group.example:8080",
+			APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: "gemini-key", ProxyURL: "http://gemini-key.example:8080"}},
+		}},
+		InteractionsKey: []config.GeminiKey{{
+			BaseURL: baseURL, ProxyURL: "http://interactions-group.example:8080",
+			APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: "interactions-key", ProxyURL: "http://interactions-key.example:8080"}},
+		}},
+		ClaudeKey: []config.ClaudeKey{{
+			BaseURL: baseURL, ProxyURL: "http://claude-group.example:8080",
+			APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: "claude-key", ProxyURL: "http://claude-key.example:8080"}},
+		}},
+		CodexKey: []config.CodexKey{{
+			BaseURL: baseURL, ProxyURL: "http://codex-group.example:8080",
+			APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: "codex-key", ProxyURL: "http://codex-key.example:8080"}},
+		}},
+	}
+
+	tests := []struct {
+		provider string
+		key      string
+		want     string
+	}{
+		{provider: "gemini", key: "gemini-key", want: "http://gemini-key.example:8080"},
+		{provider: "gemini-interactions", key: "interactions-key", want: "http://interactions-key.example:8080"},
+		{provider: "claude", key: "claude-key", want: "http://claude-key.example:8080"},
+		{provider: "codex", key: "codex-key", want: "http://codex-key.example:8080"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			auth := &coreauth.Auth{Provider: tt.provider, Attributes: map[string]string{"api_key": tt.key, "base_url": baseURL}}
+			if got := proxyURLFromAPIKeyConfig(cfg, auth); got != tt.want {
+				t.Fatalf("proxyURLFromAPIKeyConfig() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

@@ -60,3 +60,14 @@ func TestRequestLogProviderNamePrefersAttributeAndSkipsGenericNativeLabel(t *tes
 		t.Fatalf("formatted auth metadata = %q", line)
 	}
 }
+
+func TestFormatAuthInfoURLEncodesDelimitedFields(t *testing.T) {
+	providerName := "relay,a=b+c%2C d/中文"
+	line := formatAuthInfo(UpstreamRequestLog{Provider: "claude", ProviderName: providerName, AuthID: "auth,1", AuthType: "api_key"})
+	if !strings.Contains(line, "encoding=url") {
+		t.Fatalf("formatted auth metadata missing encoding marker: %q", line)
+	}
+	if strings.Contains(line, "provider_name="+providerName) || strings.Contains(line, "auth_id=auth,1") {
+		t.Fatalf("formatted auth metadata contains unescaped delimiters: %q", line)
+	}
+}

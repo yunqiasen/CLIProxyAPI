@@ -82,3 +82,68 @@ func TestToggleConfigAPIKeyExcludedAll_Codex(t *testing.T) {
 		t.Fatalf("expected excluded-models cleared, got %#v", cfg.CodexKey[0].ExcludedModels)
 	}
 }
+
+func TestToggleConfigAPIKeyExcludedAll_GroupedNativeAuthIDs(t *testing.T) {
+	baseURL := "https://native.example/v1"
+	tests := []struct {
+		name     string
+		kind     string
+		provider string
+		key      string
+		config   func() *config.Config
+		excluded func(*config.Config) []string
+	}{
+		{
+			name: "gemini", kind: "gemini:apikey", provider: "gemini", key: "gemini-key",
+			config: func() *config.Config {
+				return &config.Config{GeminiKey: []config.GeminiKey{{BaseURL: baseURL, APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: "gemini-key"}}}}}
+			},
+			excluded: func(cfg *config.Config) []string { return cfg.GeminiKey[0].ExcludedModels },
+		},
+		{
+			name: "interactions", kind: "gemini-interactions:apikey", provider: "gemini-interactions", key: "interactions-key",
+			config: func() *config.Config {
+				return &config.Config{InteractionsKey: []config.GeminiKey{{BaseURL: baseURL, APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: "interactions-key"}}}}}
+			},
+			excluded: func(cfg *config.Config) []string { return cfg.InteractionsKey[0].ExcludedModels },
+		},
+		{
+			name: "claude", kind: "claude:apikey", provider: "claude", key: "claude-key",
+			config: func() *config.Config {
+				return &config.Config{ClaudeKey: []config.ClaudeKey{{BaseURL: baseURL, APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: "claude-key"}}}}}
+			},
+			excluded: func(cfg *config.Config) []string { return cfg.ClaudeKey[0].ExcludedModels },
+		},
+		{
+			name: "codex", kind: "codex:apikey", provider: "codex", key: "codex-key",
+			config: func() *config.Config {
+				return &config.Config{CodexKey: []config.CodexKey{{BaseURL: baseURL, APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: "codex-key"}}}}}
+			},
+			excluded: func(cfg *config.Config) []string { return cfg.CodexKey[0].ExcludedModels },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.config()
+			authID, _ := synthesizer.NewStableIDGenerator().Next(tt.kind, tt.key, baseURL, "0")
+			auth := &coreauth.Auth{
+				ID:       authID,
+				Provider: tt.provider,
+				Attributes: map[string]string{
+					"api_key":   tt.key,
+					"base_url":  baseURL,
+					"auth_kind": "apikey",
+					"source":    "config:" + tt.name + "[test]",
+				},
+			}
+			handled, errToggle := toggleConfigAPIKeyExcludedAll(cfg, auth, true)
+			if errToggle != nil || !handled {
+				t.Fatalf("toggle grouped auth: handled=%v err=%v", handled, errToggle)
+			}
+			if got := tt.excluded(cfg); len(got) != 1 || got[0] != "*" {
+				t.Fatalf("excluded-models = %#v, want [*]", got)
+			}
+		})
+	}
+}

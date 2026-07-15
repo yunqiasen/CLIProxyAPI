@@ -300,8 +300,10 @@ func (h *Handler) PutRequestLogRetentionDays(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "request-log-retention-days must be greater than or equal to 0"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.cfg.RequestLogRetentionDays = *body.Value
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 // Websocket auth

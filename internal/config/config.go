@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -493,6 +494,9 @@ type ClaudeKey struct {
 
 func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }
 func (k ClaudeKey) GetBaseURL() string { return k.BaseURL }
+func (k ClaudeKey) GetEffectiveAPIKeys() []EffectiveNativeAPIKey {
+	return EffectiveNativeAPIKeys(k.APIKey, k.Priority, k.ProxyURL, k.APIKeyEntries)
+}
 
 // ClaudeModel describes a mapping between an alias and the actual upstream model name.
 type ClaudeModel struct {
@@ -558,6 +562,9 @@ type CodexKey struct {
 
 func (k CodexKey) GetAPIKey() string  { return k.APIKey }
 func (k CodexKey) GetBaseURL() string { return k.BaseURL }
+func (k CodexKey) GetEffectiveAPIKeys() []EffectiveNativeAPIKey {
+	return EffectiveNativeAPIKeys(k.APIKey, k.Priority, k.ProxyURL, k.APIKeyEntries)
+}
 
 // CodexModel describes a mapping between an alias and the actual upstream model name.
 type CodexModel struct {
@@ -625,6 +632,9 @@ type GeminiKey struct {
 
 func (k GeminiKey) GetAPIKey() string  { return k.APIKey }
 func (k GeminiKey) GetBaseURL() string { return k.BaseURL }
+func (k GeminiKey) GetEffectiveAPIKeys() []EffectiveNativeAPIKey {
+	return EffectiveNativeAPIKeys(k.APIKey, k.Priority, k.ProxyURL, k.APIKeyEntries)
+}
 
 // NativeAPIKeyEntry is one credential in a native provider group.
 type NativeAPIKeyEntry struct {
@@ -673,6 +683,55 @@ func EffectiveNativeAPIKeys(legacyKey string, defaultPriority int, defaultProxy 
 		return nil
 	}
 	return []EffectiveNativeAPIKey{{APIKey: legacyKey, Priority: defaultPriority, ProxyURL: defaultProxy, Index: -1}}
+}
+
+// NativeAPIKeyConfigEntry exposes the shared identity fields of grouped native providers.
+type NativeAPIKeyConfigEntry interface {
+	GetBaseURL() string
+	GetEffectiveAPIKeys() []EffectiveNativeAPIKey
+}
+
+// ResolveNativeAPIKeyConfig finds a native provider group and its matching effective key.
+func ResolveNativeAPIKeyConfig[T NativeAPIKeyConfigEntry](entries []T, apiKey, baseURL string) (*T, *EffectiveNativeAPIKey) {
+	apiKey = strings.TrimSpace(apiKey)
+	baseURL = strings.TrimSpace(baseURL)
+	for i := range entries {
+		entry := &entries[i]
+		entryBaseURL := strings.TrimSpace((*entry).GetBaseURL())
+		effectiveKeys := (*entry).GetEffectiveAPIKeys()
+		if apiKey != "" {
+			for keyIndex := range effectiveKeys {
+				if !strings.EqualFold(effectiveKeys[keyIndex].APIKey, apiKey) {
+					continue
+				}
+				if baseURL != "" {
+					if strings.EqualFold(entryBaseURL, baseURL) {
+						return entry, &effectiveKeys[keyIndex]
+					}
+					continue
+				}
+				if entryBaseURL == "" {
+					return entry, &effectiveKeys[keyIndex]
+				}
+			}
+			continue
+		}
+		if baseURL != "" && strings.EqualFold(entryBaseURL, baseURL) && len(effectiveKeys) > 0 {
+			return entry, &effectiveKeys[0]
+		}
+	}
+	if apiKey != "" {
+		for i := range entries {
+			entry := &entries[i]
+			effectiveKeys := (*entry).GetEffectiveAPIKeys()
+			for keyIndex := range effectiveKeys {
+				if strings.EqualFold(effectiveKeys[keyIndex].APIKey, apiKey) {
+					return entry, &effectiveKeys[keyIndex]
+				}
+			}
+		}
+	}
+	return nil, nil
 }
 
 // GeminiModel describes a mapping between an alias and the actual upstream model name.
@@ -1210,10 +1269,16 @@ func sanitizeGeminiKeyEntries(entries []GeminiKey) []GeminiKey {
 		if len(effective) == 0 {
 			continue
 		}
-		uniqueKey := effective[0].APIKey + "|" + entry.BaseURL
-		if entry.Name != "" {
-			uniqueKey = entry.Name + "|" + entry.BaseURL
+		keys := make([]string, 0, len(effective))
+		for keyIndex := range effective {
+			keys = append(keys, effective[keyIndex].APIKey)
 		}
+		sort.Strings(keys)
+		identity, _ := json.Marshal(struct {
+			BaseURL string   `json:"base_url"`
+			APIKeys []string `json:"api_keys"`
+		}{BaseURL: entry.BaseURL, APIKeys: keys})
+		uniqueKey := string(identity)
 		if _, exists := seen[uniqueKey]; exists {
 			continue
 		}

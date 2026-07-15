@@ -231,3 +231,75 @@ func performPatch(t *testing.T, patch func(*gin.Context), body string) *httptest
 	patch(ctx)
 	return rec
 }
+
+func TestPatchNativeKeyKeepsOnlyGroupsWithEffectiveKeys(t *testing.T) {
+	tests := []struct {
+		name       string
+		newConfig  func() *config.Config
+		patch      func(*Handler, *gin.Context)
+		entryCount func(*config.Config) int
+		entryKeys  func(*config.Config) (string, []config.NativeAPIKeyEntry)
+	}{
+		{
+			name: "gemini",
+			newConfig: func() *config.Config {
+				return &config.Config{GeminiKey: []config.GeminiKey{{APIKey: "legacy", BaseURL: "https://native.example/v1"}}}
+			},
+			patch:      func(h *Handler, ctx *gin.Context) { h.PatchGeminiKey(ctx) },
+			entryCount: func(cfg *config.Config) int { return len(cfg.GeminiKey) },
+			entryKeys: func(cfg *config.Config) (string, []config.NativeAPIKeyEntry) {
+				return cfg.GeminiKey[0].APIKey, cfg.GeminiKey[0].APIKeyEntries
+			},
+		},
+		{
+			name: "claude",
+			newConfig: func() *config.Config {
+				return &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "legacy", BaseURL: "https://native.example/v1"}}}
+			},
+			patch:      func(h *Handler, ctx *gin.Context) { h.PatchClaudeKey(ctx) },
+			entryCount: func(cfg *config.Config) int { return len(cfg.ClaudeKey) },
+			entryKeys: func(cfg *config.Config) (string, []config.NativeAPIKeyEntry) {
+				return cfg.ClaudeKey[0].APIKey, cfg.ClaudeKey[0].APIKeyEntries
+			},
+		},
+		{
+			name: "codex",
+			newConfig: func() *config.Config {
+				return &config.Config{CodexKey: []config.CodexKey{{APIKey: "legacy", BaseURL: "https://native.example/v1"}}}
+			},
+			patch:      func(h *Handler, ctx *gin.Context) { h.PatchCodexKey(ctx) },
+			entryCount: func(cfg *config.Config) int { return len(cfg.CodexKey) },
+			entryKeys: func(cfg *config.Config) (string, []config.NativeAPIKeyEntry) {
+				return cfg.CodexKey[0].APIKey, cfg.CodexKey[0].APIKeyEntries
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name+" preserves grouped key", func(t *testing.T) {
+			h := &Handler{cfg: tt.newConfig(), configFilePath: writeTestConfigFile(t)}
+			rec := performPatch(t, func(ctx *gin.Context) { tt.patch(h, ctx) }, `{"index":0,"value":{"api-key":"","api-key-entries":[{"api-key":"grouped-key"}]}}`)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			if got := tt.entryCount(h.cfg); got != 1 {
+				t.Fatalf("entry count = %d, want 1", got)
+			}
+			legacy, entries := tt.entryKeys(h.cfg)
+			if legacy != "" || len(entries) != 1 || entries[0].APIKey != "grouped-key" {
+				t.Fatalf("patched keys = legacy %q entries %#v", legacy, entries)
+			}
+		})
+
+		t.Run(tt.name+" removes group without effective key", func(t *testing.T) {
+			h := &Handler{cfg: tt.newConfig(), configFilePath: writeTestConfigFile(t)}
+			rec := performPatch(t, func(ctx *gin.Context) { tt.patch(h, ctx) }, `{"index":0,"value":{"api-key":"","api-key-entries":[{"api-key":"  "}]}}`)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			if got := tt.entryCount(h.cfg); got != 0 {
+				t.Fatalf("entry count = %d, want 0", got)
+			}
+		})
+	}
+}

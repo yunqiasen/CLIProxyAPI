@@ -605,42 +605,43 @@ func RequestLogProviderName(auth *cliproxyauth.Auth) string {
 }
 
 func formatAuthInfo(info UpstreamRequestLog) string {
-	var parts []string
-	if trimmed := strings.TrimSpace(info.Provider); trimmed != "" {
-		parts = append(parts, fmt.Sprintf("provider=%s", trimmed))
+	parts := make([]string, 0, 5)
+	appendField := func(key, value string) {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			parts = append(parts, key+"="+url.PathEscape(value))
+		}
 	}
-	if trimmed := strings.TrimSpace(info.ProviderName); trimmed != "" {
-		parts = append(parts, fmt.Sprintf("provider_name=%s", trimmed))
-	}
-	if trimmed := strings.TrimSpace(info.AuthID); trimmed != "" {
-		parts = append(parts, fmt.Sprintf("auth_id=%s", trimmed))
-	}
-	if trimmed := strings.TrimSpace(info.AuthLabel); trimmed != "" {
-		parts = append(parts, fmt.Sprintf("label=%s", trimmed))
-	}
+	appendField("provider", info.Provider)
+	appendField("provider_name", info.ProviderName)
+	appendField("auth_id", info.AuthID)
+	appendField("label", info.AuthLabel)
 
 	authType := strings.ToLower(strings.TrimSpace(info.AuthType))
 	authValue := strings.TrimSpace(info.AuthValue)
 	switch authType {
 	case "api_key":
 		if authValue != "" {
-			parts = append(parts, fmt.Sprintf("type=api_key value=%s", util.HideAPIKey(authValue)))
+			appendField("type", "api_key value="+util.HideAPIKey(authValue))
 		} else {
-			parts = append(parts, "type=api_key")
+			appendField("type", "api_key")
 		}
 	case "oauth":
-		parts = append(parts, "type=oauth")
+		appendField("type", "oauth")
 	default:
 		if authType != "" {
 			if authValue != "" {
-				parts = append(parts, fmt.Sprintf("type=%s value=%s", authType, authValue))
+				appendField("type", authType+" value="+authValue)
 			} else {
-				parts = append(parts, fmt.Sprintf("type=%s", authType))
+				appendField("type", authType)
 			}
 		}
 	}
 
-	return strings.Join(parts, ", ")
+	if len(parts) == 0 {
+		return ""
+	}
+	return "encoding=url, " + strings.Join(parts, ", ")
 }
 
 func SummarizeErrorBody(contentType string, body []byte) string {

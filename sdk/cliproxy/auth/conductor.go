@@ -3298,35 +3298,40 @@ func resolveGeminiAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internal
 	if cfg == nil {
 		return nil
 	}
-	return resolveAPIKeyConfig(cfg.GeminiKey, auth)
+	entry, _ := internalconfig.ResolveNativeAPIKeyConfig(cfg.GeminiKey, authAttribute(auth, "api_key"), authAttribute(auth, "base_url"))
+	return entry
 }
 
 func resolveInteractionsAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.GeminiKey {
 	if cfg == nil {
 		return nil
 	}
-	return resolveAPIKeyConfig(cfg.InteractionsKey, auth)
+	entry, _ := internalconfig.ResolveNativeAPIKeyConfig(cfg.InteractionsKey, authAttribute(auth, "api_key"), authAttribute(auth, "base_url"))
+	return entry
 }
 
 func resolveClaudeAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.ClaudeKey {
 	if cfg == nil {
 		return nil
 	}
-	return resolveAPIKeyConfig(cfg.ClaudeKey, auth)
+	entry, _ := internalconfig.ResolveNativeAPIKeyConfig(cfg.ClaudeKey, authAttribute(auth, "api_key"), authAttribute(auth, "base_url"))
+	return entry
 }
 
 func resolveCodexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.CodexKey {
 	if cfg == nil {
 		return nil
 	}
-	return resolveAPIKeyConfig(cfg.CodexKey, auth)
+	entry, _ := internalconfig.ResolveNativeAPIKeyConfig(cfg.CodexKey, authAttribute(auth, "api_key"), authAttribute(auth, "base_url"))
+	return entry
 }
 
 func resolveXAIAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.XAIKey {
 	if cfg == nil {
 		return nil
 	}
-	return resolveAPIKeyConfig(cfg.XAIKey, auth)
+	entry, _ := internalconfig.ResolveNativeAPIKeyConfig(cfg.XAIKey, authAttribute(auth, "api_key"), authAttribute(auth, "base_url"))
+	return entry
 }
 
 func resolveVertexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.VertexCompatKey {

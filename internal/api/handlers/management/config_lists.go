@@ -199,14 +199,7 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 		entry.APIKeyEntries = normalizeNativeAPIKeyEntries(*body.Value.APIKeyEntries)
 	}
 	if body.Value.APIKey != nil {
-		trimmed := strings.TrimSpace(*body.Value.APIKey)
-		if trimmed == "" {
-			h.cfg.GeminiKey = append(h.cfg.GeminiKey[:targetIndex], h.cfg.GeminiKey[targetIndex+1:]...)
-			h.cfg.SanitizeGeminiKeys()
-			h.persistLocked(c)
-			return
-		}
-		entry.APIKey = trimmed
+		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
 	}
 	if body.Value.Priority != nil {
 		entry.Priority = *body.Value.Priority
@@ -232,7 +225,11 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	if body.Value.DisableCooling != nil {
 		entry.DisableCooling = *body.Value.DisableCooling
 	}
-	h.cfg.GeminiKey[targetIndex] = entry
+	if len(config.EffectiveNativeAPIKeys(entry.APIKey, entry.Priority, entry.ProxyURL, entry.APIKeyEntries)) == 0 {
+		h.cfg.GeminiKey = append(h.cfg.GeminiKey[:targetIndex], h.cfg.GeminiKey[targetIndex+1:]...)
+	} else {
+		h.cfg.GeminiKey[targetIndex] = entry
+	}
 	h.cfg.SanitizeGeminiKeys()
 	h.persistLocked(c)
 }
@@ -578,7 +575,11 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		entry.ExperimentalCCHSigning = *body.Value.ExperimentalCCHSigning
 	}
 	normalizeClaudeKey(&entry)
-	h.cfg.ClaudeKey[targetIndex] = entry
+	if len(config.EffectiveNativeAPIKeys(entry.APIKey, entry.Priority, entry.ProxyURL, entry.APIKeyEntries)) == 0 {
+		h.cfg.ClaudeKey = append(h.cfg.ClaudeKey[:targetIndex], h.cfg.ClaudeKey[targetIndex+1:]...)
+	} else {
+		h.cfg.ClaudeKey[targetIndex] = entry
+	}
 	h.cfg.SanitizeClaudeKeys()
 	h.persistLocked(c)
 }
@@ -1257,7 +1258,11 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		entry.DisableCooling = *body.Value.DisableCooling
 	}
 	normalizeCodexKey(&entry)
-	h.cfg.CodexKey[targetIndex] = entry
+	if len(config.EffectiveNativeAPIKeys(entry.APIKey, entry.Priority, entry.ProxyURL, entry.APIKeyEntries)) == 0 {
+		h.cfg.CodexKey = append(h.cfg.CodexKey[:targetIndex], h.cfg.CodexKey[targetIndex+1:]...)
+	} else {
+		h.cfg.CodexKey[targetIndex] = entry
+	}
 	h.cfg.SanitizeCodexKeys()
 	h.persistLocked(c)
 }

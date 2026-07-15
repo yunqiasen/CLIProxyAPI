@@ -502,48 +502,20 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 	return clone
 }
 
-type apiKeyConfigEntry interface {
-	GetAPIKey() string
-	GetBaseURL() string
-}
-
-func resolveAPIKeyConfig[T apiKeyConfigEntry](entries []T, auth *coreauth.Auth) *T {
-	if auth == nil || len(entries) == 0 {
-		return nil
+func resolveNativeAPIKeyProxyURL[T config.NativeAPIKeyConfigEntry](entries []T, auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
 	}
-	attrKey, attrBase := "", ""
+	apiKey, baseURL := "", ""
 	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
+		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	for i := range entries {
-		entry := &entries[i]
-		cfgKey := strings.TrimSpace((*entry).GetAPIKey())
-		cfgBase := strings.TrimSpace((*entry).GetBaseURL())
-		if attrKey != "" && attrBase != "" {
-			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
-		}
+	_, effective := config.ResolveNativeAPIKeyConfig(entries, apiKey, baseURL)
+	if effective == nil {
+		return ""
 	}
-	if attrKey != "" {
-		for i := range entries {
-			entry := &entries[i]
-			if strings.EqualFold(strings.TrimSpace((*entry).GetAPIKey()), attrKey) {
-				return entry
-			}
-		}
-	}
-	return nil
+	return strings.TrimSpace(effective.ProxyURL)
 }
 
 func proxyURLFromAPIKeyConfig(cfg *config.Config, auth *coreauth.Auth) string {
@@ -568,25 +540,15 @@ func proxyURLFromAPIKeyConfig(cfg *config.Config, auth *coreauth.Auth) string {
 
 	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
 	case "gemini":
-		if entry := resolveAPIKeyConfig(cfg.GeminiKey, auth); entry != nil {
-			return strings.TrimSpace(entry.ProxyURL)
-		}
+		return resolveNativeAPIKeyProxyURL(cfg.GeminiKey, auth)
 	case "gemini-interactions":
-		if entry := resolveAPIKeyConfig(cfg.InteractionsKey, auth); entry != nil {
-			return strings.TrimSpace(entry.ProxyURL)
-		}
+		return resolveNativeAPIKeyProxyURL(cfg.InteractionsKey, auth)
 	case "claude":
-		if entry := resolveAPIKeyConfig(cfg.ClaudeKey, auth); entry != nil {
-			return strings.TrimSpace(entry.ProxyURL)
-		}
+		return resolveNativeAPIKeyProxyURL(cfg.ClaudeKey, auth)
 	case "codex":
-		if entry := resolveAPIKeyConfig(cfg.CodexKey, auth); entry != nil {
-			return strings.TrimSpace(entry.ProxyURL)
-		}
+		return resolveNativeAPIKeyProxyURL(cfg.CodexKey, auth)
 	case "xai":
-		if entry := resolveAPIKeyConfig(cfg.XAIKey, auth); entry != nil {
-			return strings.TrimSpace(entry.ProxyURL)
-		}
+		return resolveNativeAPIKeyProxyURL(cfg.XAIKey, auth)
 	}
 	return ""
 }

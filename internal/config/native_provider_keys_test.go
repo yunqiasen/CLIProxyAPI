@@ -105,3 +105,28 @@ func TestCloneForRuntimeDeepCopiesNativeAPIKeyEntries(t *testing.T) {
 		t.Fatalf("CloneForRuntime shared grouped key storage: %#v", cfg.ClaudeKey[0].APIKeyEntries)
 	}
 }
+
+func TestSanitizeGeminiKeysDeduplicatesByEffectiveKeyIdentity(t *testing.T) {
+	cfg := &Config{GeminiKey: []GeminiKey{
+		{Name: "shared-name", BaseURL: "https://gemini.example/v1", APIKeyEntries: []NativeAPIKeyEntry{{APIKey: "key-a"}}},
+		{Name: "shared-name", BaseURL: "https://gemini.example/v1", APIKeyEntries: []NativeAPIKeyEntry{{APIKey: "key-b"}}},
+		{Name: "other-name", BaseURL: "https://gemini.example/v1", APIKeyEntries: []NativeAPIKeyEntry{{APIKey: "key-a"}}},
+	}}
+
+	cfg.SanitizeGeminiKeys()
+
+	if len(cfg.GeminiKey) != 2 {
+		t.Fatalf("len(GeminiKey) = %d, want 2: %#v", len(cfg.GeminiKey), cfg.GeminiKey)
+	}
+	seen := make(map[string]int)
+	for _, group := range cfg.GeminiKey {
+		keys := EffectiveNativeAPIKeys(group.APIKey, group.Priority, group.ProxyURL, group.APIKeyEntries)
+		if len(keys) != 1 {
+			t.Fatalf("effective keys = %#v, want one key", keys)
+		}
+		seen[keys[0].APIKey]++
+	}
+	if seen["key-a"] != 1 || seen["key-b"] != 1 {
+		t.Fatalf("sanitized key identities = %#v, want key-a and key-b once", seen)
+	}
+}

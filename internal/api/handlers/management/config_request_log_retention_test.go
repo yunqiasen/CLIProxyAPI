@@ -1,10 +1,12 @@
 package management
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -64,4 +66,30 @@ func TestPutRequestLogRetentionDaysRejectsNegativeInteger(t *testing.T) {
 	if h.cfg.RequestLogRetentionDays != 7 {
 		t.Fatalf("retention days changed to %d", h.cfg.RequestLogRetentionDays)
 	}
+}
+
+func TestPutRequestLogRetentionDaysConcurrentUpdates(t *testing.T) {
+	h := &Handler{cfg: &config.Config{}, configFilePath: writeTestConfigFile(t)}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for value := 0; value < 16; value++ {
+		value := value
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			rec := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(rec)
+			ctx.Request = httptest.NewRequest(http.MethodPut, "/v0/management/request-log-retention-days", strings.NewReader(fmt.Sprintf(`{"value":%d}`, value)))
+			ctx.Request.Header.Set("Content-Type", "application/json")
+			h.PutRequestLogRetentionDays(ctx)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			h.SetConfig(&config.Config{RequestLogRetentionDays: value})
+		}()
+	}
+	close(start)
+	wg.Wait()
 }

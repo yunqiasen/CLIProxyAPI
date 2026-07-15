@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
@@ -2208,39 +2209,8 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 	if auth == nil || s.cfg == nil {
 		return nil
 	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-	}
-	for i := range s.cfg.ClaudeKey {
-		entry := &s.cfg.ClaudeKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && attrBase != "" {
-			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
-		}
-	}
-	if attrKey != "" {
-		for i := range s.cfg.ClaudeKey {
-			entry := &s.cfg.ClaudeKey[i]
-			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
-				return entry
-			}
-		}
-	}
-	return nil
+	entry, _ := internalconfig.ResolveNativeAPIKeyConfig(s.cfg.ClaudeKey, authAttribute(auth, "api_key"), authAttribute(auth, "base_url"))
+	return entry
 }
 
 func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey {
@@ -2261,26 +2231,8 @@ func (s *Service) resolveConfigGeminiKeyEntry(auth *coreauth.Auth, entries []con
 	if auth == nil || s.cfg == nil {
 		return nil
 	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-	}
-	for i := range entries {
-		entry := &entries[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
-		}
-	}
-	return nil
+	entry, _ := internalconfig.ResolveNativeAPIKeyConfig(entries, authAttribute(auth, "api_key"), authAttribute(auth, "base_url"))
+	return entry
 }
 
 func (s *Service) resolveConfigVertexCompatKey(auth *coreauth.Auth) *config.VertexCompatKey {
@@ -2335,26 +2287,15 @@ func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey) 
 	if auth == nil {
 		return nil
 	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	entry, _ := internalconfig.ResolveNativeAPIKeyConfig(entries, authAttribute(auth, "api_key"), authAttribute(auth, "base_url"))
+	return entry
+}
+
+func authAttribute(auth *coreauth.Auth, key string) string {
+	if auth == nil || auth.Attributes == nil {
+		return ""
 	}
-	for i := range entries {
-		entry := &entries[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
-		}
-	}
-	return nil
+	return strings.TrimSpace(auth.Attributes[key])
 }
 
 func (s *Service) oauthExcludedModels(provider, authKind string) []string {

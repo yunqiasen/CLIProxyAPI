@@ -361,6 +361,7 @@ func (s *ConfigSynthesizer) synthesizeMediaProviders(ctx *SynthesisContext) []*c
 				"base_url":            base,
 				"media_kind":          kind,
 				"media_provider_name": name,
+				"provider_name":       name,
 				"provider_key":        providerKey,
 			}
 			if key != "" {

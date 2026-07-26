@@ -959,6 +959,22 @@ func resolveCooldownStateAuthDir(cfg *config.Config) (string, error) {
 	return authDir, nil
 }
 
+func mediaProviderInfoFromAuth(a *coreauth.Auth) (providerKey string, providerName string, kind string, ok bool) {
+	if a == nil || a.Attributes == nil {
+		return "", "", "", false
+	}
+	kind = strings.ToLower(strings.TrimSpace(a.Attributes["media_kind"]))
+	providerName = strings.TrimSpace(a.Attributes["media_provider_name"])
+	providerKey = strings.ToLower(strings.TrimSpace(a.Attributes["provider_key"]))
+	if kind == "" || providerName == "" {
+		return "", "", "", false
+	}
+	if providerKey == "" {
+		providerKey = util.MediaProviderKey(kind, providerName)
+	}
+	return providerKey, providerName, kind, true
+}
+
 func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName string, ok bool) {
 	if a == nil {
 		return "", "", false
@@ -1216,6 +1232,17 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	// Disabled auths can linger during config reloads (e.g., removed OpenAI-compat entries)
 	// and must not override active provider executors.
 	if a.Disabled {
+		return
+	}
+	if mediaProviderKey, _, _, isMedia := mediaProviderInfoFromAuth(a); isMedia {
+		if !forceReplace {
+			if existingExecutor, hasExecutor := s.coreManager.Executor(mediaProviderKey); hasExecutor {
+				if _, isMediaExecutor := existingExecutor.(*executor.MediaExecutor); isMediaExecutor {
+					return
+				}
+			}
+		}
+		s.coreManager.RegisterExecutor(executor.NewMediaExecutor(mediaProviderKey, cfg))
 		return
 	}
 	if compatProviderKey, _, isCompat := openAICompatInfoFromAuth(a); isCompat {
@@ -2713,8 +2740,11 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		}
 	}
 	provider := strings.ToLower(strings.TrimSpace(a.Provider))
+	mediaProviderKey, _, _, mediaDetected := mediaProviderInfoFromAuth(a)
 	compatProviderKey, compatDisplayName, compatDetected := openAICompatInfoFromAuth(a)
-	if compatDetected {
+	if mediaDetected {
+		provider = mediaProviderKey
+	} else if compatDetected {
 		provider = "openai-compatibility"
 	}
 	excluded := s.oauthExcludedModels(provider, authKind)
@@ -2732,6 +2762,20 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		return
 	}
 	var models []*ModelInfo
+	if mediaDetected {
+		entry := s.resolveConfigMediaProvider(a)
+		if entry == nil {
+			GlobalModelRegistry().UnregisterClient(a.ID)
+			return
+		}
+		models = buildMediaProviderConfigModels(entry)
+		if len(models) == 0 {
+			GlobalModelRegistry().UnregisterClient(a.ID)
+			return
+		}
+		s.registerResolvedModelsForAuth(a, mediaProviderKey, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+		return
+	}
 	switch provider {
 	case constant.Gemini:
 		models = registry.GetGeminiModels()
@@ -3013,6 +3057,29 @@ func (s *Service) latestAuthForModelRegistration(authID string) (*coreauth.Auth,
 	return auth, true
 }
 
+func (s *Service) resolveConfigMediaProvider(auth *coreauth.Auth) *config.MediaProvider {
+	if s == nil || auth == nil || s.cfg == nil {
+		return nil
+	}
+	providerKey, providerName, kind, ok := mediaProviderInfoFromAuth(auth)
+	if !ok {
+		return nil
+	}
+	for i := range s.cfg.MediaProviders {
+		entry := &s.cfg.MediaProviders[i]
+		if entry.Disabled {
+			continue
+		}
+		if strings.EqualFold(util.MediaProviderKey(entry.Kind, entry.Name), providerKey) {
+			return entry
+		}
+		if strings.EqualFold(strings.TrimSpace(entry.Name), providerName) && strings.EqualFold(strings.TrimSpace(entry.Kind), kind) {
+			return entry
+		}
+	}
+	return nil
+}
+
 func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey {
 	if auth == nil || s.cfg == nil {
 		return nil
@@ -3271,6 +3338,32 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 		DisplayName: displayName,
 		UserDefined: userDefined,
 	}
+}
+
+func buildMediaProviderConfigModels(provider *config.MediaProvider) []*ModelInfo {
+	if provider == nil || !strings.EqualFold(strings.TrimSpace(provider.Kind), config.MediaKindImage) || len(provider.Models) == 0 {
+		return nil
+	}
+	now := time.Now().Unix()
+	models := make([]*ModelInfo, 0, len(provider.Models))
+	for i := range provider.Models {
+		model := provider.Models[i]
+		standardImage := false
+		for _, capability := range model.Capabilities {
+			if strings.EqualFold(strings.TrimSpace(capability), config.MediaCapabilityGenerate) || strings.EqualFold(strings.TrimSpace(capability), config.MediaCapabilityEdit) {
+				standardImage = true
+				break
+			}
+		}
+		if !standardImage {
+			continue
+		}
+		info := buildConfiguredModelInfo(model, provider.Name, registry.OpenAIImageModelType, now, strings.TrimSpace(model.Name), true)
+		if info != nil {
+			models = append(models, info)
+		}
+	}
+	return models
 }
 
 func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []*ModelInfo {

@@ -2280,6 +2280,10 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
 		default:
+			if entry := resolveMediaProviderConfig(cfg, auth); entry != nil {
+				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+				break
+			}
 			// OpenAI-compat uses config selection from auth.Attributes.
 			providerKey := ""
 			compatName := ""
@@ -3795,7 +3799,10 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 	case "vertex":
 		upstreamModel = resolveUpstreamModelForVertexAPIKey(cfg, auth, requestedModel)
 	default:
-		upstreamModel = resolveUpstreamModelForOpenAICompatAPIKey(cfg, auth, requestedModel)
+		upstreamModel = resolveUpstreamModelForMediaAPIKey(cfg, auth, requestedModel)
+		if upstreamModel == "" {
+			upstreamModel = resolveUpstreamModelForOpenAICompatAPIKey(cfg, auth, requestedModel)
+		}
 	}
 
 	// Return upstream model if found, otherwise return requested model.
@@ -3939,6 +3946,42 @@ func resolveUpstreamModelForXAIAPIKey(cfg *internalconfig.Config, auth *Auth, re
 
 func resolveUpstreamModelForVertexAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveVertexAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveMediaProviderConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.MediaProvider {
+	if cfg == nil || auth == nil || auth.Attributes == nil {
+		return nil
+	}
+	kind := strings.ToLower(strings.TrimSpace(auth.Attributes["media_kind"]))
+	name := strings.TrimSpace(auth.Attributes["media_provider_name"])
+	providerKey := strings.ToLower(strings.TrimSpace(auth.Attributes["provider_key"]))
+	if kind == "" || name == "" {
+		return nil
+	}
+	if providerKey == "" {
+		providerKey = util.MediaProviderKey(kind, name)
+	}
+	for i := range cfg.MediaProviders {
+		entry := &cfg.MediaProviders[i]
+		if entry.Disabled {
+			continue
+		}
+		if strings.EqualFold(util.MediaProviderKey(entry.Kind, entry.Name), providerKey) {
+			return entry
+		}
+		if strings.EqualFold(strings.TrimSpace(entry.Kind), kind) && strings.EqualFold(strings.TrimSpace(entry.Name), name) {
+			return entry
+		}
+	}
+	return nil
+}
+
+func resolveUpstreamModelForMediaAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveMediaProviderConfig(cfg, auth)
 	if entry == nil {
 		return ""
 	}

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 )
 
 func TestLookupAPIKeyUpstreamModel(t *testing.T) {
@@ -289,5 +290,25 @@ func TestResolveAPIKeyModelAliasWithResult_ForceMappingUsesConfigAliasNotRequest
 	}
 	if result.OriginalAlias != "claude-sonnet-4-5" {
 		t.Fatalf("OriginalAlias = %q want claude-sonnet-4-5", result.OriginalAlias)
+	}
+}
+
+func TestLookupAPIKeyUpstreamModel_MediaProvider(t *testing.T) {
+	cfg := &internalconfig.Config{MediaProviders: []internalconfig.MediaProvider{{
+		Name: "Image Relay", Kind: internalconfig.MediaKindImage, BaseURL: "https://images.example/v1",
+		Models: []internalconfig.MediaModel{{Name: "upstream-image", Alias: "public-image", Capabilities: []string{internalconfig.MediaCapabilityGenerate}}},
+	}}}
+	providerKey := util.MediaProviderKey(internalconfig.MediaKindImage, "Image Relay")
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+	_, _ = mgr.Register(context.Background(), &Auth{
+		ID: "media-auth", Provider: providerKey,
+		Attributes: map[string]string{
+			"auth_kind": "api_key", "api_key": "key", "base_url": "https://images.example/v1",
+			"media_kind": internalconfig.MediaKindImage, "media_provider_name": "Image Relay", "provider_key": providerKey,
+		},
+	})
+	if resolved := mgr.lookupAPIKeyUpstreamModel("media-auth", "public-image"); resolved != "upstream-image" {
+		t.Fatalf("lookupAPIKeyUpstreamModel() = %q, want upstream-image", resolved)
 	}
 }

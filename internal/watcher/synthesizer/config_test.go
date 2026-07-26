@@ -946,7 +946,7 @@ func TestConfigSynthesizer_MediaProviderKeys(t *testing.T) {
 	if auths[1].ProxyURL != "http://proxy.example" || auths[0].Attributes["header:X-Test"] != "value" {
 		t.Fatalf("proxy/header metadata lost: %#v %#v", auths[0], auths[1])
 	}
-	if auths[0].Attributes["media_kind"] != config.MediaKindImage || auths[0].Attributes["media_provider_name"] != "Image Relay" {
+	if auths[0].Attributes["media_kind"] != config.MediaKindImage || auths[0].Attributes["media_provider_name"] != "Image Relay" || auths[0].Attributes["provider_name"] != "Image Relay" {
 		t.Fatalf("media attributes = %#v", auths[0].Attributes)
 	}
 	if value, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !value {

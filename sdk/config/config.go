@@ -60,3 +60,15 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 func NormalizeCommentIndentation(data []byte) []byte {
 	return internalconfig.NormalizeCommentIndentation(data)
 }
+
+const (
+	MediaKindImage = internalconfig.MediaKindImage
+	MediaKindVideo = internalconfig.MediaKindVideo
+	MediaKindAudio = internalconfig.MediaKindAudio
+
+	MediaCapabilityGenerate         = internalconfig.MediaCapabilityGenerate
+	MediaCapabilityEdit             = internalconfig.MediaCapabilityEdit
+	MediaCapabilityUpscale          = internalconfig.MediaCapabilityUpscale
+	MediaCapabilitySuperResolution  = internalconfig.MediaCapabilitySuperResolution
+	MediaCapabilityRemoveBackground = internalconfig.MediaCapabilityRemoveBackground
+)

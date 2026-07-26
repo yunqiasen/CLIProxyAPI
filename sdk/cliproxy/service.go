@@ -975,6 +975,14 @@ func mediaProviderInfoFromAuth(a *coreauth.Auth) (providerKey string, providerNa
 	return providerKey, providerName, kind, true
 }
 
+func isConfigMediaProviderAuth(auth *coreauth.Auth) bool {
+	if auth == nil || auth.AuthSourceKind() != coreauth.AuthSourceConfig {
+		return false
+	}
+	_, _, _, ok := mediaProviderInfoFromAuth(auth)
+	return ok
+}
+
 func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName string, ok bool) {
 	if a == nil {
 		return "", "", false
@@ -1462,7 +1470,10 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 }
 
 func (s *Service) applyWatcherConfigUpdate(newCfg *config.Config) {
-	s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, false)
+	// The watcher dispatches its auth diff asynchronously. Synthesize config
+	// auths here as well so this callback never exposes new config with stale
+	// media credentials, models, or executors.
+	s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, true)
 }
 
 type configCommit struct {
@@ -1693,9 +1704,14 @@ func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Con
 
 	registrationCtx := coreauth.WithDeferredAPIKeyModelAliasRebuild(ctx)
 	tasks := make([]modelRegistrationTask, 0, len(auths))
+	activeMediaAuthIDs := make(map[string]struct{})
 	needsAliasRebuild := false
 	for _, auth := range auths {
-		if !coreauth.IsConfigAPIKeyAuth(auth) {
+		isMediaAuth := isConfigMediaProviderAuth(auth)
+		if isMediaAuth {
+			activeMediaAuthIDs[auth.ID] = struct{}{}
+		}
+		if !coreauth.IsConfigAPIKeyAuth(auth) && !isMediaAuth {
 			continue
 		}
 		prepared := s.prepareCoreAuthForModelRegistration(registrationCtx, auth)
@@ -1716,6 +1732,15 @@ func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Con
 		s.coreManager.RefreshAPIKeyModelAlias()
 	}
 	s.runModelRegistrationTasks(registrationCtx, tasks)
+	for _, existing := range s.coreManager.List() {
+		if !isConfigMediaProviderAuth(existing) {
+			continue
+		}
+		if _, active := activeMediaAuthIDs[existing.ID]; active {
+			continue
+		}
+		s.applyCoreAuthRemoval(registrationCtx, existing.ID)
+	}
 }
 
 func forceHomeRuntimeConfig(cfg *config.Config) {
@@ -3341,24 +3366,27 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 }
 
 func buildMediaProviderConfigModels(provider *config.MediaProvider) []*ModelInfo {
-	if provider == nil || !strings.EqualFold(strings.TrimSpace(provider.Kind), config.MediaKindImage) || len(provider.Models) == 0 {
+	if provider == nil || len(provider.Models) == 0 {
+		return nil
+	}
+	kind := strings.ToLower(strings.TrimSpace(provider.Kind))
+	if kind != config.MediaKindImage && kind != config.MediaKindVideo && kind != config.MediaKindAudio {
 		return nil
 	}
 	now := time.Now().Unix()
 	models := make([]*ModelInfo, 0, len(provider.Models))
 	for i := range provider.Models {
 		model := provider.Models[i]
-		standardImage := false
-		for _, capability := range model.Capabilities {
-			if strings.EqualFold(strings.TrimSpace(capability), config.MediaCapabilityGenerate) || strings.EqualFold(strings.TrimSpace(capability), config.MediaCapabilityEdit) {
-				standardImage = true
-				break
+		modelType := "media-" + kind
+		if kind == config.MediaKindImage {
+			for _, capability := range model.Capabilities {
+				if strings.EqualFold(strings.TrimSpace(capability), config.MediaCapabilityGenerate) || strings.EqualFold(strings.TrimSpace(capability), config.MediaCapabilityEdit) {
+					modelType = registry.OpenAIImageModelType
+					break
+				}
 			}
 		}
-		if !standardImage {
-			continue
-		}
-		info := buildConfiguredModelInfo(model, provider.Name, registry.OpenAIImageModelType, now, strings.TrimSpace(model.Name), true)
+		info := buildConfiguredModelInfo(model, provider.Name, modelType, now, strings.TrimSpace(model.Name), true)
 		if info != nil {
 			models = append(models, info)
 		}

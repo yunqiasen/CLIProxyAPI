@@ -71,4 +71,11 @@ const (
 	MediaCapabilityUpscale          = internalconfig.MediaCapabilityUpscale
 	MediaCapabilitySuperResolution  = internalconfig.MediaCapabilitySuperResolution
 	MediaCapabilityRemoveBackground = internalconfig.MediaCapabilityRemoveBackground
+	MediaCapabilityTextToVideo      = internalconfig.MediaCapabilityTextToVideo
+	MediaCapabilityImageToVideo     = internalconfig.MediaCapabilityImageToVideo
+	MediaCapabilityRemoveWatermark  = internalconfig.MediaCapabilityRemoveWatermark
+	MediaCapabilitySpeech           = internalconfig.MediaCapabilitySpeech
+	MediaCapabilityMusic            = internalconfig.MediaCapabilityMusic
+	MediaCapabilityClone            = internalconfig.MediaCapabilityClone
+	MediaCapabilityVoiceConvert     = internalconfig.MediaCapabilityVoiceConvert
 )

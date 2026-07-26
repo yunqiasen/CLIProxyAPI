@@ -1565,6 +1565,10 @@ func (m *Manager) resolveAPIKeyModelAliasWithResult(auth *Auth, requestedModel s
 			models = asModelAliasEntries(entry.Models)
 		}
 	default:
+		if entry := resolveMediaProviderConfig(cfg, auth); entry != nil {
+			models = asModelAliasEntries(entry.Models)
+			break
+		}
 		providerKey := ""
 		compatName := ""
 		if auth.Attributes != nil {

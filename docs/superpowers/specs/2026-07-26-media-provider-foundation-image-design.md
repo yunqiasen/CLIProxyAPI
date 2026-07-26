@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add dedicated Image, Video, and Audio provider management entries while keeping their day-to-day configuration almost identical to the existing OpenAI-compatible provider workflow. Build one shared media-provider foundation, then deliver the image provider end to end first.
+Add dedicated Image, Video, and Audio provider management entries while keeping their day-to-day configuration almost identical to the existing OpenAI-compatible provider workflow. Build one shared media-provider foundation and activate all three media kinds through the same tested runtime and UI.
 
 ## Confirmed Baseline
 
@@ -26,13 +26,14 @@ Current gaps are:
 
 ## Scope Decomposition
 
-The work is split into three independently verifiable deliveries:
+The delivery has four independently verifiable layers:
 
-1. **Media foundation plus Image providers**: shared config, management API, UI category, standard image generation/edit forwarding, custom image operations, async polling, and image connectivity tests.
-2. **Video providers**: reuse the same foundation for text-to-video, image-to-video, generation task retrieval, and watermark removal.
-3. **Audio providers**: reuse the same foundation for speech/audio generation, music generation, voice cloning, and voice conversion.
+1. **Shared media foundation**: config, management API, scheduler integration, logging, retry/cooldown, custom operations, response normalization, and async polling.
+2. **Image providers**: standard image generation/edit forwarding plus upscale, super-resolution, background removal, and custom image operations.
+3. **Video providers**: text-to-video, image-to-video, watermark removal, and other configured synchronous or asynchronous operations.
+4. **Audio providers**: speech/audio generation, music generation, voice cloning, voice conversion, and binary responses.
 
-This document defines the shared foundation and the complete Image-provider delivery. Video and Audio use the same contracts and receive separate implementation plans after the Image delivery is green.
+All three kinds use the same contracts and are active in the current management UI. Vendor-specific protocol adapters remain separate follow-up work when a channel needs more than HTTP body passthrough and explicit operation mapping.
 
 ## Chosen Architecture
 
@@ -72,7 +73,7 @@ media-providers:
         result-path: "data.0.url"
 ```
 
-`kind` accepts `image`, `video`, or `audio`. The initial runtime and UI delivery activates `image`; the schema accepts all three values from the beginning so later phases do not require a migration.
+`kind` accepts `image`, `video`, or `audio`. All three values are active in the runtime, management API, model catalog, request logs, and management UI.
 
 ### Reused provider semantics
 
@@ -179,15 +180,15 @@ async:
 
 After a successful submit response, CPA extracts the task ID and polls using the same selected credential. Polling ends when the request context is cancelled, a success state is reached, or a configured failure state is reached. No fixed overall network timeout is introduced after the upstream connection is established.
 
-### Image provider profiles
+### Provider protocol coverage
 
-The first delivery supports these profiles:
+The shared runtime supports three protocol shapes without adding a separate profile field:
 
-1. `openai-image`: standard `/images/generations` and `/images/edits` behavior. This covers img-lite as one upstream and direct OpenAI-style relays such as Gitee for compatible operations.
-2. `custom-http`: operation path/method/body forwarding for providers whose edit/upscale/background paths differ.
-3. `async-http`: submit-and-poll behavior for providers such as ModelScope.
+1. OpenAI-style image behavior through `/images/generations` and `/images/edits`. This covers img-lite and compatible relays.
+2. Configured HTTP operations for image, video, or audio endpoints whose paths and body types differ.
+3. Submit-and-poll HTTP operations for asynchronous media channels such as ModelScope-style task APIs.
 
-Provider-specific field mapping and Gradio queue transport are kept as explicit adapter profiles, not embedded as unvalidated text templates. Their unit-tested presets are added after the shared image path is green.
+Provider-specific field mapping and Gradio queue transport stay in explicit, tested adapters rather than unvalidated expression templates. Such adapters can be added after a concrete channel contract is available.
 
 ## Management API
 
@@ -212,6 +213,14 @@ Normalization rules:
 - reject duplicate operation names within one provider;
 - reject unsupported request, model, or response modes;
 - retain original list order.
+
+### Stable credential identity and usage ownership
+
+Each provider without keys and each individual key entry has an internal `auth-id`. The field is persisted in YAML as `auth-id`, omitted from management JSON, and projected to the UI only through the existing opaque `auth-index`. Users do not configure or edit this value.
+
+On the first management edit, an entry without a persisted `auth-id` receives the same deterministic identity used by the pre-migration runtime. Later edits preserve that identity when the provider name, Base URL, key value, proxy, model list, or operation list changes. Adding a key creates a new identity only for the new slot; deleting a key or provider does not make its identity reusable by another entry. This keeps success/failure totals attached to the logical credential instead of resetting after ordinary edits.
+
+Historical request-log fallback is deliberately narrower than credential identity. A record may be remapped only when its normalized protocol exactly matches the current credential protocol and the existing unique Base URL rules also match. Media kinds therefore do not borrow history from another kind or from a deleted provider merely because the Base URL is shared. Exact `auth-id` history remains authoritative.
 
 ## Management UI
 
@@ -243,7 +252,7 @@ Image-specific adjustments:
 - the Image connectivity test sends a minimal generation request or the selected operation test payload through the management `api-call` endpoint;
 - list cards retain existing success/failure totals and request-log hover details using the media provider name.
 
-Video and Audio entries initially share the same resource shell and are activated by their own implementation phases. They do not display fake data or placeholder providers.
+Video and Audio entries use the same active resource shell, CRUD flow, multi-key editor, model capability editor, operation editor, and connectivity test as Image Providers. Empty categories display an empty state rather than fake provider data.
 
 ## img-lite Channel Compatibility
 
@@ -298,13 +307,15 @@ UI tests cover:
 - success/failure usage matching;
 - full type-check, lint, Bun/Node tests, production build, and bundled management regression tokens.
 
-A final local integration test runs:
+Final local integration tests run:
 
 ```text
 client -> CPA /v1/images/generations -> configured image provider -> image response
+client -> CPA /v1/media/video/:operation -> configured video provider -> video task/result
+client -> CPA /v1/media/audio/:operation -> configured audio provider -> JSON/binary result
 ```
 
-The first live integration uses the already verified free HuggingFace path through img-lite. Direct paid/token channels are tested after their keys are provided.
+Local fixtures cover all three kinds, multi-key failover, zero-key operation routing, async polling, config hot reload, and request-log provider identity. Direct channel probes are added when their endpoint contracts and keys are available.
 
 ## Compatibility and Delivery Boundary
 

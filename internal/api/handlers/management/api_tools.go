@@ -1,7 +1,9 @@
 package management
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,6 +36,8 @@ type apiCallRequest struct {
 	URL             string            `json:"url"`
 	Header          map[string]string `json:"header"`
 	Data            string            `json:"data"`
+	DataBase64      string            `json:"data_base64"`
+	DataBase64Camel string            `json:"dataBase64"`
 }
 
 type apiCallResponse struct {
@@ -154,7 +158,14 @@ func (h *Handler) performAPICall(ctx context.Context, auth *coreauth.Auth, body 
 	}
 
 	var requestBody io.Reader
-	if body.Data != "" {
+	encodedBody := firstNonEmptyStringValue(body.DataBase64, body.DataBase64Camel)
+	if encodedBody != "" {
+		decoded, errDecode := base64.StdEncoding.DecodeString(encodedBody)
+		if errDecode != nil {
+			return apiCallResponse{}, http.StatusBadRequest, fmt.Errorf("invalid data_base64")
+		}
+		requestBody = bytes.NewReader(decoded)
+	} else if body.Data != "" {
 		requestBody = strings.NewReader(body.Data)
 	}
 
@@ -200,6 +211,15 @@ func (h *Handler) performAPICall(ctx context.Context, auth *coreauth.Auth, body 
 		Header:     resp.Header,
 		Body:       string(respBody),
 	}, http.StatusOK, nil
+}
+
+func firstNonEmptyStringValue(values ...string) string {
+	for _, value := range values {
+		if normalized := strings.TrimSpace(value); normalized != "" {
+			return normalized
+		}
+	}
+	return ""
 }
 
 func firstNonEmptyString(values ...*string) string {

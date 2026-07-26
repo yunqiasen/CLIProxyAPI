@@ -114,6 +114,9 @@ commercial-mode: false
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
 
+# When true, record detailed API request logs and populate the structured request-log index.
+request-log: false
+
 # Structured request-log retention in days. Default is 7; set to 0 to retain forever.
 # This does not change raw application log rotation or logs-max-total-size-mb.
 request-log-retention-days: 7
@@ -444,6 +447,106 @@ nonstream-keepalive-interval: 0
 # codex-header-defaults:
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
 #   beta-features: "multi_agent"
+
+# Media providers for image, video, and audio APIs.
+# Each provider supports a display name, multiple prioritized keys, shared headers,
+# public model aliases, model-free operations, binary/multipart bodies, and async polling.
+# media-providers:
+#   - name: "image-relay"
+#     kind: "image"
+#     base-url: "https://images.example.com/v1"
+#     priority: 10
+#     disable-cooling: false
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     api-key-entries:
+#       - api-key: "img-key-01"
+#         priority: 20
+#       - api-key: "img-key-02"
+#         priority: 10
+#         proxy-url: "socks5://proxy.example.com:1080"
+#     models:
+#       - name: "upstream-image-v1"
+#         alias: "public-image"
+#         display-name: "Public Image"
+#         capabilities: [generate, edit, upscale]
+#     operations:
+#       # Makes /v1/images/generations use this upstream endpoint.
+#       - name: "generate"
+#         capability: "generate"
+#         method: "POST"
+#         path: "/images/generations"
+#         request-format: "json"
+#         model-mode: "required"
+#         response-format: "passthrough"
+#       # Model-free operation: POST /v1/media/image/remove-background
+#       # Short aliases /v1/images/remove-background and /v1/images/background/remove also work.
+#       - name: "remove-background"
+#         capability: "remove-background"
+#         method: "POST"
+#         path: "/images/remove-background"
+#         request-format: "multipart"
+#         model-mode: "none"
+#         response-format: "json-url"
+#         result-path: "output.url"
+#
+#   - name: "video-relay"
+#     kind: "video"
+#     base-url: "https://video.example.com/v1"
+#     api-key-entries:
+#       - api-key: "video-key-01"
+#     models:
+#       - name: "upstream-video-v1"
+#         alias: "public-video"
+#         capabilities: [text-to-video, image-to-video]
+#     operations:
+#       # POST /v1/media/video/text-to-video; submit once, then poll until completed.
+#       - name: "text-to-video"
+#         capability: "text-to-video"
+#         method: "POST"
+#         path: "/videos"
+#         request-format: "json"
+#         model-mode: "required"
+#         response-format: "json-url"
+#         async:
+#           task-id-path: "task_id"
+#           poll-method: "GET"
+#           poll-path: "/videos/{task_id}"
+#           status-path: "status"
+#           success-values: [completed, succeeded]
+#           failure-values: [failed, cancelled]
+#           result-path: "output.url"
+#           poll-interval: "3s"
+#       - name: "remove-watermark"
+#         capability: "remove-watermark"
+#         method: "POST"
+#         path: "/videos/remove-watermark"
+#         request-format: "json"
+#         model-mode: "none"
+#         response-format: "json-url"
+#         result-path: "output.url"
+#
+#   - name: "audio-relay-no-key"
+#     kind: "audio"
+#     base-url: "https://audio.example.com/v1"
+#     # Omit api-key-entries for an upstream that does not require credentials.
+#     operations:
+#       # POST /v1/media/audio/speech and return the upstream audio bytes unchanged.
+#       - name: "speech"
+#         capability: "speech"
+#         method: "POST"
+#         path: "/audio/speech"
+#         request-format: "json"
+#         model-mode: "optional"
+#         model: "fixed-voice-v1"
+#         response-format: "binary"
+#       - name: "clone"
+#         capability: "clone"
+#         method: "POST"
+#         path: "/audio/clone"
+#         request-format: "multipart"
+#         model-mode: "none"
+#         response-format: "passthrough"
 
 # OpenAI compatibility providers
 # openai-compatibility:

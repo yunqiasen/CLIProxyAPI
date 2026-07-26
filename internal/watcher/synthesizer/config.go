@@ -331,14 +331,70 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 	return out
 }
 
-// synthesizeMediaProviders creates one API-key auth per media provider entry.
+// MaterializeMediaProviderAuthIDs returns a copy with a stable auth ID for every
+// credential slot. Existing IDs win; missing IDs use the legacy deterministic
+// identity so the first management edit keeps earlier request-log history.
+func MaterializeMediaProviderAuthIDs(providers []config.MediaProvider) []config.MediaProvider {
+	out := make([]config.MediaProvider, len(providers))
+	idGen := NewStableIDGenerator()
+	used := make(map[string]struct{})
+	reserve := func(preferred, generated string) string {
+		candidate := strings.TrimSpace(preferred)
+		if candidate == "" {
+			candidate = generated
+		}
+		if _, exists := used[candidate]; exists {
+			candidate = generated
+			for suffix := 1; ; suffix++ {
+				if _, exists := used[candidate]; !exists {
+					break
+				}
+				candidate = fmt.Sprintf("%s-%d", generated, suffix)
+			}
+		}
+		used[candidate] = struct{}{}
+		return candidate
+	}
+
+	for i := range providers {
+		provider := providers[i]
+		provider.APIKeyEntries = append([]config.MediaAPIKeyEntry(nil), provider.APIKeyEntries...)
+		kind := strings.ToLower(strings.TrimSpace(provider.Kind))
+		name := strings.TrimSpace(provider.Name)
+		base := strings.TrimSpace(provider.BaseURL)
+		idKind := fmt.Sprintf("media-provider:%s:%s", kind, strings.ToLower(name))
+		if len(provider.APIKeyEntries) == 0 {
+			generated, _ := idGen.Next(idKind, "", base, "")
+			provider.AuthID = reserve(provider.AuthID, generated)
+		} else {
+			for j := range provider.APIKeyEntries {
+				entry := provider.APIKeyEntries[j]
+				generated, _ := idGen.Next(idKind, entry.APIKey, base, entry.ProxyURL)
+				entry.AuthID = reserve(entry.AuthID, generated)
+				provider.APIKeyEntries[j] = entry
+			}
+		}
+		out[i] = provider
+	}
+	return out
+}
+
+func mediaProviderAuthSourceToken(authID string) string {
+	authID = strings.TrimSpace(authID)
+	if separator := strings.LastIndexByte(authID, ':'); separator >= 0 && separator+1 < len(authID) {
+		return authID[separator+1:]
+	}
+	return authID
+}
+
+// synthesizeMediaProviders creates one runtime auth per media credential slot.
 func (s *ConfigSynthesizer) synthesizeMediaProviders(ctx *SynthesisContext) []*coreauth.Auth {
 	cfg := ctx.Config
 	now := ctx.Now
-	idGen := ctx.IDGenerator
+	providers := MaterializeMediaProviderAuthIDs(cfg.MediaProviders)
 	out := make([]*coreauth.Auth, 0)
-	for i := range cfg.MediaProviders {
-		provider := &cfg.MediaProviders[i]
+	for i := range providers {
+		provider := &providers[i]
 		if provider.Disabled {
 			continue
 		}
@@ -346,17 +402,18 @@ func (s *ConfigSynthesizer) synthesizeMediaProviders(ctx *SynthesisContext) []*c
 		name := strings.TrimSpace(provider.Name)
 		base := strings.TrimSpace(provider.BaseURL)
 		providerKey := util.MediaProviderKey(kind, name)
-		idKind := fmt.Sprintf("media-provider:%s:%s", kind, strings.ToLower(name))
 		entries := provider.APIKeyEntries
 		if len(entries) == 0 {
-			entries = []config.MediaAPIKeyEntry{{}}
+			entries = []config.MediaAPIKeyEntry{{AuthID: provider.AuthID}}
 		}
 		for j := range entries {
 			entry := entries[j]
 			key := strings.TrimSpace(entry.APIKey)
 			proxyURL := strings.TrimSpace(entry.ProxyURL)
-			id, token := idGen.Next(idKind, key, base, proxyURL)
+			id := strings.TrimSpace(entry.AuthID)
+			token := mediaProviderAuthSourceToken(id)
 			attrs := map[string]string{
+				"auth_kind":           "api_key",
 				"source":              fmt.Sprintf("config:media-%s[%s]", kind, token),
 				"base_url":            base,
 				"media_kind":          kind,

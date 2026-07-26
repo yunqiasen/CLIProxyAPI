@@ -36,6 +36,8 @@ const (
 
 // MediaProvider configures an image, video, or audio upstream.
 type MediaProvider struct {
+	// AuthID is an internal stable runtime identity retained across management edits.
+	AuthID         string             `yaml:"auth-id,omitempty" json:"auth-index,omitempty"`
 	Name           string             `yaml:"name" json:"name"`
 	Kind           string             `yaml:"kind" json:"kind"`
 	BaseURL        string             `yaml:"base-url" json:"base-url"`
@@ -51,6 +53,8 @@ type MediaProvider struct {
 
 // MediaAPIKeyEntry configures one provider credential.
 type MediaAPIKeyEntry struct {
+	// AuthID is an internal stable runtime identity retained across key edits.
+	AuthID   string `yaml:"auth-id,omitempty" json:"auth-index,omitempty"`
 	APIKey   string `yaml:"api-key" json:"api-key"`
 	Priority *int   `yaml:"priority,omitempty" json:"priority,omitempty"`
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
@@ -160,6 +164,7 @@ func (cfg *Config) SanitizeMediaProviders() {
 	providers := make([]MediaProvider, 0, len(cfg.MediaProviders))
 	for i := range cfg.MediaProviders {
 		provider := cfg.MediaProviders[i]
+		provider.AuthID = strings.TrimSpace(provider.AuthID)
 		provider.Name = strings.TrimSpace(provider.Name)
 		provider.Kind = strings.ToLower(strings.TrimSpace(provider.Kind))
 		provider.BaseURL = strings.TrimRight(strings.TrimSpace(provider.BaseURL), "/")
@@ -176,6 +181,7 @@ func (cfg *Config) SanitizeMediaProviders() {
 		seenKeys := make(map[string]struct{}, len(provider.APIKeyEntries))
 		for j := range provider.APIKeyEntries {
 			entry := provider.APIKeyEntries[j]
+			entry.AuthID = strings.TrimSpace(entry.AuthID)
 			entry.APIKey = strings.TrimSpace(entry.APIKey)
 			entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 			if entry.APIKey == "" {
@@ -304,10 +310,33 @@ func (cfg *Config) FindMediaProvider(kind, name string) *MediaProvider {
 
 // HasMediaCapability reports whether a model can serve a capability.
 func HasMediaCapability(model MediaModel, capability string) bool {
+	want := normalizeMediaCapability(capability)
+	if want == "" {
+		return false
+	}
 	for _, item := range model.Capabilities {
-		if strings.EqualFold(strings.TrimSpace(item), strings.TrimSpace(capability)) {
+		if normalizeMediaCapability(item) == want {
 			return true
 		}
 	}
 	return false
+}
+
+// MediaOperationCapability returns the semantic capability represented by an
+// operation. A standard capability may be declared either explicitly or by
+// using the capability name as the operation name.
+func MediaOperationCapability(operation MediaOperation) string {
+	if capability := normalizeMediaCapability(operation.Capability); capability != "" {
+		return capability
+	}
+	name := normalizeMediaCapability(operation.Name)
+	if _, ok := mediaCapabilities[name]; ok {
+		return name
+	}
+	return ""
+}
+
+func normalizeMediaCapability(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.ReplaceAll(value, "_", "-")
 }

@@ -96,6 +96,69 @@ func TestRequestLogIndexManagerInitialScan(t *testing.T) {
 	}
 }
 
+func TestRequestLogIndexManagerRefreshesLegacyMediaModelOnlyOnce(t *testing.T) {
+	dir := t.TempDir()
+	path := writeMultipartImageEditRequestLog(t, dir, "manager-media")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat multipart image log: %v", err)
+	}
+
+	store, err := openRequestLogStore(dir)
+	if err != nil {
+		t.Fatalf("open seed store: %v", err)
+	}
+	id := requestLogIDFromFilename(filepath.Base(path))
+	_, err = store.db.ExecContext(context.Background(), `INSERT INTO request_log_entries (id, name, raw_log_path, size, modified, timestamp_text, timestamp_unix, url, method, model, status, success, has_error, parser_revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, filepath.Base(path), path, info.Size(), info.ModTime().Unix(), info.ModTime().Format(time.RFC3339Nano), info.ModTime().Unix(), "/v1/images/edits", "POST", "", 200, 1, 0, 0, time.Now().Unix(), time.Now().Unix())
+	if err != nil {
+		_ = store.close()
+		t.Fatalf("insert legacy media row: %v", err)
+	}
+	if err := store.close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	var mu sync.Mutex
+	var batches []int
+	manager, err := newRequestLogIndexManager(dir, requestLogIndexManagerOptions{
+		RetentionDays: func() int { return 7 },
+		BatchHook: func(size int) {
+			mu.Lock()
+			batches = append(batches, size)
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatalf("new request log manager: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := manager.Close(); err != nil {
+			t.Errorf("close request log manager: %v", err)
+		}
+	})
+
+	if err := manager.sync(context.Background()); err != nil {
+		t.Fatalf("first manager sync: %v", err)
+	}
+	items, total, err := manager.List(context.Background(), requestLogQueryOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("list refreshed media row: %v", err)
+	}
+	if total != 1 || len(items) != 1 || items[0].Model != "public-image" {
+		t.Fatalf("refreshed media rows = total:%d items:%#v", total, items)
+	}
+
+	if err := manager.sync(context.Background()); err != nil {
+		t.Fatalf("second manager sync: %v", err)
+	}
+	mu.Lock()
+	gotBatches := append([]int(nil), batches...)
+	mu.Unlock()
+	if !reflect.DeepEqual(gotBatches, []int{1}) {
+		t.Fatalf("batch sizes = %#v, want one legacy refresh only", gotBatches)
+	}
+}
+
 func TestRequestLogIndexManagerCoalescesTriggersAndServesReadsDuringBlockedScan(t *testing.T) {
 	dir := t.TempDir()
 	writeManagerRequestLog(t, dir, "snapshot", time.Now().Add(-time.Minute))

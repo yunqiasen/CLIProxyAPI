@@ -118,6 +118,7 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 - 支持 OpenAI Codex 多账户轮询
 - 支持 Grok Build 多账户轮询
 - 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
+- 图片、视频、音频独立供应商管理，支持自定义操作和异步轮询
 - 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）
 
 ## 新手入门
@@ -181,6 +182,62 @@ claude-api-key:
 ```
 
 随后回退功能提交，恢复上一版管理 UI bundle；若旧程序不识别 `request-log-retention-days`，再删除该字段。原有旧版单 Key 配置不需要转换。
+
+## 媒体供应商
+
+二开管理面板在 AI 供应商下新增独立的**图片供应商**、**视频供应商**、**音频供应商**入口。三类入口共用 `media-providers` 配置，操作方式和 OpenAI 兼容供应商保持一致：供应商名称、Base URL、前缀、共享请求头、供应商优先级、冷却控制、多 Key、Key 独立优先级/代理、模型别名和连接测试。
+
+```yaml
+request-log: true # 结构化成功请求历史和供应商统计需要开启此项
+
+media-providers:
+  - name: "image-relay"
+    kind: "image" # image、video 或 audio
+    base-url: "https://media.example.com/v1"
+    api-key-entries:
+      - api-key: "media-key-01"
+        priority: 20
+      - api-key: "media-key-02"
+        priority: 10
+    models:
+      - name: "upstream-image-v1"
+        alias: "public-image"
+        capabilities: [generate, edit]
+    operations:
+      - name: "generate"
+        capability: "generate"
+        method: "POST"
+        path: "/images/generations"
+        request-format: "json"
+        model-mode: "required"
+        response-format: "passthrough"
+```
+
+对外接口：
+
+```text
+POST /v1/images/generations
+POST /v1/images/edits
+ANY  /v1/media/:kind/:operation
+POST /v1/images/upscale
+POST /v1/images/super-resolution
+POST /v1/images/remove-background
+POST /v1/images/background/remove
+```
+
+两个标准图片接口按 `generate`、`edit` 能力选择模型。通用接口执行已配置的图片、视频或音频操作，覆盖生成、编辑、放大、去背景、视频去水印、语音/音乐生成、克隆和变声等场景。
+
+操作配置说明：
+
+- `model-mode: required` 要求请求携带模型，操作已指定固定 `model` 时除外；`optional` 两种方式都接受；`none` 会移除模型字段，适配不需要模型的 API。
+- `request-format` 支持 `json`、`multipart`、`binary`。
+- `response-format` 支持 `passthrough`、`json-url`、`json-base64`、`binary`；JSON 结果通过 `result-path` 提取。
+- `async` 先提交任务，再用同一个 Key 轮询任务接口，直到命中成功或失败状态。
+- 上游不使用凭证时省略 `api-key-entries`。多 Key 供应商复用现有的优先级、重试、冷却和故障切换逻辑。
+
+原有 `openai-compatibility` 图片模型继续正常使用。只有需要媒体专属操作配置时再迁移。完整图片/视频/音频示例见 [`config.example.yaml`](config.example.yaml)，管理 CRUD 接口为 `/v0/management/media-providers`。
+
+`request-log: true` 用于生成请求日志页面和供应商成功统计所需的结构化成功请求记录。`request-log-retention-days` 控制保留时长（默认 `7` 天，`0` 为永久）；即使关闭结构化请求日志，失败重试仍计入实时统计。
 
 ## 管理 API 文档
 

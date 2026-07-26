@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -101,6 +104,55 @@ func TestGetAPIKeyUsage_IncludesPersistedRequestLogCounts(t *testing.T) {
 	success, failed := sumRecentRequestBuckets(entry.RecentRequests)
 	if success != 1 || failed != 1 {
 		t.Fatalf("persisted recent totals = %d/%d, want 1/1", success, failed)
+	}
+}
+
+func TestGetAPIKeyUsagePrefersEqualSizedLiveOutcomeOverPersistedRequestOutcome(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	for _, auth := range []*coreauth.Auth{
+		{ID: "first-auth", Provider: "media-image-relay", Attributes: map[string]string{"auth_kind": "api_key", "api_key": "first-key", "base_url": "https://images.example/v1", "provider_name": "Image Relay"}},
+		{ID: "second-auth", Provider: "media-image-relay", Attributes: map[string]string{"auth_kind": "api_key", "api_key": "second-key", "base_url": "https://images.example/v1", "provider_name": "Image Relay"}},
+	} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register auth: %v", err)
+		}
+	}
+	manager.MarkResult(context.Background(), coreauth.Result{AuthID: "first-auth", Provider: "media-image-relay", Model: "image", Success: false})
+	manager.MarkResult(context.Background(), coreauth.Result{AuthID: "second-auth", Provider: "media-image-relay", Model: "image", Success: true})
+
+	logsDir := t.TempDir()
+	store, err := openRequestLogStore(logsDir)
+	if err != nil {
+		t.Fatalf("open request log store: %v", err)
+	}
+	now := time.Now()
+	_, err = store.db.ExecContext(context.Background(), `INSERT INTO request_log_entries (id, name, raw_log_path, size, modified, timestamp_text, timestamp_unix, provider, provider_name, auth_id, upstream_url, status, success, has_error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, "retry-request", "retry-request.log", "retry-request.log", 1, now.Unix(), now.Format(time.RFC3339Nano), now.Unix(), "media-image-relay", "Image Relay", "first-auth", "https://images.example/v1/images/generations", 200, 1, 0, now.Unix(), now.Unix())
+	if err != nil {
+		t.Fatalf("insert persisted request: %v", err)
+	}
+	if err := store.close(); err != nil {
+		t.Fatalf("close request log store: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	h.SetLogDirectory(logsDir)
+	attachTestRequestLogSnapshot(t, h, logsDir)
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/api-key-usage", nil)
+	h.GetAPIKeyUsage(ginCtx)
+
+	var payload map[string]map[string]apiKeyUsageEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	first := payload["image relay"]["https://images.example/v1|first-key"]
+	second := payload["image relay"]["https://images.example/v1|second-key"]
+	if first.Success != 0 || first.Failed != 1 || second.Success != 1 || second.Failed != 0 {
+		t.Fatalf("live retry outcomes overwritten by persisted final result: first=%#v second=%#v", first, second)
 	}
 }
 
@@ -255,6 +307,38 @@ func TestGetAPIKeyUsage_IncludesPersistedSuccessAndFailureDetails(t *testing.T) 
 	}
 	if entry.FailureDetails[1].Model != "qwen/qwen3" || entry.FailureDetails[1].Status != 429 || entry.FailureDetails[1].Error != "rate limit" || entry.FailureDetails[1].Count != 2 {
 		t.Fatalf("second failure detail = %#v, want qwen/429/rate limit/2", entry.FailureDetails[1])
+	}
+}
+
+func TestRequestLogStoreAPIKeyUsageDetailsPreferClientModel(t *testing.T) {
+	logsDir := t.TempDir()
+	store, err := openRequestLogStore(logsDir)
+	if err != nil {
+		t.Fatalf("open request log store: %v", err)
+	}
+	defer store.close()
+
+	now := time.Now()
+	insert := func(id string, status, success int, errorPreview string) {
+		t.Helper()
+		_, err := store.db.ExecContext(context.Background(), `INSERT INTO request_log_entries (id, name, raw_log_path, size, modified, timestamp_text, timestamp_unix, provider, auth_id, status, success, has_error, model, upstream_model, error_preview, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, id+".log", id+".log", 1, now.Unix(), now.Format(time.RFC3339Nano), now.Unix(), "media-image", "media-auth", status, success, boolInt(success == 0), "public-image", "vendor-image-v2", errorPreview, errorPreview, now.Unix(), now.Unix())
+		if err != nil {
+			t.Fatalf("insert request log row %s: %v", id, err)
+		}
+	}
+	insert("media-success", 200, 1, "")
+	insert("media-failure", 500, 0, "fixture failure")
+
+	usage, err := store.apiKeyUsageByAuthID(context.Background(), now, nil)
+	if err != nil {
+		t.Fatalf("api key usage: %v", err)
+	}
+	entry := usage["media-auth"]
+	if len(entry.SuccessDetails) != 1 || entry.SuccessDetails[0].Model != "public-image" {
+		t.Fatalf("success details = %#v, want client model public-image", entry.SuccessDetails)
+	}
+	if len(entry.FailureDetails) != 1 || entry.FailureDetails[0].Model != "public-image" {
+		t.Fatalf("failure details = %#v, want client model public-image", entry.FailureDetails)
 	}
 }
 
@@ -540,5 +624,129 @@ func TestGetAPIKeyUsageSnapshotRetentionZeroIncludesOldRows(t *testing.T) {
 	}
 	if rec.Header().Get("X-Request-Log-Retention-Days") != "0" {
 		t.Fatalf("retention header = %q, want 0", rec.Header().Get("X-Request-Log-Retention-Days"))
+	}
+}
+
+func TestGetAPIKeyUsageRetainsIndexedMediaHistoryAfterProviderEdit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logsDir := t.TempDir()
+	stamp, timestamp := requestLogTestTimestamp(0)
+	logPath := filepath.Join(logsDir, fmt.Sprintf("v1-images-generations-%s-media-history.log", stamp))
+	content := strings.Join([]string{
+		"=== REQUEST INFO ===",
+		"Timestamp: " + timestamp,
+		"URL: /v1/images/generations",
+		"Method: POST",
+		"",
+		"=== REQUEST BODY ===",
+		`{"model":"old-public-image","prompt":"history"}`,
+		"",
+		"=== API REQUEST 1 ===",
+		"Upstream URL: https://images.example/v1/images/generations",
+		"HTTP Method: POST",
+		"Auth: provider=media-image-old-images, provider_name=Old%20Images, auth_id=stable-media-auth, type=api_key, encoding=url",
+		"",
+		"Body:",
+		`{"model":"upstream-image","prompt":"history"}`,
+		"",
+		"=== API RESPONSE 1 ===",
+		"Status: 200",
+		"",
+		`{"data":[{"url":"https://images.example/result.png"}]}`,
+		"",
+		"=== RESPONSE ===",
+		"Status: 200",
+		"Content-Type: application/json",
+		"",
+		`{"data":[{"url":"https://images.example/result.png"}]}`,
+	}, "\n")
+	if err := os.WriteFile(logPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write media request log: %v", err)
+	}
+
+	index := newTestRequestLogIndexManager(t, logsDir, requestLogIndexManagerOptions{RetentionDays: func() int { return 7 }})
+	waitForRequestLogManager(t, index, func(status requestLogSyncStatus) bool {
+		return !status.Syncing && !status.LastSyncedAt.IsZero()
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "stable-media-auth",
+		Provider: "media-image-new-images",
+		Attributes: map[string]string{
+			"auth_kind": "api_key", "api_key": "new-key", "base_url": "https://images.example/v1",
+			"media_kind": "image", "media_provider_name": "New Images", "provider_name": "New Images",
+		},
+	}); err != nil {
+		t.Fatalf("register current media auth: %v", err)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{RequestLogRetentionDays: 7}, manager)
+	h.SetLogDirectory(logsDir)
+	h.requestLogIndex = index
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/api-key-usage", nil)
+	h.GetAPIKeyUsage(ginCtx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]map[string]apiKeyUsageEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	entry := payload["new images"]["https://images.example/v1|new-key"]
+	if entry.Success != 1 || entry.Failed != 0 {
+		t.Fatalf("media history after edit = %d/%d, want 1/0", entry.Success, entry.Failed)
+	}
+}
+
+func TestUniqueAPIKeyUsageProtocolBaseMatchDoesNotAttachDeletedMediaProviderHistory(t *testing.T) {
+	lookup := map[string]apiKeyUsageLookupKey{
+		"current": {
+			Provider: "current images", Protocol: "media-image-current-images",
+			BaseURL: "https://images.example/v1", Composite: "https://images.example/v1|current-key",
+		},
+	}
+	if got, ok := uniqueAPIKeyUsageProtocolBaseMatch(lookup, apiKeyUsageHistoricalIdentity{
+		Provider: "deleted images", Protocol: "media-image-deleted-images",
+		UpstreamURL: "https://images.example/v1/images/generations",
+	}); ok {
+		t.Fatalf("deleted media history matched current provider: %#v", got)
+	}
+}
+
+func TestGetAPIKeyUsageIncludesNoKeyMediaProvider(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "public-audio-auth",
+		Provider: "media-audio-public-audio",
+		Attributes: map[string]string{
+			"auth_kind": "api_key", "base_url": "https://audio.example/v1",
+			"media_kind": "audio", "media_provider_name": "Public Audio", "provider_name": "Public Audio",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register no-key media auth: %v", err)
+	}
+	manager.MarkResult(context.Background(), coreauth.Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: "speech", Success: true,
+	})
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{}, manager)
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/api-key-usage", nil)
+	h.GetAPIKeyUsage(ginCtx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]map[string]apiKeyUsageEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	entry := payload["public audio"]["https://audio.example/v1|"]
+	if entry.Success != 1 || entry.Failed != 0 {
+		t.Fatalf("no-key media totals = %d/%d, want 1/0; payload=%#v", entry.Success, entry.Failed, payload)
 	}
 }

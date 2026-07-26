@@ -27,6 +27,15 @@ const ReasoningEffortMetadataKey = "reasoning_effort"
 // ServiceTierMetadataKey stores the client-requested service tier for usage logs.
 const ServiceTierMetadataKey = "service_tier"
 
+// MediaKindMetadataKey stores the selected media kind for custom media routes.
+const MediaKindMetadataKey = "media_kind"
+
+// MediaOperationMetadataKey stores the public media operation name.
+const MediaOperationMetadataKey = "media_operation"
+
+// MediaModelMetadataKey stores the client-requested media model without using it for auth selection.
+const MediaModelMetadataKey = "media_model"
+
 // GenerateMetadataKey stores whether the client requested actual generation for usage logs.
 // Missing or true means generation is enabled; only an explicit false disables generation.
 const GenerateMetadataKey = "generate"

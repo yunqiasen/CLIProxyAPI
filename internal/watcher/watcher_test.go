@@ -82,6 +82,25 @@ func TestBuildAPIKeyClientsCounts(t *testing.T) {
 	}
 }
 
+func TestBuildMediaProviderKeyCounts(t *testing.T) {
+	cfg := &config.Config{MediaProviders: []config.MediaProvider{
+		{Kind: config.MediaKindImage, APIKeyEntries: []config.MediaAPIKeyEntry{{APIKey: "i1"}, {APIKey: "i2"}}},
+		{Kind: config.MediaKindImage, Disabled: true},
+		{Kind: config.MediaKindVideo},
+		{Kind: "AUDIO", APIKeyEntries: []config.MediaAPIKeyEntry{{APIKey: "a1"}}},
+		{Kind: "unknown", APIKeyEntries: []config.MediaAPIKeyEntry{{APIKey: "ignored"}}},
+	}}
+
+	image, video, audio := BuildMediaProviderKeyCounts(cfg)
+	if image != 2 || video != 1 || audio != 1 {
+		t.Fatalf("unexpected media counts: image=%d video=%d audio=%d", image, video, audio)
+	}
+	image, video, audio = BuildMediaProviderKeyCounts(nil)
+	if image != 0 || video != 0 || audio != 0 {
+		t.Fatalf("nil config media counts: image=%d video=%d audio=%d", image, video, audio)
+	}
+}
+
 func TestNormalizeAuthStripsTemporalFields(t *testing.T) {
 	now := time.Now()
 	auth := &coreauth.Auth{

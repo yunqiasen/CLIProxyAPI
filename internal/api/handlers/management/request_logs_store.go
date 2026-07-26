@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +16,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const requestLogDBFilename = "request_logs.db"
+const (
+	requestLogDBFilename     = "request_logs.db"
+	requestLogParserRevision = 1
+)
 
 type requestLogStore struct {
 	path string
@@ -36,7 +40,10 @@ func openRequestLogStore(logDir string) (*requestLogStore, error) {
 		return nil, err
 	}
 	path := filepath.Join(logDir, requestLogDBFilename)
-	db, err := sql.Open("sqlite", path)
+	query := url.Values{}
+	query.Add("_pragma", "busy_timeout(5000)")
+	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -72,6 +79,7 @@ CREATE TABLE IF NOT EXISTS request_log_entries (
   url TEXT,
   method TEXT,
   model TEXT,
+  parser_revision INTEGER NOT NULL DEFAULT 0,
   provider TEXT,
   provider_name TEXT,
   auth_id TEXT,
@@ -138,12 +146,16 @@ func (s *requestLogStore) ensureSchemaColumns(ctx context.Context) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	columns := []string{"provider", "provider_name", "auth_id", "auth_type", "upstream_url", "upstream_model", "channel_model"}
+	columns := []string{"provider", "provider_name", "auth_id", "auth_type", "upstream_url", "upstream_model", "channel_model", "parser_revision"}
 	for _, column := range columns {
 		if _, ok := existing[column]; ok {
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE request_log_entries ADD COLUMN %s TEXT`, column)); err != nil {
+		columnType := "TEXT"
+		if column == "parser_revision" {
+			columnType = "INTEGER NOT NULL DEFAULT 0"
+		}
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE request_log_entries ADD COLUMN %s %s`, column, columnType)); err != nil {
 			return err
 		}
 	}
@@ -191,12 +203,12 @@ func upsertParsedWithExecer(ctx context.Context, execer requestLogExecer, parsed
 	_, err := execer.ExecContext(ctx, `
 INSERT INTO request_log_entries (
   id, name, raw_log_path, size, modified, timestamp_text, timestamp_unix,
-  url, method, model, provider, provider_name, auth_id, auth_type, upstream_url, upstream_model, channel_model, ip, ip_location, status, success,
+  url, method, model, parser_revision, provider, provider_name, auth_id, auth_type, upstream_url, upstream_model, channel_model, ip, ip_location, status, success,
   prompt, output, error, system_prompt,
   available_tools_json, mcps_json, skills_json, called_tools_json, prompt_metadata_json, request_metadata_json,
   prompt_preview, output_preview, error_preview, tool_preview, system_prompt_preview, called_tools_preview,
   session_id, thread_id, turn_id, has_error, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   name=excluded.name,
   raw_log_path=excluded.raw_log_path,
@@ -207,6 +219,7 @@ ON CONFLICT(id) DO UPDATE SET
   url=excluded.url,
   method=excluded.method,
   model=excluded.model,
+  parser_revision=excluded.parser_revision,
   provider=excluded.provider,
   provider_name=excluded.provider_name,
   auth_id=excluded.auth_id,
@@ -239,7 +252,7 @@ ON CONFLICT(id) DO UPDATE SET
   turn_id=excluded.turn_id,
   has_error=excluded.has_error,
   updated_at=excluded.updated_at
-	`, item.ID, item.Name, candidate.path, item.Size, item.Modified, item.Timestamp, candidate.logTime.Unix(), item.URL, item.Method, item.Model, protocolProvider, providerName, item.AuthID, item.AuthType, item.UpstreamURL, item.UpstreamModel, item.ChannelModel, item.IP, item.IPLocation, item.Status, success, parsed.prompt, parsed.output, parsed.error, parsed.promptMetadata.SystemPrompt, string(availableTools), string(mcps), string(skills), string(calledTools), string(promptMetadata), string(requestMetadata), item.PromptPreview, item.OutputPreview, item.ErrorPreview, item.ToolPreview, item.SystemPromptPreview, item.CalledToolsPreview, item.SessionID, item.ThreadID, item.TurnID, hasError, now, now)
+	`, item.ID, item.Name, candidate.path, item.Size, item.Modified, item.Timestamp, candidate.logTime.Unix(), item.URL, item.Method, item.Model, requestLogParserRevision, protocolProvider, providerName, item.AuthID, item.AuthType, item.UpstreamURL, item.UpstreamModel, item.ChannelModel, item.IP, item.IPLocation, item.Status, success, parsed.prompt, parsed.output, parsed.error, parsed.promptMetadata.SystemPrompt, string(availableTools), string(mcps), string(skills), string(calledTools), string(promptMetadata), string(requestMetadata), item.PromptPreview, item.OutputPreview, item.ErrorPreview, item.ToolPreview, item.SystemPromptPreview, item.CalledToolsPreview, item.SessionID, item.ThreadID, item.TurnID, hasError, now, now)
 	return err
 }
 
@@ -261,20 +274,20 @@ func (s *requestLogStore) upsertParsedBatch(ctx context.Context, batch []parsedR
 }
 
 func (s *requestLogStore) compactSyncStates(ctx context.Context) (map[string]requestLogSyncState, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, size, modified FROM request_log_entries`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, size, modified, url, model, parser_revision FROM request_log_entries`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	states := make(map[string]requestLogSyncState)
 	for rows.Next() {
-		var id string
-		var size, modified int64
-		if err := rows.Scan(&id, &size, &modified); err != nil {
+		var id, requestURL, model string
+		var size, modified, parserRevision int64
+		if err := rows.Scan(&id, &size, &modified, &requestURL, &model, &parserRevision); err != nil {
 			return nil, err
 		}
 		if strings.TrimSpace(id) != "" {
-			states[id] = requestLogSyncState{size: size, modified: modified}
+			states[id] = requestLogSyncState{size: size, modified: modified, needsRefresh: needsRequestLogParserRefresh(requestURL, model, parserRevision)}
 		}
 	}
 	return states, rows.Err()
@@ -327,7 +340,7 @@ func syncRequestLogStore(ctx context.Context, store *requestLogStore, dir string
 }
 
 func (s *requestLogStore) syncStates(ctx context.Context) (map[string]requestLogSyncState, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, size, modified, timestamp_text, url, method, model, provider, provider_name, auth_id, auth_type, upstream_url, upstream_model, channel_model, ip, ip_location, status, success, prompt_preview, output_preview, error_preview, tool_preview, system_prompt_preview, called_tools_preview, session_id, thread_id, turn_id, has_error FROM request_log_entries`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, size, modified, timestamp_text, url, method, model, provider, provider_name, auth_id, auth_type, upstream_url, upstream_model, channel_model, ip, ip_location, status, success, prompt_preview, output_preview, error_preview, tool_preview, system_prompt_preview, called_tools_preview, session_id, thread_id, turn_id, has_error, parser_revision FROM request_log_entries`)
 	if err != nil {
 		return nil, err
 	}
@@ -336,21 +349,33 @@ func (s *requestLogStore) syncStates(ctx context.Context) (map[string]requestLog
 	states := make(map[string]requestLogSyncState)
 	for rows.Next() {
 		var id sql.NullString
-		var size, modified, status, success, hasError sql.NullInt64
+		var size, modified, status, success, hasError, parserRevision sql.NullInt64
 		var timestampText, url, method, model, provider, providerName, authID, authType, upstreamURL, upstreamModel, channelModel, ip, ipLocation sql.NullString
 		var promptPreview, outputPreview, errorPreview, toolPreview, systemPromptPreview, calledToolsPreview sql.NullString
 		var sessionID, threadID, turnID sql.NullString
-		if err := rows.Scan(&id, &size, &modified, &timestampText, &url, &method, &model, &provider, &providerName, &authID, &authType, &upstreamURL, &upstreamModel, &channelModel, &ip, &ipLocation, &status, &success, &promptPreview, &outputPreview, &errorPreview, &toolPreview, &systemPromptPreview, &calledToolsPreview, &sessionID, &threadID, &turnID, &hasError); err != nil {
+		if err := rows.Scan(&id, &size, &modified, &timestampText, &url, &method, &model, &provider, &providerName, &authID, &authType, &upstreamURL, &upstreamModel, &channelModel, &ip, &ipLocation, &status, &success, &promptPreview, &outputPreview, &errorPreview, &toolPreview, &systemPromptPreview, &calledToolsPreview, &sessionID, &threadID, &turnID, &hasError, &parserRevision); err != nil {
 			return nil, err
 		}
 		if !id.Valid || strings.TrimSpace(id.String) == "" {
 			continue
 		}
 		state := requestLogSyncState{size: size.Int64, modified: modified.Int64}
-		state.needsRefresh = !size.Valid || !modified.Valid || !timestampText.Valid || !url.Valid || !method.Valid || !model.Valid || !provider.Valid || !authID.Valid || !authType.Valid || !upstreamURL.Valid || !upstreamModel.Valid || !channelModel.Valid || !ip.Valid || !ipLocation.Valid || !status.Valid || !success.Valid || !promptPreview.Valid || !outputPreview.Valid || !errorPreview.Valid || !toolPreview.Valid || !systemPromptPreview.Valid || !calledToolsPreview.Valid || !sessionID.Valid || !threadID.Valid || !turnID.Valid || !hasError.Valid
+		state.needsRefresh = !size.Valid || !modified.Valid || !timestampText.Valid || !url.Valid || !method.Valid || !model.Valid || !provider.Valid || !authID.Valid || !authType.Valid || !upstreamURL.Valid || !upstreamModel.Valid || !channelModel.Valid || !ip.Valid || !ipLocation.Valid || !status.Valid || !success.Valid || !promptPreview.Valid || !outputPreview.Valid || !errorPreview.Valid || !toolPreview.Valid || !systemPromptPreview.Valid || !calledToolsPreview.Valid || !sessionID.Valid || !threadID.Valid || !turnID.Valid || !hasError.Valid || needsRequestLogParserRefresh(url.String, model.String, parserRevision.Int64)
 		states[id.String] = state
 	}
 	return states, rows.Err()
+}
+
+func needsRequestLogParserRefresh(requestURL, model string, parserRevision int64) bool {
+	if parserRevision >= requestLogParserRevision || strings.TrimSpace(model) != "" {
+		return false
+	}
+	parsed, err := url.Parse(strings.TrimSpace(requestURL))
+	if err != nil {
+		return false
+	}
+	path := strings.ToLower(strings.TrimSpace(parsed.Path))
+	return path == "/v1/images/generations" || path == "/v1/images/edits" || strings.HasPrefix(path, "/v1/media/")
 }
 
 type requestLogQueryOptions struct {
@@ -469,7 +494,7 @@ func (s *requestLogStore) failureDetails(ctx context.Context, provider string, l
 	rows, err := s.db.QueryContext(ctx, `
 SELECT
   COALESCE(NULLIF(TRIM(provider_name), ''), NULLIF(TRIM(provider), ''), 'unknown') AS provider_display_name,
-  COALESCE(NULLIF(TRIM(upstream_model), ''), NULLIF(TRIM(model), ''), 'unknown') AS model_name,
+  COALESCE(NULLIF(TRIM(model), ''), NULLIF(TRIM(upstream_model), ''), 'unknown') AS model_name,
   COALESCE(NULLIF(TRIM(error_preview), ''), NULLIF(TRIM(error), ''), 'unknown') AS error_text,
   COUNT(1) AS failure_count
 FROM request_log_entries`+where+`

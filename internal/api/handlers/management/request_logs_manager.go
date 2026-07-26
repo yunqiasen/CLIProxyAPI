@@ -274,7 +274,7 @@ func (m *requestLogIndexManager) sync(ctx context.Context) error {
 	for _, candidate := range candidates {
 		id := requestLogIDFromFilename(candidate.name)
 		seen[id] = struct{}{}
-		if state, ok := states[id]; ok && state.size == candidate.size && state.modified == candidate.modTime.Unix() {
+		if state, ok := states[id]; ok && state.size == candidate.size && state.modified == candidate.modTime.Unix() && !state.needsRefresh {
 			continue
 		}
 		parsed, errParse := parseRequestLogFile(candidate)

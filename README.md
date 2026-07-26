@@ -118,6 +118,7 @@ PackyCode provides special discounts for our software users: register using <a h
 - OpenAI Codex multi-account load balancing
 - Grok Build multi-account load balancing
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
+- Dedicated image, video, and audio providers with custom operations and async polling
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
 ## Getting Started
@@ -181,6 +182,62 @@ claude-api-key:
 ```
 
 Revert the feature commits, restore the previous management UI bundle, and remove `request-log-retention-days` if the older binary does not recognize it. Existing legacy entries require no conversion.
+
+## Media Providers
+
+The forked management panel adds dedicated **Image Providers**, **Video Providers**, and **Audio Providers** entries. All three use the shared `media-providers` configuration and the same provider workflow as OpenAI-compatible providers: display name, Base URL, prefix, shared headers, provider priority, cooldown control, multiple keys, per-key priority/proxy, model aliases, and connectivity testing.
+
+```yaml
+request-log: true # required for structured successful-request history and provider totals
+
+media-providers:
+  - name: "image-relay"
+    kind: "image" # image, video, or audio
+    base-url: "https://media.example.com/v1"
+    api-key-entries:
+      - api-key: "media-key-01"
+        priority: 20
+      - api-key: "media-key-02"
+        priority: 10
+    models:
+      - name: "upstream-image-v1"
+        alias: "public-image"
+        capabilities: [generate, edit]
+    operations:
+      - name: "generate"
+        capability: "generate"
+        method: "POST"
+        path: "/images/generations"
+        request-format: "json"
+        model-mode: "required"
+        response-format: "passthrough"
+```
+
+Public routes:
+
+```text
+POST /v1/images/generations
+POST /v1/images/edits
+ANY  /v1/media/:kind/:operation
+POST /v1/images/upscale
+POST /v1/images/super-resolution
+POST /v1/images/remove-background
+POST /v1/images/background/remove
+```
+
+The two standard image routes select models with `generate` or `edit` capability. The generic route serves configured image, video, or audio operations, including generation, editing, upscaling, background removal, video watermark removal, speech/music generation, cloning, and voice conversion.
+
+Operation controls:
+
+- `model-mode: required` requires a request model unless the operation has a fixed `model`; `optional` accepts either form; `none` removes the model field and supports model-free APIs.
+- `request-format` accepts `json`, `multipart`, or `binary`.
+- `response-format` accepts `passthrough`, `json-url`, `json-base64`, or `binary`; JSON extraction uses `result-path`.
+- `async` submits once and polls the configured task endpoint with the same selected credential until a success/failure status is reached.
+- Omit `api-key-entries` for upstreams that do not use credentials. Providers with multiple keys use the existing priority, retry, cooldown, and failover scheduler.
+
+Existing image models under `openai-compatibility` keep working unchanged. Move one only when it needs the dedicated media operation controls. See the complete image/video/audio examples in [`config.example.yaml`](config.example.yaml). Management CRUD is available at `/v0/management/media-providers`.
+
+`request-log: true` enables structured successful-request records used by the request-log page and provider success totals. `request-log-retention-days` controls their retention (`7` by default, `0` forever). Failed attempts continue to feed live retry statistics even when structured request logging is off.
 
 ## Management API
 

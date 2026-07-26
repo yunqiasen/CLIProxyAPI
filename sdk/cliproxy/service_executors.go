@@ -245,6 +245,17 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	if a.Disabled {
 		return
 	}
+	if mediaProviderKey, _, _, isMedia := mediaProviderInfoFromAuth(a); isMedia {
+		if !forceReplace {
+			if existingExecutor, hasExecutor := s.coreManager.Executor(mediaProviderKey); hasExecutor {
+				if _, isMediaExecutor := existingExecutor.(*executor.MediaExecutor); isMediaExecutor {
+					return
+				}
+			}
+		}
+		s.coreManager.RegisterExecutor(executor.NewMediaExecutor(mediaProviderKey, cfg))
+		return
+	}
 	if compatProviderKey, _, isCompat := openAICompatInfoFromAuth(a); isCompat {
 		if compatProviderKey == "" {
 			compatProviderKey = strings.ToLower(strings.TrimSpace(a.Provider))

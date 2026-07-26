@@ -17,6 +17,7 @@ import (
 	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
 	codexmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/models"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -65,6 +66,11 @@ func (s *Server) setupRoutes() {
 		v1.POST("/completions", openaiHandlers.Completions)
 		v1.POST("/images/generations", openaiHandlers.ImagesGenerations)
 		v1.POST("/images/edits", openaiHandlers.ImagesEdits)
+		v1.POST("/images/upscale", s.mediaOperationAlias(config.MediaKindImage, config.MediaCapabilityUpscale))
+		v1.POST("/images/super-resolution", s.mediaOperationAlias(config.MediaKindImage, config.MediaCapabilitySuperResolution))
+		v1.POST("/images/remove-background", s.mediaOperationAlias(config.MediaKindImage, config.MediaCapabilityRemoveBackground))
+		v1.POST("/images/background/remove", s.mediaOperationAlias(config.MediaKindImage, config.MediaCapabilityRemoveBackground))
+		v1.Any("/media/:kind/:operation", s.handleMediaOperation)
 		v1.POST("/videos", openaiHandlers.XAIVideosGenerations)
 		v1.POST("/videos/generations", openaiHandlers.XAIVideosGenerations)
 		v1.POST("/videos/edits", openaiHandlers.XAIVideosEdits)

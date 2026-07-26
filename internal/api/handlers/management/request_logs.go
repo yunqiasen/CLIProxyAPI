@@ -339,7 +339,6 @@ func (h *Handler) GetRequestLogDetail(c *gin.Context) {
 
 	manager, _ := h.requestLogIndexSnapshot()
 	if manager != nil {
-		manager.TriggerSync()
 		detail, errDetail := manager.Detail(c.Request.Context(), id)
 		h.setRequestLogSyncHeaders(c)
 		if errDetail == nil {
@@ -754,6 +753,8 @@ func isAIRequestLogFilename(name string) bool {
 		"v1-chat-completions-",
 		"v1-completions-",
 		"v1-messages-",
+		"v1-images-",
+		"v1-media-",
 		"v1beta-models-",
 		"api-provider-",
 		"openai-",
@@ -812,7 +813,7 @@ func parseRequestLogFile(candidate requestLogCandidate) (parsedRequestLog, error
 			Timestamp:           timestamp,
 			URL:                 strings.TrimSpace(info["URL"]),
 			Method:              strings.TrimSpace(info["Method"]),
-			Model:               extractModel(requestBody),
+			Model:               extractRequestModel(requestBody, info["URL"]),
 			Provider:            firstNonEmptyRequestLogValue(upstream.ProviderName, upstream.Provider),
 			ProtocolProvider:    upstream.Provider,
 			AuthID:              upstream.AuthID,
@@ -922,11 +923,38 @@ func parseResponseStatus(response string) int {
 
 func extractModel(body string) string {
 	var payload any
-	if err := json.Unmarshal([]byte(body), &payload); err != nil {
-		return ""
+	if err := json.Unmarshal([]byte(body), &payload); err == nil {
+		if object, ok := payload.(map[string]any); ok {
+			if model := stringFromAny(object["model"]); model != "" {
+				return model
+			}
+		}
 	}
-	if object, ok := payload.(map[string]any); ok {
-		return stringFromAny(object["model"])
+
+	// Multipart image edits keep the client model in a form field rather than JSON.
+	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+	for index, line := range lines {
+		if !strings.Contains(strings.ToLower(line), "content-disposition:") || !strings.Contains(strings.ToLower(line), `name="model"`) {
+			continue
+		}
+		for valueIndex := index + 1; valueIndex < len(lines); valueIndex++ {
+			value := strings.TrimSpace(lines[valueIndex])
+			if value == "" || strings.HasPrefix(value, "--") || strings.Contains(strings.ToLower(value), ":") {
+				continue
+			}
+			return value
+		}
+	}
+	return ""
+}
+
+func extractRequestModel(body, requestURL string) string {
+	if model := extractModel(body); model != "" {
+		return model
+	}
+	parsed, errParse := url.Parse(strings.TrimSpace(requestURL))
+	if errParse == nil {
+		return strings.TrimSpace(parsed.Query().Get("model"))
 	}
 	return ""
 }

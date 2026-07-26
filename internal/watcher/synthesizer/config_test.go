@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -909,5 +910,113 @@ func TestConfigSynthesizer_NativeAuthIDCompatibility(t *testing.T) {
 				t.Fatalf("grouped auth ID %q must differ from legacy ID", groupedAuths[0].ID)
 			}
 		})
+	}
+}
+
+func TestConfigSynthesizer_MediaProviderKeys(t *testing.T) {
+	zero := 0
+	twenty := 20
+	ctx := &SynthesisContext{
+		Config: &config.Config{MediaProviders: []config.MediaProvider{
+			{
+				Name: "Image Relay", Kind: config.MediaKindImage, BaseURL: "https://image.example/v1",
+				Priority: 8, Prefix: "images", DisableCooling: true,
+				Headers: map[string]string{"X-Test": "value"},
+				APIKeyEntries: []config.MediaAPIKeyEntry{
+					{APIKey: "key-a", Priority: &zero},
+					{APIKey: "key-b", Priority: &twenty, ProxyURL: "http://proxy.example"},
+				},
+			},
+			{Name: "Disabled", Kind: config.MediaKindImage, BaseURL: "https://disabled.example", Disabled: true, APIKeyEntries: []config.MediaAPIKeyEntry{{APIKey: "skip"}}},
+		}},
+		Now: time.Now(), IDGenerator: NewStableIDGenerator(),
+	}
+	auths, err := NewConfigSynthesizer().Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("Synthesize() error = %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("len(auths) = %d, want 2: %#v", len(auths), auths)
+	}
+	if auths[0].Provider != util.MediaProviderKey(config.MediaKindImage, "Image Relay") || auths[0].Label != "Image Relay" || auths[0].Prefix != "images" {
+		t.Fatalf("first auth identity = %#v", auths[0])
+	}
+	if auths[0].Attributes["priority"] != "0" || auths[1].Attributes["priority"] != "20" {
+		t.Fatalf("priorities = %q, %q", auths[0].Attributes["priority"], auths[1].Attributes["priority"])
+	}
+	if auths[1].ProxyURL != "http://proxy.example" || auths[0].Attributes["header:X-Test"] != "value" {
+		t.Fatalf("proxy/header metadata lost: %#v %#v", auths[0], auths[1])
+	}
+	if auths[0].Attributes["media_kind"] != config.MediaKindImage || auths[0].Attributes["media_provider_name"] != "Image Relay" || auths[0].Attributes["provider_name"] != "Image Relay" {
+		t.Fatalf("media attributes = %#v", auths[0].Attributes)
+	}
+	if value, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !value {
+		t.Fatalf("disable cooling metadata = %#v", auths[0].Metadata)
+	}
+}
+
+func TestConfigSynthesizer_MediaProviderAuthIDsStable(t *testing.T) {
+	cfg := &config.Config{MediaProviders: []config.MediaProvider{{
+		Name: "image", Kind: config.MediaKindImage, BaseURL: "https://image.example",
+		APIKeyEntries: []config.MediaAPIKeyEntry{{APIKey: "key"}},
+	}}}
+	build := func() []*coreauth.Auth {
+		auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{Config: cfg, Now: time.Now(), IDGenerator: NewStableIDGenerator()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return auths
+	}
+	first, second := build(), build()
+	if len(first) != 1 || len(second) != 1 || first[0].ID != second[0].ID {
+		t.Fatalf("unstable IDs: %#v %#v", first, second)
+	}
+}
+
+func TestConfigSynthesizer_MediaProviderPersistedAuthIDsSurviveProviderEdits(t *testing.T) {
+	build := func(name, baseURL, apiKey string) []*coreauth.Auth {
+		cfg := &config.Config{MediaProviders: []config.MediaProvider{
+			{
+				Name: name, Kind: config.MediaKindImage, BaseURL: baseURL,
+				APIKeyEntries: []config.MediaAPIKeyEntry{{APIKey: apiKey, AuthID: "media-provider:image:stable-key"}},
+			},
+			{
+				Name: "Public Audio", Kind: config.MediaKindAudio, BaseURL: "https://audio.example/v1",
+				AuthID: "media-provider:audio:stable-public",
+			},
+		}}
+		auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{Config: cfg, Now: time.Now(), IDGenerator: NewStableIDGenerator()})
+		if err != nil {
+			t.Fatalf("Synthesize() error = %v", err)
+		}
+		return auths
+	}
+
+	before := build("Old Image Relay", "https://old.example/v1", "old-key")
+	after := build("Renamed Image Relay", "https://new.example/v2", "new-key")
+	if len(before) != 2 || len(after) != 2 {
+		t.Fatalf("auth counts = %d/%d, want 2/2", len(before), len(after))
+	}
+	if before[0].ID != "media-provider:image:stable-key" || after[0].ID != before[0].ID {
+		t.Fatalf("key auth ID changed across edit: before=%q after=%q", before[0].ID, after[0].ID)
+	}
+	if before[1].ID != "media-provider:audio:stable-public" || after[1].ID != before[1].ID {
+		t.Fatalf("public auth ID changed across edit: before=%q after=%q", before[1].ID, after[1].ID)
+	}
+}
+
+func TestConfigSynthesizer_NoKeyMediaProviderUsesAPIKeyUsageIdentity(t *testing.T) {
+	cfg := &config.Config{MediaProviders: []config.MediaProvider{{
+		Name: "Public Audio", Kind: config.MediaKindAudio, BaseURL: "https://audio.example/v1",
+	}}}
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config: cfg, Now: time.Now(), IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil || len(auths) != 1 {
+		t.Fatalf("synthesize no-key media auth: count=%d err=%v", len(auths), err)
+	}
+	kind, value := auths[0].AccountInfo()
+	if kind != "api_key" || value != "" {
+		t.Fatalf("no-key media account info = %q/%q, want api_key/empty", kind, value)
 	}
 }

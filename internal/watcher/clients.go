@@ -57,7 +57,8 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 	}
 
 	geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, xaiAPIKeyCount, openAICompatCount := BuildAPIKeyClients(cfg)
-	totalAPIKeyClients := geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + openAICompatCount
+	imageMediaCount, videoMediaCount, audioMediaCount := BuildMediaProviderKeyCounts(cfg)
+	totalAPIKeyClients := geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + openAICompatCount + imageMediaCount + videoMediaCount + audioMediaCount
 	log.Debugf("loaded %d API key clients", totalAPIKeyClients)
 
 	var authFileCount int
@@ -136,7 +137,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.authRescanMu.Unlock()
 	}
 
-	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + openAICompatCount
+	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + openAICompatCount + imageMediaCount + videoMediaCount + audioMediaCount
 
 	if w.reloadCallback != nil {
 		log.Debugf("triggering server update callback before auth refresh")
@@ -146,7 +147,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 	w.refreshAuthState(forceAuthRefresh)
 	redisqueue.NotifyUsageRefresh()
 
-	log.Infof("full client load complete - %d clients (%d auth files + %d Gemini API keys + %d Vertex API keys + %d Claude API keys + %d Codex keys + %d xAI keys + %d OpenAI-compat)",
+	log.Infof("full client load complete - %d clients (%d auth files + %d Gemini API keys + %d Vertex API keys + %d Claude API keys + %d Codex keys + %d xAI keys + %d OpenAI-compat + %d image media auths + %d video media auths + %d audio media auths)",
 		totalNewClients,
 		authFileCount,
 		geminiAPIKeyCount,
@@ -155,6 +156,9 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		codexAPIKeyCount,
 		xaiAPIKeyCount,
 		openAICompatCount,
+		imageMediaCount,
+		videoMediaCount,
+		audioMediaCount,
 	)
 }
 
@@ -410,6 +414,33 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int, int) {
 		}
 	}
 	return geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, xaiAPIKeyCount, openAICompatCount
+}
+
+// BuildMediaProviderKeyCounts returns runtime credential-slot counts by media kind.
+// A keyless provider still owns one selectable runtime auth slot.
+func BuildMediaProviderKeyCounts(cfg *config.Config) (image, video, audio int) {
+	if cfg == nil {
+		return 0, 0, 0
+	}
+	for i := range cfg.MediaProviders {
+		provider := &cfg.MediaProviders[i]
+		if provider.Disabled {
+			continue
+		}
+		slots := len(provider.APIKeyEntries)
+		if slots == 0 {
+			slots = 1
+		}
+		switch strings.ToLower(strings.TrimSpace(provider.Kind)) {
+		case config.MediaKindImage:
+			image += slots
+		case config.MediaKindVideo:
+			video += slots
+		case config.MediaKindAudio:
+			audio += slots
+		}
+	}
+	return image, video, audio
 }
 
 func (w *Watcher) persistConfigAsync() {

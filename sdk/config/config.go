@@ -29,6 +29,11 @@ type VertexCompatModel = internalconfig.VertexCompatModel
 type OpenAICompatibility = internalconfig.OpenAICompatibility
 type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
 type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
+type MediaProvider = internalconfig.MediaProvider
+type MediaAPIKeyEntry = internalconfig.MediaAPIKeyEntry
+type MediaModel = internalconfig.MediaModel
+type MediaOperation = internalconfig.MediaOperation
+type MediaAsyncOperation = internalconfig.MediaAsyncOperation
 
 type TLS = internalconfig.TLSConfig
 
@@ -55,3 +60,22 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 func NormalizeCommentIndentation(data []byte) []byte {
 	return internalconfig.NormalizeCommentIndentation(data)
 }
+
+const (
+	MediaKindImage = internalconfig.MediaKindImage
+	MediaKindVideo = internalconfig.MediaKindVideo
+	MediaKindAudio = internalconfig.MediaKindAudio
+
+	MediaCapabilityGenerate         = internalconfig.MediaCapabilityGenerate
+	MediaCapabilityEdit             = internalconfig.MediaCapabilityEdit
+	MediaCapabilityUpscale          = internalconfig.MediaCapabilityUpscale
+	MediaCapabilitySuperResolution  = internalconfig.MediaCapabilitySuperResolution
+	MediaCapabilityRemoveBackground = internalconfig.MediaCapabilityRemoveBackground
+	MediaCapabilityTextToVideo      = internalconfig.MediaCapabilityTextToVideo
+	MediaCapabilityImageToVideo     = internalconfig.MediaCapabilityImageToVideo
+	MediaCapabilityRemoveWatermark  = internalconfig.MediaCapabilityRemoveWatermark
+	MediaCapabilitySpeech           = internalconfig.MediaCapabilitySpeech
+	MediaCapabilityMusic            = internalconfig.MediaCapabilityMusic
+	MediaCapabilityClone            = internalconfig.MediaCapabilityClone
+	MediaCapabilityVoiceConvert     = internalconfig.MediaCapabilityVoiceConvert
+)

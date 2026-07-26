@@ -180,7 +180,7 @@ SELECT auth_id, model_name, status_code, request_count
 FROM (
   SELECT
     COALESCE(auth_id, '') AS auth_id,
-    COALESCE(NULLIF(TRIM(upstream_model), ''), NULLIF(TRIM(model), ''), 'unknown') AS model_name,
+    COALESCE(NULLIF(TRIM(model), ''), NULLIF(TRIM(upstream_model), ''), 'unknown') AS model_name,
     COALESCE(status, 0) AS status_code,
     COUNT(1) AS request_count
   FROM request_log_entries
@@ -224,7 +224,7 @@ SELECT auth_id, model_name, status_code, error_text, request_count
 FROM (
   SELECT
     COALESCE(auth_id, '') AS auth_id,
-    COALESCE(NULLIF(TRIM(upstream_model), ''), NULLIF(TRIM(model), ''), 'unknown') AS model_name,
+    COALESCE(NULLIF(TRIM(model), ''), NULLIF(TRIM(upstream_model), ''), 'unknown') AS model_name,
     COALESCE(status, 0) AS status_code,
     COALESCE(
       NULLIF(TRIM(error_preview), ''),
@@ -280,11 +280,17 @@ func apiKeyUsageText(value, fallback string) string {
 	return string(runes[:240]) + "..."
 }
 
+func usageProtocolsMatch(historical, current string) bool {
+	historical = strings.ToLower(strings.TrimSpace(historical))
+	current = strings.ToLower(strings.TrimSpace(current))
+	return historical != "" && historical == current
+}
+
 func uniqueAPIKeyUsageProtocolBaseMatch(lookup map[string]apiKeyUsageLookupKey, identity apiKeyUsageHistoricalIdentity) (apiKeyUsageLookupKey, bool) {
 	matches := make(map[string]apiKeyUsageLookupKey)
 	customMatches := make(map[string]apiKeyUsageLookupKey)
 	for _, candidate := range lookup {
-		if identity.Protocol == "" || candidate.Protocol != identity.Protocol {
+		if !usageProtocolsMatch(identity.Protocol, candidate.Protocol) {
 			continue
 		}
 		upstreamURL := strings.TrimRight(strings.ToLower(identity.UpstreamURL), "/")
@@ -513,7 +519,11 @@ func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 			continue
 		}
 		apiKey = strings.TrimSpace(apiKey)
-		if apiKey == "" {
+		isMediaAuth := false
+		if auth.Attributes != nil {
+			isMediaAuth = strings.TrimSpace(auth.Attributes["media_kind"]) != ""
+		}
+		if apiKey == "" && !isMediaAuth {
 			continue
 		}
 		baseURL := ""
@@ -556,7 +566,7 @@ func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 			out[key.Provider] = providerBucket
 		}
 		existing := providerBucket[key.Composite]
-		if persisted.Success+persisted.Failed >= existing.Success+existing.Failed {
+		if persisted.Success+persisted.Failed > existing.Success+existing.Failed {
 			providerBucket[key.Composite] = persisted
 			continue
 		}

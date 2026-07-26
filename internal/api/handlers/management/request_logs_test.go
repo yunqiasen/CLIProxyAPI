@@ -25,6 +25,68 @@ func requestLogTestTimestamp(offset time.Duration) (string, string) {
 	return ts.Format("2006-01-02T150405"), ts.Format(time.RFC3339)
 }
 
+func writeMultipartImageEditRequestLog(t *testing.T, dir, suffix string) string {
+	t.Helper()
+	stamp, timestamp := requestLogTestTimestamp(0)
+	path := filepath.Join(dir, fmt.Sprintf("v1-images-edits-%s-%s.log", stamp, suffix))
+	content := strings.Join([]string{
+		"=== REQUEST INFO ===",
+		"Timestamp: " + timestamp,
+		"URL: /v1/images/edits",
+		"Method: POST",
+		"",
+		"=== REQUEST BODY ===",
+		"--fixture",
+		`Content-Disposition: form-data; name="model"`,
+		"",
+		"public-image",
+		"--fixture--",
+		"",
+		"=== RESPONSE ===",
+		"Status: 200",
+		"Content-Type: application/json",
+		"",
+		`{"data":[{"url":"https://fixture.example/image.png"}]}`,
+		"",
+	}, "\r\n")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write multipart image log: %v", err)
+	}
+	return path
+}
+
+func TestExtractModelReadsMultipartModelField(t *testing.T) {
+	body := strings.Join([]string{
+		"--fixture",
+		`Content-Disposition: form-data; name="model"`,
+		"",
+		"public-image",
+		"--fixture--",
+	}, "\r\n")
+	if got := extractModel(body); got != "public-image" {
+		t.Fatalf("extractModel(multipart) = %q, want public-image", got)
+	}
+}
+
+func TestExtractRequestModelReadsQueryModel(t *testing.T) {
+	if got := extractRequestModel("AUDIO-IN", "/v1/media/audio/speech?model=public-speech"); got != "public-speech" {
+		t.Fatalf("extractRequestModel(query) = %q, want public-speech", got)
+	}
+}
+
+func TestIsAIRequestLogFilenameIncludesMediaRoutes(t *testing.T) {
+	for _, name := range []string{
+		"v1-images-generations-2026-07-26T134302-image.log",
+		"v1-images-remove-background-2026-07-26T134302-image-op.log",
+		"v1-media-video-text-to-video-2026-07-26T134302-video.log",
+		"v1-media-audio-speech-2026-07-26T134302-audio.log",
+	} {
+		if !isAIRequestLogFilename(name) {
+			t.Errorf("isAIRequestLogFilename(%q) = false, want true", name)
+		}
+	}
+}
+
 func TestExtractResponseTextFiltersResponsesToolDeltas(t *testing.T) {
 	response := strings.Join([]string{
 		"Status: 200",
@@ -299,6 +361,38 @@ func TestRequestLogStoreListDetailAndExport(t *testing.T) {
 	}
 }
 
+func TestOpenRequestLogStoreConfiguresBusyTimeoutOnEveryConnection(t *testing.T) {
+	store, err := openRequestLogStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.close()
+
+	connections := make([]*sql.Conn, 0, 4)
+	for i := 0; i < 4; i++ {
+		connection, errConn := store.db.Conn(context.Background())
+		if errConn != nil {
+			t.Fatalf("open connection %d: %v", i, errConn)
+		}
+		connections = append(connections, connection)
+	}
+	defer func() {
+		for _, connection := range connections {
+			_ = connection.Close()
+		}
+	}()
+
+	for i, connection := range connections {
+		var timeout int
+		if errQuery := connection.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&timeout); errQuery != nil {
+			t.Fatalf("query connection %d busy timeout: %v", i, errQuery)
+		}
+		if timeout != 5000 {
+			t.Fatalf("connection %d busy timeout = %d, want 5000", i, timeout)
+		}
+	}
+}
+
 func TestRequestLogStoreFailureDetailsDeduplicatesByProviderModelAndError(t *testing.T) {
 	logsDir := t.TempDir()
 	store, err := openRequestLogStore(logsDir)
@@ -338,11 +432,39 @@ func TestRequestLogStoreFailureDetailsDeduplicatesByProviderModelAndError(t *tes
 	if len(items) != 2 {
 		t.Fatalf("failure details len = %d, want 2: %#v", len(items), items)
 	}
-	if items[0].Provider != "英伟达" || items[0].Model != "minimaxai/minimax-m2.7" || items[0].Error != "empty_stream" || items[0].Count != 2 {
+	if items[0].Provider != "英伟达" || items[0].Model != "cpa-gpt" || items[0].Error != "empty_stream" || items[0].Count != 2 {
 		t.Fatalf("first failure detail = %#v", items[0])
 	}
-	if items[1].Model != "deepseek-ai/deepseek-v3" || items[1].Error != "rate_limit" || items[1].Count != 1 {
+	if items[1].Model != "cpa-gpt" || items[1].Error != "rate_limit" || items[1].Count != 1 {
 		t.Fatalf("second failure detail = %#v", items[1])
+	}
+}
+
+func TestRequestLogStoreFailureDetailsPreferClientModel(t *testing.T) {
+	logsDir := t.TempDir()
+	store, err := openRequestLogStore(logsDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.close()
+
+	now := time.Now()
+	candidate := requestLogCandidate{name: "v1-images-generations-2026-07-26T130000-alias.log", path: filepath.Join(logsDir, "v1-images-generations-2026-07-26T130000-alias.log"), size: 10, modTime: now, logTime: now}
+	parsed := parsedRequestLog{requestLogListItem: requestLogListItem{
+		ID: "alias", Name: candidate.name, Size: candidate.size, Modified: now.Unix(), Timestamp: now.Format(time.RFC3339Nano),
+		URL: "/v1/images/generations", Method: "POST", Model: "public-image", Provider: "image-relay",
+		UpstreamModel: "vendor-image-v2", Status: 500, Success: false, ErrorPreview: "fixture failure", HasError: true,
+	}, error: "fixture failure"}
+	if err := store.upsertParsed(context.Background(), parsed, candidate); err != nil {
+		t.Fatalf("upsert failure: %v", err)
+	}
+
+	items, err := store.failureDetails(context.Background(), "image-relay", 10)
+	if err != nil {
+		t.Fatalf("failure details: %v", err)
+	}
+	if len(items) != 1 || items[0].Model != "public-image" {
+		t.Fatalf("failure details = %#v, want client model public-image", items)
 	}
 }
 
@@ -401,6 +523,53 @@ func TestRequestLogStoreHandlesLegacyNullRowsAndRefreshesThem(t *testing.T) {
 	}
 	if total != 1 || len(items) != 1 || items[0].PromptPreview == "" || items[0].OutputPreview == "" {
 		t.Fatalf("row was not refreshed: total=%d items=%#v", total, items)
+	}
+}
+
+func TestRequestLogStoreBackfillsLegacyMediaModelOnlyOnce(t *testing.T) {
+	logsDir := t.TempDir()
+	logPath := writeMultipartImageEditRequestLog(t, logsDir, "legacy-media")
+	info, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat multipart image log: %v", err)
+	}
+
+	store, err := openRequestLogStore(logsDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.close()
+
+	id := requestLogIDFromFilename(filepath.Base(logPath))
+	_, err = store.db.ExecContext(context.Background(), `INSERT INTO request_log_entries (id, name, raw_log_path, size, modified, timestamp_text, timestamp_unix, url, method, model, status, success, has_error, parser_revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, filepath.Base(logPath), logPath, info.Size(), info.ModTime().Unix(), info.ModTime().Format(time.RFC3339Nano), info.ModTime().Unix(), "/v1/images/edits", "POST", "", 200, 1, 0, 0, time.Now().Unix(), time.Now().Unix())
+	if err != nil {
+		t.Fatalf("insert legacy media row: %v", err)
+	}
+
+	if err := syncRequestLogStore(context.Background(), store, logsDir); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	var model string
+	var parserRevision int
+	if err := store.db.QueryRowContext(context.Background(), `SELECT model, parser_revision FROM request_log_entries WHERE id = ?`, id).Scan(&model, &parserRevision); err != nil {
+		t.Fatalf("query refreshed media row: %v", err)
+	}
+	if model != "public-image" || parserRevision <= 0 {
+		t.Fatalf("refreshed media row model/revision = %q/%d, want public-image/current", model, parserRevision)
+	}
+
+	if _, err := store.db.ExecContext(context.Background(), `UPDATE request_log_entries SET updated_at = 42 WHERE id = ?`, id); err != nil {
+		t.Fatalf("set refresh sentinel: %v", err)
+	}
+	if err := syncRequestLogStore(context.Background(), store, logsDir); err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	var updatedAt int64
+	if err := store.db.QueryRowContext(context.Background(), `SELECT updated_at FROM request_log_entries WHERE id = ?`, id).Scan(&updatedAt); err != nil {
+		t.Fatalf("query refresh sentinel: %v", err)
+	}
+	if updatedAt != 42 {
+		t.Fatalf("updated_at = %d, want 42 after unchanged second sync", updatedAt)
 	}
 }
 
@@ -483,7 +652,7 @@ CREATE TABLE request_log_entries (
 	if err := rows.Err(); err != nil {
 		t.Fatalf("table info rows: %v", err)
 	}
-	for _, column := range []string{"provider", "provider_name", "auth_id", "auth_type", "upstream_url", "upstream_model", "channel_model"} {
+	for _, column := range []string{"provider", "provider_name", "auth_id", "auth_type", "upstream_url", "upstream_model", "channel_model", "parser_revision"} {
 		if !columns[column] {
 			t.Fatalf("migrated schema missing column %s", column)
 		}
@@ -549,7 +718,7 @@ func TestRequestLogStoreFailureDetailsDeduplicateByProviderModelAndError(t *test
 	if len(details) != 2 {
 		t.Fatalf("failureDetails len = %d, want 2: %#v", len(details), details)
 	}
-	if details[0].Provider != "英伟达" || details[0].Model != "minimaxai/minimax-m2.7" || details[0].Error != "quota exceeded" || details[0].Count != 2 {
+	if details[0].Provider != "英伟达" || details[0].Model != "cpa-gpt5" || details[0].Error != "quota exceeded" || details[0].Count != 2 {
 		t.Fatalf("first detail = %#v", details[0])
 	}
 }

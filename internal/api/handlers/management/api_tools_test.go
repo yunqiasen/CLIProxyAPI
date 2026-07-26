@@ -2,7 +2,10 @@ package management
 
 import (
 	"context"
+	"encoding/base64"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -262,5 +265,30 @@ func TestProxyURLFromAPIKeyConfigResolvesGroupedNativeKeys(t *testing.T) {
 				t.Fatalf("proxyURLFromAPIKeyConfig() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPerformAPICallAcceptsBase64RequestBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatal(errRead)
+		}
+		if string(body) != string([]byte{0, 1, 'b', 'i', 'n', 'a', 'r', 'y'}) {
+			t.Fatalf("request body = %q", body)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	h := &Handler{}
+	encoded := base64.StdEncoding.EncodeToString([]byte{0, 1, 'b', 'i', 'n', 'a', 'r', 'y'})
+	response, status, errCall := h.performAPICall(context.Background(), nil, apiCallRequest{
+		Method:     http.MethodPost,
+		URL:        server.URL,
+		DataBase64: encoded,
+	})
+	if errCall != nil || status != http.StatusOK || response.StatusCode != http.StatusNoContent {
+		t.Fatalf("response=%#v status=%d err=%v", response, status, errCall)
 	}
 }

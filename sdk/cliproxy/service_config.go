@@ -16,7 +16,7 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 }
 
 func (s *Service) applyWatcherConfigUpdate(newCfg *config.Config) {
-	s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, false)
+	s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, true)
 }
 
 type configCommit struct {
@@ -247,9 +247,14 @@ func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Con
 
 	registrationCtx := coreauth.WithDeferredAPIKeyModelAliasRebuild(ctx)
 	tasks := make([]modelRegistrationTask, 0, len(auths))
+	activeMediaAuthIDs := make(map[string]struct{})
 	needsAliasRebuild := false
 	for _, auth := range auths {
-		if !coreauth.IsConfigAPIKeyAuth(auth) {
+		isMediaAuth := isConfigMediaProviderAuth(auth)
+		if isMediaAuth {
+			activeMediaAuthIDs[auth.ID] = struct{}{}
+		}
+		if !coreauth.IsConfigAPIKeyAuth(auth) && !isMediaAuth {
 			continue
 		}
 		prepared := s.prepareCoreAuthForModelRegistration(registrationCtx, auth)
@@ -270,6 +275,15 @@ func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Con
 		s.coreManager.RefreshAPIKeyModelAlias()
 	}
 	s.runModelRegistrationTasks(registrationCtx, tasks)
+	for _, existing := range s.coreManager.List() {
+		if !isConfigMediaProviderAuth(existing) {
+			continue
+		}
+		if _, active := activeMediaAuthIDs[existing.ID]; active {
+			continue
+		}
+		s.applyCoreAuthRemoval(registrationCtx, existing.ID)
+	}
 }
 
 func forceHomeRuntimeConfig(cfg *config.Config) {

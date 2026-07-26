@@ -4,6 +4,8 @@
 package util
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/url"
 	"strings"
 
@@ -285,4 +287,45 @@ func shouldMaskQueryParam(key string) bool {
 		return true
 	}
 	return false
+}
+
+// MediaProviderKey returns a stable internal provider key for a media provider.
+func MediaProviderKey(kind, name string) string {
+	kind = providerKeySlug(kind)
+	if kind == "" {
+		kind = "media"
+	}
+	name = mediaProviderNameKey(name)
+	return "media-" + kind + "-" + name
+}
+
+func mediaProviderNameKey(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	slug := providerKeySlug(normalized)
+	if slug == "" {
+		slug = "provider"
+	}
+	if normalized == slug || normalized == "" {
+		return slug
+	}
+	sum := sha256.Sum256([]byte(normalized))
+	return slug + "-" + hex.EncodeToString(sum[:6])
+}
+
+func providerKeySlug(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash && b.Len() > 0 {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }

@@ -8,6 +8,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
@@ -41,8 +42,11 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		}
 	}
 	provider := strings.ToLower(strings.TrimSpace(a.Provider))
+	mediaProviderKey, _, _, mediaDetected := mediaProviderInfoFromAuth(a)
 	compatProviderKey, compatDisplayName, compatDetected := openAICompatInfoFromAuth(a)
-	if compatDetected {
+	if mediaDetected {
+		provider = mediaProviderKey
+	} else if compatDetected {
 		provider = "openai-compatibility"
 	}
 	excluded := s.oauthExcludedModels(provider, authKind)
@@ -60,6 +64,20 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		return
 	}
 	var models []*ModelInfo
+	if mediaDetected {
+		entry := s.resolveConfigMediaProvider(a)
+		if entry == nil {
+			GlobalModelRegistry().UnregisterClient(a.ID)
+			return
+		}
+		models = buildMediaProviderConfigModels(entry)
+		if len(models) == 0 {
+			GlobalModelRegistry().UnregisterClient(a.ID)
+			return
+		}
+		s.registerResolvedModelsForAuth(a, mediaProviderKey, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+		return
+	}
 	switch provider {
 	case constant.Gemini:
 		models = registry.GetGeminiModels()
@@ -341,6 +359,29 @@ func (s *Service) latestAuthForModelRegistration(authID string) (*coreauth.Auth,
 	return auth, true
 }
 
+func (s *Service) resolveConfigMediaProvider(auth *coreauth.Auth) *config.MediaProvider {
+	if s == nil || auth == nil || s.cfg == nil {
+		return nil
+	}
+	providerKey, providerName, kind, ok := mediaProviderInfoFromAuth(auth)
+	if !ok {
+		return nil
+	}
+	for i := range s.cfg.MediaProviders {
+		entry := &s.cfg.MediaProviders[i]
+		if entry.Disabled {
+			continue
+		}
+		if strings.EqualFold(util.MediaProviderKey(entry.Kind, entry.Name), providerKey) {
+			return entry
+		}
+		if strings.EqualFold(strings.TrimSpace(entry.Name), providerName) && strings.EqualFold(strings.TrimSpace(entry.Kind), kind) {
+			return entry
+		}
+	}
+	return nil
+}
+
 func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey {
 	if auth == nil || s.cfg == nil {
 		return nil
@@ -599,6 +640,35 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 		DisplayName: displayName,
 		UserDefined: userDefined,
 	}
+}
+
+func buildMediaProviderConfigModels(provider *config.MediaProvider) []*ModelInfo {
+	if provider == nil || len(provider.Models) == 0 {
+		return nil
+	}
+	kind := strings.ToLower(strings.TrimSpace(provider.Kind))
+	if kind != config.MediaKindImage && kind != config.MediaKindVideo && kind != config.MediaKindAudio {
+		return nil
+	}
+	now := time.Now().Unix()
+	models := make([]*ModelInfo, 0, len(provider.Models))
+	for i := range provider.Models {
+		model := provider.Models[i]
+		modelType := "media-" + kind
+		if kind == config.MediaKindImage {
+			for _, capability := range model.Capabilities {
+				if strings.EqualFold(strings.TrimSpace(capability), config.MediaCapabilityGenerate) || strings.EqualFold(strings.TrimSpace(capability), config.MediaCapabilityEdit) {
+					modelType = registry.OpenAIImageModelType
+					break
+				}
+			}
+		}
+		info := buildConfiguredModelInfo(model, provider.Name, modelType, now, strings.TrimSpace(model.Name), true)
+		if info != nil {
+			models = append(models, info)
+		}
+	}
+	return models
 }
 
 func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []*ModelInfo {

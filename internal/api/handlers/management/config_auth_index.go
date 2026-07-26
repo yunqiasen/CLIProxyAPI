@@ -92,6 +92,32 @@ func (h *Handler) liveAuthIndexByID() map[string]string {
 	return out
 }
 
+func (h *Handler) liveAuthIDByIndex() map[string]string {
+	out := map[string]string{}
+	if h == nil {
+		return out
+	}
+	h.mu.Lock()
+	manager := h.authManager
+	h.mu.Unlock()
+	if manager == nil {
+		return out
+	}
+	for _, auth := range manager.List() {
+		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		index := strings.TrimSpace(auth.Index)
+		if index == "" {
+			index = auth.EnsureIndex()
+		}
+		if index != "" {
+			out[index] = strings.TrimSpace(auth.ID)
+		}
+	}
+	return out
+}
+
 func (h *Handler) geminiKeysWithAuthIndex() []geminiKeyWithAuthIndex {
 	if h == nil {
 		return nil

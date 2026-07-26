@@ -40,6 +40,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeXAIKeys(ctx)...)
 	// OpenAI-compat
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
+	// Media providers
+	out = append(out, s.synthesizeMediaProviders(ctx)...)
 	// Vertex-compat
 	out = append(out, s.synthesizeVertexCompat(ctx)...)
 
@@ -324,6 +326,125 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				a.Metadata = nil
 			}
 			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// MaterializeMediaProviderAuthIDs returns a copy with a stable auth ID for every
+// credential slot. Existing IDs win; missing IDs use the legacy deterministic
+// identity so the first management edit keeps earlier request-log history.
+func MaterializeMediaProviderAuthIDs(providers []config.MediaProvider) []config.MediaProvider {
+	out := make([]config.MediaProvider, len(providers))
+	idGen := NewStableIDGenerator()
+	used := make(map[string]struct{})
+	reserve := func(preferred, generated string) string {
+		candidate := strings.TrimSpace(preferred)
+		if candidate == "" {
+			candidate = generated
+		}
+		if _, exists := used[candidate]; exists {
+			candidate = generated
+			for suffix := 1; ; suffix++ {
+				if _, exists := used[candidate]; !exists {
+					break
+				}
+				candidate = fmt.Sprintf("%s-%d", generated, suffix)
+			}
+		}
+		used[candidate] = struct{}{}
+		return candidate
+	}
+
+	for i := range providers {
+		provider := providers[i]
+		provider.APIKeyEntries = append([]config.MediaAPIKeyEntry(nil), provider.APIKeyEntries...)
+		kind := strings.ToLower(strings.TrimSpace(provider.Kind))
+		name := strings.TrimSpace(provider.Name)
+		base := strings.TrimSpace(provider.BaseURL)
+		idKind := fmt.Sprintf("media-provider:%s:%s", kind, strings.ToLower(name))
+		if len(provider.APIKeyEntries) == 0 {
+			generated, _ := idGen.Next(idKind, "", base, "")
+			provider.AuthID = reserve(provider.AuthID, generated)
+		} else {
+			for j := range provider.APIKeyEntries {
+				entry := provider.APIKeyEntries[j]
+				generated, _ := idGen.Next(idKind, entry.APIKey, base, entry.ProxyURL)
+				entry.AuthID = reserve(entry.AuthID, generated)
+				provider.APIKeyEntries[j] = entry
+			}
+		}
+		out[i] = provider
+	}
+	return out
+}
+
+func mediaProviderAuthSourceToken(authID string) string {
+	authID = strings.TrimSpace(authID)
+	if separator := strings.LastIndexByte(authID, ':'); separator >= 0 && separator+1 < len(authID) {
+		return authID[separator+1:]
+	}
+	return authID
+}
+
+// synthesizeMediaProviders creates one runtime auth per media credential slot.
+func (s *ConfigSynthesizer) synthesizeMediaProviders(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	providers := MaterializeMediaProviderAuthIDs(cfg.MediaProviders)
+	out := make([]*coreauth.Auth, 0)
+	for i := range providers {
+		provider := &providers[i]
+		if provider.Disabled {
+			continue
+		}
+		kind := strings.ToLower(strings.TrimSpace(provider.Kind))
+		name := strings.TrimSpace(provider.Name)
+		base := strings.TrimSpace(provider.BaseURL)
+		providerKey := util.MediaProviderKey(kind, name)
+		entries := provider.APIKeyEntries
+		if len(entries) == 0 {
+			entries = []config.MediaAPIKeyEntry{{AuthID: provider.AuthID}}
+		}
+		for j := range entries {
+			entry := entries[j]
+			key := strings.TrimSpace(entry.APIKey)
+			proxyURL := strings.TrimSpace(entry.ProxyURL)
+			id := strings.TrimSpace(entry.AuthID)
+			token := mediaProviderAuthSourceToken(id)
+			attrs := map[string]string{
+				"auth_kind":           "api_key",
+				"source":              fmt.Sprintf("config:media-%s[%s]", kind, token),
+				"base_url":            base,
+				"media_kind":          kind,
+				"media_provider_name": name,
+				"provider_name":       name,
+				"provider_key":        providerKey,
+			}
+			if key != "" {
+				attrs["api_key"] = key
+			}
+			priority := provider.Priority
+			if entry.Priority != nil {
+				priority = *entry.Priority
+			}
+			if priority != 0 || entry.Priority != nil || provider.Priority != 0 {
+				attrs["priority"] = strconv.Itoa(priority)
+			}
+			addConfigHeadersToAttrs(provider.Headers, attrs)
+			metadata := map[string]any{}
+			if provider.DisableCooling {
+				metadata["disable_cooling"] = true
+			}
+			auth := &coreauth.Auth{
+				ID: id, Provider: providerKey, Label: name, Prefix: strings.TrimSpace(provider.Prefix),
+				Status: coreauth.StatusActive, ProxyURL: proxyURL, Attributes: attrs, Metadata: metadata,
+				CreatedAt: now, UpdatedAt: now,
+			}
+			if len(auth.Metadata) == 0 {
+				auth.Metadata = nil
+			}
+			out = append(out, auth)
 		}
 	}
 	return out

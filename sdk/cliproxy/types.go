@@ -70,6 +70,15 @@ type APIKeyClientResult struct {
 
 	// OpenAICompatCount is the number of OpenAI compatibility API keys loaded
 	OpenAICompatCount int
+
+	// ImageMediaAuthCount is the number of selectable image media auth slots loaded.
+	ImageMediaAuthCount int
+
+	// VideoMediaAuthCount is the number of selectable video media auth slots loaded.
+	VideoMediaAuthCount int
+
+	// AudioMediaAuthCount is the number of selectable audio media auth slots loaded.
+	AudioMediaAuthCount int
 }
 
 // WatcherFactory creates a watcher for configuration and token changes.

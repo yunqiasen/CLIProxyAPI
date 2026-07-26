@@ -406,6 +406,30 @@ func resolveCooldownStateAuthDir(cfg *config.Config) (string, error) {
 	return authDir, nil
 }
 
+func mediaProviderInfoFromAuth(a *coreauth.Auth) (providerKey string, providerName string, kind string, ok bool) {
+	if a == nil || a.Attributes == nil {
+		return "", "", "", false
+	}
+	kind = strings.ToLower(strings.TrimSpace(a.Attributes["media_kind"]))
+	providerName = strings.TrimSpace(a.Attributes["media_provider_name"])
+	providerKey = strings.ToLower(strings.TrimSpace(a.Attributes["provider_key"]))
+	if kind == "" || providerName == "" {
+		return "", "", "", false
+	}
+	if providerKey == "" {
+		providerKey = util.MediaProviderKey(kind, providerName)
+	}
+	return providerKey, providerName, kind, true
+}
+
+func isConfigMediaProviderAuth(auth *coreauth.Auth) bool {
+	if auth == nil || auth.AuthSourceKind() != coreauth.AuthSourceConfig {
+		return false
+	}
+	_, _, _, ok := mediaProviderInfoFromAuth(auth)
+	return ok
+}
+
 func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName string, ok bool) {
 	if a == nil {
 		return "", "", false

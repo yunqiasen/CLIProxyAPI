@@ -2,13 +2,19 @@ package cliproxy
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 func testMediaProvider() config.MediaProvider {
@@ -157,6 +163,61 @@ func TestApplyWatcherConfigUpdateSynchronizesMediaAuthBeforeReturn(t *testing.T)
 	models := modelRegistry.GetModelsForClient(authID)
 	if len(models) != 1 || models[0].ID != "after-image" {
 		t.Fatalf("updated registered models = %#v, want after-image", models)
+	}
+}
+
+func TestApplyWatcherConfigUpdateRebindsMediaExecutorWhenProviderNameReturnsToPreviousValue(t *testing.T) {
+	const authID = "media-name-round-trip-auth"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/images/generations" {
+			http.Error(w, "unexpected path", http.StatusNotFound)
+			return
+		}
+		_, _ = io.WriteString(w, `{"data":[{"url":"https://images.example/final.png"}]}`)
+	}))
+	t.Cleanup(upstream.Close)
+
+	providerA := testMediaProvider()
+	providerA.Name = "Image Relay A"
+	providerA.BaseURL = upstream.URL + "/v1"
+	providerA.APIKeyEntries = []config.MediaAPIKeyEntry{{AuthID: authID, APIKey: "round-trip-key"}}
+	configA := &config.Config{MediaProviders: []config.MediaProvider{providerA}}
+	service := &Service{cfg: configA, coreManager: coreauth.NewManager(nil, nil, nil)}
+	service.registerConfigAPIKeyAuths(context.Background(), configA)
+	modelRegistry := registry.GetGlobalRegistry()
+	t.Cleanup(func() { modelRegistry.UnregisterClient(authID) })
+
+	providerB := providerA
+	providerB.Name = "Image Relay B"
+	service.applyWatcherConfigUpdate(&config.Config{MediaProviders: []config.MediaProvider{providerB}})
+	service.applyWatcherConfigUpdate(&config.Config{MediaProviders: []config.MediaProvider{providerA}})
+
+	auth, ok := service.coreManager.GetByID(authID)
+	if !ok || auth == nil {
+		t.Fatal("round-trip media auth is unavailable")
+	}
+	resolved, ok := service.coreManager.Executor(auth.Provider)
+	if !ok || resolved == nil {
+		t.Fatalf("round-trip media executor %q is unavailable", auth.Provider)
+	}
+	mediaExecutor, ok := resolved.(*runtimeexecutor.MediaExecutor)
+	if !ok {
+		t.Fatalf("round-trip executor type = %T, want *executor.MediaExecutor", resolved)
+	}
+
+	response, err := mediaExecutor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "public-image",
+		Payload: []byte(`{"model":"public-image","prompt":"round trip"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Headers:      http.Header{"Content-Type": []string{"application/json"}},
+		Metadata:     map[string]any{cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations"},
+	})
+	if err != nil {
+		t.Fatalf("Execute() after A -> B -> A error = %v", err)
+	}
+	if !strings.Contains(string(response.Payload), "final.png") {
+		t.Fatalf("Execute() response = %s", response.Payload)
 	}
 }
 

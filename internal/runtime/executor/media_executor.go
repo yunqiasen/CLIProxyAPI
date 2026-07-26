@@ -37,6 +37,11 @@ func NewMediaExecutor(provider string, cfg *config.Config) *MediaExecutor {
 	return &MediaExecutor{provider: strings.ToLower(strings.TrimSpace(provider)), cfg: cfg}
 }
 
+// UsesConfig reports whether the executor was created for cfg.
+func (e *MediaExecutor) UsesConfig(cfg *config.Config) bool {
+	return e != nil && e.cfg == cfg
+}
+
 // Identifier returns the provider key handled by this executor.
 func (e *MediaExecutor) Identifier() string {
 	if e == nil {

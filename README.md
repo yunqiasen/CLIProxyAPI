@@ -239,6 +239,8 @@ Existing image models under `openai-compatibility` keep working unchanged. Move 
 
 `request-log: true` enables structured successful-request records used by the request-log page and provider success totals. `request-log-retention-days` controls their retention (`7` by default, `0` forever). Failed attempts continue to feed live retry statistics even when structured request logging is off.
 
+Hot-reload edits to a provider name, Base URL, key, model, or operation retain each existing key's stable identity and success/failure totals. A newly added key receives its own independent usage identity.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)

@@ -248,7 +248,7 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	if mediaProviderKey, _, _, isMedia := mediaProviderInfoFromAuth(a); isMedia {
 		if !forceReplace {
 			if existingExecutor, hasExecutor := s.coreManager.Executor(mediaProviderKey); hasExecutor {
-				if _, isMediaExecutor := existingExecutor.(*executor.MediaExecutor); isMediaExecutor {
+				if mediaExecutor, isMediaExecutor := existingExecutor.(*executor.MediaExecutor); isMediaExecutor && mediaExecutor.UsesConfig(cfg) {
 					return
 				}
 			}

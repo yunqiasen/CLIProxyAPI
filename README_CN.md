@@ -239,6 +239,8 @@ POST /v1/images/background/remove
 
 `request-log: true` 用于生成请求日志页面和供应商成功统计所需的结构化成功请求记录。`request-log-retention-days` 控制保留时长（默认 `7` 天，`0` 为永久）；即使关闭结构化请求日志，失败重试仍计入实时统计。
 
+管理面板热加载保存供应商名称、Base URL、Key、模型或操作配置时，会保留已有 Key 的稳定身份以及成功/失败统计；新增 Key 会创建独立统计身份。
+
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)

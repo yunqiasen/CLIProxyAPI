@@ -40,6 +40,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeXAIKeys(ctx)...)
 	// OpenAI-compat
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
+	// Media providers
+	out = append(out, s.synthesizeMediaProviders(ctx)...)
 	// Vertex-compat
 	out = append(out, s.synthesizeVertexCompat(ctx)...)
 
@@ -324,6 +326,67 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				a.Metadata = nil
 			}
 			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// synthesizeMediaProviders creates one API-key auth per media provider entry.
+func (s *ConfigSynthesizer) synthesizeMediaProviders(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+	out := make([]*coreauth.Auth, 0)
+	for i := range cfg.MediaProviders {
+		provider := &cfg.MediaProviders[i]
+		if provider.Disabled {
+			continue
+		}
+		kind := strings.ToLower(strings.TrimSpace(provider.Kind))
+		name := strings.TrimSpace(provider.Name)
+		base := strings.TrimSpace(provider.BaseURL)
+		providerKey := util.MediaProviderKey(kind, name)
+		idKind := fmt.Sprintf("media-provider:%s:%s", kind, strings.ToLower(name))
+		entries := provider.APIKeyEntries
+		if len(entries) == 0 {
+			entries = []config.MediaAPIKeyEntry{{}}
+		}
+		for j := range entries {
+			entry := entries[j]
+			key := strings.TrimSpace(entry.APIKey)
+			proxyURL := strings.TrimSpace(entry.ProxyURL)
+			id, token := idGen.Next(idKind, key, base, proxyURL)
+			attrs := map[string]string{
+				"source":              fmt.Sprintf("config:media-%s[%s]", kind, token),
+				"base_url":            base,
+				"media_kind":          kind,
+				"media_provider_name": name,
+				"provider_key":        providerKey,
+			}
+			if key != "" {
+				attrs["api_key"] = key
+			}
+			priority := provider.Priority
+			if entry.Priority != nil {
+				priority = *entry.Priority
+			}
+			if priority != 0 || entry.Priority != nil || provider.Priority != 0 {
+				attrs["priority"] = strconv.Itoa(priority)
+			}
+			addConfigHeadersToAttrs(provider.Headers, attrs)
+			metadata := map[string]any{}
+			if provider.DisableCooling {
+				metadata["disable_cooling"] = true
+			}
+			auth := &coreauth.Auth{
+				ID: id, Provider: providerKey, Label: name, Prefix: strings.TrimSpace(provider.Prefix),
+				Status: coreauth.StatusActive, ProxyURL: proxyURL, Attributes: attrs, Metadata: metadata,
+				CreatedAt: now, UpdatedAt: now,
+			}
+			if len(auth.Metadata) == 0 {
+				auth.Metadata = nil
+			}
+			out = append(out, auth)
 		}
 	}
 	return out

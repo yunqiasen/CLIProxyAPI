@@ -911,3 +911,63 @@ func TestConfigSynthesizer_NativeAuthIDCompatibility(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigSynthesizer_MediaProviderKeys(t *testing.T) {
+	zero := 0
+	twenty := 20
+	ctx := &SynthesisContext{
+		Config: &config.Config{MediaProviders: []config.MediaProvider{
+			{
+				Name: "Image Relay", Kind: config.MediaKindImage, BaseURL: "https://image.example/v1",
+				Priority: 8, Prefix: "images", DisableCooling: true,
+				Headers: map[string]string{"X-Test": "value"},
+				APIKeyEntries: []config.MediaAPIKeyEntry{
+					{APIKey: "key-a", Priority: &zero},
+					{APIKey: "key-b", Priority: &twenty, ProxyURL: "http://proxy.example"},
+				},
+			},
+			{Name: "Disabled", Kind: config.MediaKindImage, BaseURL: "https://disabled.example", Disabled: true, APIKeyEntries: []config.MediaAPIKeyEntry{{APIKey: "skip"}}},
+		}},
+		Now: time.Now(), IDGenerator: NewStableIDGenerator(),
+	}
+	auths, err := NewConfigSynthesizer().Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("Synthesize() error = %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("len(auths) = %d, want 2: %#v", len(auths), auths)
+	}
+	if auths[0].Provider != "media-image-image-relay" || auths[0].Label != "Image Relay" || auths[0].Prefix != "images" {
+		t.Fatalf("first auth identity = %#v", auths[0])
+	}
+	if auths[0].Attributes["priority"] != "0" || auths[1].Attributes["priority"] != "20" {
+		t.Fatalf("priorities = %q, %q", auths[0].Attributes["priority"], auths[1].Attributes["priority"])
+	}
+	if auths[1].ProxyURL != "http://proxy.example" || auths[0].Attributes["header:X-Test"] != "value" {
+		t.Fatalf("proxy/header metadata lost: %#v %#v", auths[0], auths[1])
+	}
+	if auths[0].Attributes["media_kind"] != config.MediaKindImage || auths[0].Attributes["media_provider_name"] != "Image Relay" {
+		t.Fatalf("media attributes = %#v", auths[0].Attributes)
+	}
+	if value, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !value {
+		t.Fatalf("disable cooling metadata = %#v", auths[0].Metadata)
+	}
+}
+
+func TestConfigSynthesizer_MediaProviderAuthIDsStable(t *testing.T) {
+	cfg := &config.Config{MediaProviders: []config.MediaProvider{{
+		Name: "image", Kind: config.MediaKindImage, BaseURL: "https://image.example",
+		APIKeyEntries: []config.MediaAPIKeyEntry{{APIKey: "key"}},
+	}}}
+	build := func() []*coreauth.Auth {
+		auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{Config: cfg, Now: time.Now(), IDGenerator: NewStableIDGenerator()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return auths
+	}
+	first, second := build(), build()
+	if len(first) != 1 || len(second) != 1 || first[0].ID != second[0].ID {
+		t.Fatalf("unstable IDs: %#v %#v", first, second)
+	}
+}

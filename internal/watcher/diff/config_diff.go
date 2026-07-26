@@ -384,6 +384,14 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		}
 	}
 
+	// Media providers (summarized and redacted)
+	if media := DiffMediaProviders(oldCfg.MediaProviders, newCfg.MediaProviders); len(media) > 0 {
+		changes = append(changes, "media-providers:")
+		for _, item := range media {
+			changes = append(changes, "  "+item)
+		}
+	}
+
 	// Vertex-compatible API keys
 	if len(oldCfg.VertexCompatAPIKey) != len(newCfg.VertexCompatAPIKey) {
 		changes = append(changes, fmt.Sprintf("vertex-api-key count: %d -> %d", len(oldCfg.VertexCompatAPIKey), len(newCfg.VertexCompatAPIKey)))

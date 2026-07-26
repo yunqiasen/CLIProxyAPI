@@ -286,3 +286,34 @@ func shouldMaskQueryParam(key string) bool {
 	}
 	return false
 }
+
+// MediaProviderKey returns a stable internal provider key for a media provider.
+func MediaProviderKey(kind, name string) string {
+	kind = providerKeySlug(kind)
+	name = providerKeySlug(name)
+	if kind == "" {
+		kind = "media"
+	}
+	if name == "" {
+		name = "provider"
+	}
+	return "media-" + kind + "-" + name
+}
+
+func providerKeySlug(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash && b.Len() > 0 {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}

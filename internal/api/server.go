@@ -1074,6 +1074,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)
 		mgmt.DELETE("/openai-compatibility", s.mgmt.DeleteOpenAICompat)
 
+		mgmt.GET("/media-providers", s.mgmt.GetMediaProviders)
+		mgmt.PUT("/media-providers", s.mgmt.PutMediaProviders)
+		mgmt.PATCH("/media-providers", s.mgmt.PatchMediaProviders)
+		mgmt.DELETE("/media-providers", s.mgmt.DeleteMediaProviders)
+
 		mgmt.GET("/vertex-api-key", s.mgmt.GetVertexCompatKeys)
 		mgmt.PUT("/vertex-api-key", s.mgmt.PutVertexCompatKeys)
 		mgmt.PATCH("/vertex-api-key", s.mgmt.PatchVertexCompatKey)

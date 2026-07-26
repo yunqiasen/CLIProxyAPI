@@ -29,6 +29,11 @@ type VertexCompatModel = internalconfig.VertexCompatModel
 type OpenAICompatibility = internalconfig.OpenAICompatibility
 type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
 type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
+type MediaProvider = internalconfig.MediaProvider
+type MediaAPIKeyEntry = internalconfig.MediaAPIKeyEntry
+type MediaModel = internalconfig.MediaModel
+type MediaOperation = internalconfig.MediaOperation
+type MediaAsyncOperation = internalconfig.MediaAsyncOperation
 
 type TLS = internalconfig.TLSConfig
 

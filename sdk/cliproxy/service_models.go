@@ -2,11 +2,13 @@ package cliproxy
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -132,6 +134,15 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		}
 		models = applyExcludedModels(models, excluded)
 	case "codex":
+		if authKind == "apikey" {
+			if entry := s.resolveConfigCodexKey(a); entry != nil {
+				models = buildCodexConfigModels(entry)
+				excluded = entry.ExcludedModels
+			}
+			models = applyExcludedModels(models, excluded)
+			break
+		}
+
 		codexPlanType := ""
 		if a.Attributes != nil {
 			codexPlanType = strings.TrimSpace(a.Attributes["plan_type"])
@@ -147,14 +158,6 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			models = registry.GetCodexFreeModels()
 		default:
 			models = registry.GetCodexProModels()
-		}
-		if entry := s.resolveConfigCodexKey(a); entry != nil {
-			if len(entry.Models) > 0 {
-				models = buildCodexConfigModels(entry)
-			}
-			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
-			}
 		}
 		models = applyExcludedModels(models, excluded)
 	case "kimi":
@@ -210,7 +213,29 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 					isCompatAuth = true
 				}
 			}
-			if cached, ok := compatCache.lookup(compatName); ok {
+			registerCompat := func(compat *config.OpenAICompatibility) bool {
+				if compat == nil || compat.Disabled {
+					return false
+				}
+				isCompatAuth = true
+				ms := buildOpenAICompatibilityConfigModels(compat)
+				if providerKey == "" {
+					providerKey = "openai-compatibility"
+				}
+				if len(ms) > 0 {
+					ms = s.appendPluginModels(providerKey, ms)
+					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
+				} else {
+					ms = s.appendPluginModels(providerKey, nil)
+					if len(ms) > 0 {
+						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
+					} else {
+						GlobalModelRegistry().UnregisterClient(a.ID)
+					}
+				}
+				return true
+			}
+			if cached, ok := compatCache.lookup(a, compatName); ok {
 				isCompatAuth = true
 				if providerKey == "" {
 					providerKey = cached.providerKey
@@ -232,30 +257,12 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				}
 				return
 			}
+			if indexed := configEntryForAuthIndex(a, s.cfg.OpenAICompatibility); indexed != nil && registerCompat(indexed) {
+				return
+			}
 			for i := range s.cfg.OpenAICompatibility {
 				compat := &s.cfg.OpenAICompatibility[i]
-				if compat.Disabled {
-					continue
-				}
-				if strings.EqualFold(compat.Name, compatName) {
-					isCompatAuth = true
-					ms := buildOpenAICompatibilityConfigModels(compat)
-					// Register and return
-					if len(ms) > 0 {
-						if providerKey == "" {
-							providerKey = "openai-compatibility"
-						}
-						ms = s.appendPluginModels(providerKey, ms)
-						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
-					} else {
-						// Ensure stale registrations are cleared when model list becomes empty.
-						ms = s.appendPluginModels(providerKey, nil)
-						if len(ms) > 0 {
-							s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
-						} else {
-							GlobalModelRegistry().UnregisterClient(a.ID)
-						}
-					}
+				if strings.EqualFold(compat.Name, compatName) && registerCompat(compat) {
 					return
 				}
 			}
@@ -382,11 +389,25 @@ func (s *Service) resolveConfigMediaProvider(auth *coreauth.Auth) *config.MediaP
 	return nil
 }
 
+func configEntryForAuthIndex[T any](auth *coreauth.Auth, entries []T) *T {
+	if auth == nil || auth.AuthSourceKind() != coreauth.AuthSourceConfig || auth.Attributes == nil {
+		return nil
+	}
+	index, errIndex := strconv.Atoi(strings.TrimSpace(auth.Attributes[coreauth.AttributeConfigIndex]))
+	if errIndex != nil || index < 0 || index >= len(entries) {
+		return nil
+	}
+	return &entries[index]
+}
+
 func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey {
 	if auth == nil || s.cfg == nil {
 		return nil
 	}
-	entry, _ := internalconfig.ResolveNativeAPIKeyConfig(s.cfg.ClaudeKey, authAttribute(auth, "api_key"), authAttribute(auth, "base_url"))
+	if entry := configEntryForAuthIndex(auth, s.cfg.ClaudeKey); entry != nil && nativeConfigEntryMatchesAuth(entry, auth) {
+		return entry
+	}
+	entry, _ := internalconfig.ResolveNativeAPIKeyConfig(s.cfg.ClaudeKey, authAttribute(auth, coreauth.AttributeAPIKey), authAttribute(auth, "base_url"))
 	return entry
 }
 
@@ -408,13 +429,85 @@ func (s *Service) resolveConfigGeminiKeyEntry(auth *coreauth.Auth, entries []con
 	if auth == nil || s.cfg == nil {
 		return nil
 	}
-	entry, _ := internalconfig.ResolveNativeAPIKeyConfig(entries, authAttribute(auth, "api_key"), authAttribute(auth, "base_url"))
+	if entry := configEntryForAuthIndex(auth, entries); entry != nil && nativeConfigEntryMatchesAuth(entry, auth) {
+		return entry
+	}
+	entry, _ := internalconfig.ResolveNativeAPIKeyConfig(entries, authAttribute(auth, coreauth.AttributeAPIKey), authAttribute(auth, "base_url"))
 	return entry
+}
+
+func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return resolveConfigCodexStyleKey(auth, s.cfg.CodexKey, true)
+}
+
+func (s *Service) resolveConfigXAIKey(auth *coreauth.Auth) *config.XAIKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return resolveConfigCodexStyleKey(auth, s.cfg.XAIKey, false)
+}
+
+func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey, validateIndexCredentials bool) *config.CodexKey {
+	if auth == nil {
+		return nil
+	}
+	if entry := configEntryForAuthIndex(auth, entries); entry != nil && (!validateIndexCredentials || nativeConfigEntryMatchesAuth(entry, auth)) {
+		return entry
+	}
+	for i := range entries {
+		entry := &entries[i]
+		if nativeConfigEntryMatchesAuth(entry, auth) {
+			return entry
+		}
+	}
+	return nil
+}
+
+func nativeConfigEntryMatchesAuth[T internalconfig.NativeAPIKeyConfigEntry](entry *T, auth *coreauth.Auth) bool {
+	if entry == nil || auth == nil {
+		return false
+	}
+	apiKey := authAttribute(auth, coreauth.AttributeAPIKey)
+	baseURL := authAttribute(auth, "base_url")
+	entryBaseURL := strings.TrimSpace((*entry).GetBaseURL())
+	if apiKey == "" {
+		if baseURL == "" {
+			return true
+		}
+		return strings.EqualFold(entryBaseURL, baseURL) && len((*entry).GetEffectiveAPIKeys()) > 0
+	}
+	keyMatched := false
+	for _, effective := range (*entry).GetEffectiveAPIKeys() {
+		if strings.EqualFold(strings.TrimSpace(effective.APIKey), apiKey) {
+			keyMatched = true
+			break
+		}
+	}
+	if !keyMatched {
+		return false
+	}
+	if baseURL == "" {
+		return true
+	}
+	return strings.EqualFold(entryBaseURL, baseURL)
+}
+
+func authAttribute(auth *coreauth.Auth, key string) string {
+	if auth == nil || auth.Attributes == nil {
+		return ""
+	}
+	return strings.TrimSpace(auth.Attributes[key])
 }
 
 func (s *Service) resolveConfigVertexCompatKey(auth *coreauth.Auth) *config.VertexCompatKey {
 	if auth == nil || s.cfg == nil {
 		return nil
+	}
+	if entry := configEntryForAuthIndex(auth, s.cfg.VertexCompatAPIKey); entry != nil {
+		return entry
 	}
 	var attrKey, attrBase string
 	if auth.Attributes != nil {
@@ -444,35 +537,6 @@ func (s *Service) resolveConfigVertexCompatKey(auth *coreauth.Auth) *config.Vert
 		}
 	}
 	return nil
-}
-
-func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
-	if s == nil || s.cfg == nil {
-		return nil
-	}
-	return resolveConfigCodexStyleKey(auth, s.cfg.CodexKey)
-}
-
-func (s *Service) resolveConfigXAIKey(auth *coreauth.Auth) *config.XAIKey {
-	if s == nil || s.cfg == nil {
-		return nil
-	}
-	return resolveConfigCodexStyleKey(auth, s.cfg.XAIKey)
-}
-
-func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey) *config.CodexKey {
-	if auth == nil {
-		return nil
-	}
-	entry, _ := internalconfig.ResolveNativeAPIKeyConfig(entries, authAttribute(auth, "api_key"), authAttribute(auth, "base_url"))
-	return entry
-}
-
-func authAttribute(auth *coreauth.Auth, key string) string {
-	if auth == nil || auth.Attributes == nil {
-		return ""
-	}
-	return strings.TrimSpace(auth.Attributes[key])
 }
 
 func (s *Service) oauthExcludedModels(provider, authKind string) []string {
@@ -615,6 +679,10 @@ type modelEntry interface {
 	GetDisplayName() string
 }
 
+type thinkingModelEntry interface {
+	GetThinking() *registry.ThinkingSupport
+}
+
 func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, created int64, fallbackDisplayName string, userDefined bool) *ModelInfo {
 	name := strings.TrimSpace(model.GetName())
 	alias := strings.TrimSpace(model.GetAlias())
@@ -687,11 +755,11 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		if info == nil {
 			continue
 		}
-		thinking := model.Thinking
-		if thinking == nil && !model.Image {
-			thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+		thinkingSupport := model.Thinking
+		if thinkingSupport == nil && !model.Image {
+			thinkingSupport = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 		}
-		info.Thinking = thinking
+		info.Thinking = modelconfig.NormalizeThinkingSupport(thinkingSupport)
 		info.SupportedInputModalities = normalizeCompatConfigModalities(model.InputModalities)
 		info.SupportedOutputModalities = normalizeCompatConfigModalities(model.OutputModalities)
 		models = append(models, info)
@@ -742,10 +810,12 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 			continue
 		}
 		seen[key] = struct{}{}
-		if name != "" {
-			if upstream := registry.LookupStaticModelInfo(name); upstream != nil && upstream.Thinking != nil {
-				info.Thinking = upstream.Thinking
-			}
+		var thinkingSupport *registry.ThinkingSupport
+		if thinkingModel, ok := any(model).(thinkingModelEntry); ok {
+			thinkingSupport = thinkingModel.GetThinking()
+		}
+		if resolved := modelconfig.ResolveModelInfo(name, modelType, thinkingSupport); resolved.Thinking != nil {
+			info.Thinking = resolved.Thinking
 		}
 		out = append(out, info)
 	}
@@ -784,8 +854,11 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
+	if len(entry.Models) == 0 {
+		return registry.GetCodexProModels()
+	}
 
-	models := registry.WithCodexBuiltins(buildConfigModels(entry.Models, "openai", "openai"))
+	models := buildConfigModels(entry.Models, "openai", "openai")
 	configuredDisplayNames := make(map[string]string, len(entry.Models))
 	seenConfiguredModels := make(map[string]struct{}, len(entry.Models))
 	for i := range entry.Models {

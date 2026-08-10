@@ -569,6 +569,23 @@ func validateMediaProviders(providers []config.MediaProvider) error {
 			if capability := strings.ToLower(strings.TrimSpace(op.Capability)); capability != "" && !validMediaCapabilityForKind(kind, capability) {
 				return fmt.Errorf("media-providers[%d].operations[%d].capability is invalid", i, j)
 			}
+			if op.TestRequest != nil {
+				testJSON := strings.TrimSpace(op.TestRequest.JSON)
+				if testJSON != "" && (requestFormat != config.MediaRequestJSON || !json.Valid([]byte(testJSON))) {
+					return fmt.Errorf("media-providers[%d].operations[%d].test-request.json is invalid", i, j)
+				}
+				if len(op.TestRequest.MultipartFields) > 0 && requestFormat != config.MediaRequestMultipart {
+					return fmt.Errorf("media-providers[%d].operations[%d].test-request.multipart-fields requires multipart", i, j)
+				}
+				if testJSON == "" && len(op.TestRequest.MultipartFields) == 0 {
+					return fmt.Errorf("media-providers[%d].operations[%d].test-request is empty", i, j)
+				}
+				for field := range op.TestRequest.MultipartFields {
+					if strings.TrimSpace(field) == "" {
+						return fmt.Errorf("media-providers[%d].operations[%d].test-request.multipart-fields contains an empty field", i, j)
+					}
+				}
+			}
 			if op.Async != nil {
 				async := op.Async
 				if strings.TrimSpace(async.TaskIDPath) == "" || strings.TrimSpace(async.PollPath) == "" || strings.TrimSpace(async.StatusPath) == "" || len(nonEmptyMediaValues(async.SuccessValues)) == 0 {
@@ -621,7 +638,7 @@ func validMediaCapabilityForKind(kind, capability string) bool {
 		}
 	case config.MediaKindAudio:
 		switch capability {
-		case config.MediaCapabilityGenerate, config.MediaCapabilitySpeech, config.MediaCapabilityMusic, config.MediaCapabilityClone, config.MediaCapabilityVoiceConvert:
+		case config.MediaCapabilityGenerate, config.MediaCapabilitySpeech, config.MediaCapabilityMusic, config.MediaCapabilityClone, config.MediaCapabilityVoiceConvert, config.MediaCapabilityTranscribe:
 			return true
 		}
 	}

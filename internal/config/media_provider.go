@@ -1,6 +1,9 @@
 package config
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 const (
 	MediaKindImage = "image"
@@ -19,6 +22,7 @@ const (
 	MediaCapabilityMusic            = "music"
 	MediaCapabilityClone            = "clone"
 	MediaCapabilityVoiceConvert     = "voice-convert"
+	MediaCapabilityTranscribe       = "transcribe"
 
 	MediaRequestJSON      = "json"
 	MediaRequestMultipart = "multipart"
@@ -37,18 +41,22 @@ const (
 // MediaProvider configures an image, video, or audio upstream.
 type MediaProvider struct {
 	// AuthID is an internal stable runtime identity retained across management edits.
-	AuthID         string             `yaml:"auth-id,omitempty" json:"auth-index,omitempty"`
-	Name           string             `yaml:"name" json:"name"`
-	Kind           string             `yaml:"kind" json:"kind"`
-	BaseURL        string             `yaml:"base-url" json:"base-url"`
-	Priority       int                `yaml:"priority,omitempty" json:"priority,omitempty"`
-	Disabled       bool               `yaml:"disabled,omitempty" json:"disabled,omitempty"`
-	DisableCooling bool               `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
-	Prefix         string             `yaml:"prefix,omitempty" json:"prefix,omitempty"`
-	APIKeyEntries  []MediaAPIKeyEntry `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
-	Headers        map[string]string  `yaml:"headers,omitempty" json:"headers,omitempty"`
-	Models         []MediaModel       `yaml:"models,omitempty" json:"models,omitempty"`
-	Operations     []MediaOperation   `yaml:"operations,omitempty" json:"operations,omitempty"`
+	AuthID         string `yaml:"auth-id,omitempty" json:"auth-index,omitempty"`
+	Name           string `yaml:"name" json:"name"`
+	Kind           string `yaml:"kind" json:"kind"`
+	BaseURL        string `yaml:"base-url" json:"base-url"`
+	Priority       int    `yaml:"priority,omitempty" json:"priority,omitempty"`
+	Disabled       bool   `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+	DisableCooling bool   `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+	Prefix         string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+	// APIKeyHeader overrides the header used to send the credential. Empty means Authorization.
+	APIKeyHeader string `yaml:"api-key-header,omitempty" json:"api-key-header,omitempty"`
+	// APIKeyPrefix overrides the credential value prefix. Use "-" for a bare value; empty means "Bearer ".
+	APIKeyPrefix  string             `yaml:"api-key-prefix,omitempty" json:"api-key-prefix,omitempty"`
+	APIKeyEntries []MediaAPIKeyEntry `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
+	Headers       map[string]string  `yaml:"headers,omitempty" json:"headers,omitempty"`
+	Models        []MediaModel       `yaml:"models,omitempty" json:"models,omitempty"`
+	Operations    []MediaOperation   `yaml:"operations,omitempty" json:"operations,omitempty"`
 }
 
 // MediaAPIKeyEntry configures one provider credential.
@@ -85,7 +93,15 @@ type MediaOperation struct {
 	Model          string               `yaml:"model,omitempty" json:"model,omitempty"`
 	ResponseFormat string               `yaml:"response-format" json:"response-format"`
 	ResultPath     string               `yaml:"result-path,omitempty" json:"result-path,omitempty"`
+	TestRequest    *MediaTestRequest    `yaml:"test-request,omitempty" json:"test-request,omitempty"`
 	Async          *MediaAsyncOperation `yaml:"async,omitempty" json:"async,omitempty"`
+}
+
+// MediaTestRequest overrides the synthetic connectivity payload for providers
+// whose test contract differs from the normal operation payload.
+type MediaTestRequest struct {
+	JSON            string            `yaml:"json,omitempty" json:"json,omitempty"`
+	MultipartFields map[string]string `yaml:"multipart-fields,omitempty" json:"multipart-fields,omitempty"`
 }
 
 // MediaAsyncOperation configures submit-and-poll operation behavior.
@@ -109,6 +125,7 @@ var mediaCapabilities = map[string]struct{}{
 	MediaCapabilitySuperResolution: {}, MediaCapabilityRemoveBackground: {},
 	MediaCapabilityTextToVideo: {}, MediaCapabilityImageToVideo: {}, MediaCapabilityRemoveWatermark: {},
 	MediaCapabilitySpeech: {}, MediaCapabilityMusic: {}, MediaCapabilityClone: {}, MediaCapabilityVoiceConvert: {},
+	MediaCapabilityTranscribe: {},
 }
 
 var mediaRequestFormats = map[string]struct{}{
@@ -169,6 +186,8 @@ func (cfg *Config) SanitizeMediaProviders() {
 		provider.Kind = strings.ToLower(strings.TrimSpace(provider.Kind))
 		provider.BaseURL = strings.TrimRight(strings.TrimSpace(provider.BaseURL), "/")
 		provider.Prefix = normalizeModelPrefix(provider.Prefix)
+		provider.APIKeyHeader = strings.TrimSpace(provider.APIKeyHeader)
+		provider.APIKeyPrefix = strings.TrimSpace(provider.APIKeyPrefix)
 		provider.Headers = NormalizeHeaders(provider.Headers)
 		if provider.Name == "" || provider.BaseURL == "" {
 			continue
@@ -235,6 +254,31 @@ func (cfg *Config) SanitizeMediaProviders() {
 			operation.Model = strings.TrimSpace(operation.Model)
 			operation.ResponseFormat = strings.ToLower(strings.TrimSpace(operation.ResponseFormat))
 			operation.ResultPath = strings.TrimSpace(operation.ResultPath)
+			if operation.TestRequest != nil {
+				testRequest := *operation.TestRequest
+				testRequest.JSON = strings.TrimSpace(testRequest.JSON)
+				if operation.RequestFormat != MediaRequestJSON || (testRequest.JSON != "" && !json.Valid([]byte(testRequest.JSON))) {
+					testRequest.JSON = ""
+				}
+				if operation.RequestFormat == MediaRequestMultipart && len(testRequest.MultipartFields) > 0 {
+					fields := make(map[string]string, len(testRequest.MultipartFields))
+					for key, value := range testRequest.MultipartFields {
+						key = strings.TrimSpace(key)
+						if key == "" {
+							continue
+						}
+						fields[key] = value
+					}
+					testRequest.MultipartFields = fields
+				} else {
+					testRequest.MultipartFields = nil
+				}
+				if testRequest.JSON == "" && len(testRequest.MultipartFields) == 0 {
+					operation.TestRequest = nil
+				} else {
+					operation.TestRequest = &testRequest
+				}
+			}
 			key := strings.ToLower(operation.Name)
 			if operation.Name == "" || operation.Path == "" {
 				continue

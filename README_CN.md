@@ -231,6 +231,8 @@ POST /v1/images/background/remove
 
 - `model-mode: required` 要求请求携带模型，操作已指定固定 `model` 时除外；`optional` 两种方式都接受；`none` 会移除模型字段，适配不需要模型的 API。
 - `request-format` 支持 `json`、`multipart`、`binary`。
+- `test-request` 可给管理台的“测试当前供应商”指定真实测试载荷：JSON 接口用 `json`，multipart 接口用 `multipart-fields`；适合 MiMo、Noiz 这类不能使用通用测试体的渠道。
+- `api-key-header` 和 `api-key-prefix` 可适配非标准鉴权；`api-key-prefix: "-"` 表示直接发送 Key，不加 `Bearer`。
 - `response-format` 支持 `passthrough`、`json-url`、`json-base64`、`binary`；JSON 结果通过 `result-path` 提取。
 - `async` 先提交任务，再用同一个 Key 轮询任务接口，直到命中成功或失败状态。
 - 上游不使用凭证时省略 `api-key-entries`。多 Key 供应商复用现有的优先级、重试、冷却和故障切换逻辑。

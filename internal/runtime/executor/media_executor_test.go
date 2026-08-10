@@ -264,7 +264,7 @@ func customMediaExecutorFixture(t *testing.T, upstream http.HandlerFunc, operati
 	provider := config.MediaProvider{
 		Name: "Custom Images", Kind: config.MediaKindImage, BaseURL: server.URL,
 		APIKeyEntries: []config.MediaAPIKeyEntry{{APIKey: "custom-key"}},
-		Models:        []config.MediaModel{{Name: "upstream-upscale", Alias: "public-upscale", Capabilities: []string{config.MediaCapabilityUpscale}}},
+		Models:        []config.MediaModel{{Name: "upstream-upscale", Alias: "public-upscale", Capabilities: []string{config.MediaCapabilityGenerate, config.MediaCapabilityUpscale}}},
 		Operations:    []config.MediaOperation{operation},
 	}
 	providerKey := util.MediaProviderKey(provider.Kind, provider.Name)
@@ -570,5 +570,56 @@ func TestMediaExecutorCapabilityMismatchFallsBackToAnotherProvider(t *testing.T)
 	}
 	if firstCalls.Load() != 0 || secondCalls.Load() != 1 {
 		t.Fatalf("upstream calls = first:%d second:%d, want first:0 second:1", firstCalls.Load(), secondCalls.Load())
+	}
+}
+
+func TestMediaExecutorExpandsModelPathAndOmitsBodyModel(t *testing.T) {
+	operation := config.MediaOperation{
+		Name: config.MediaCapabilityUpscale, Capability: config.MediaCapabilityUpscale,
+		Method: http.MethodPost, Path: "/{model}", RequestFormat: config.MediaRequestJSON,
+		ModelMode: config.MediaModelRequired, ResponseFormat: config.MediaResponsePassthrough,
+	}
+	exec, auth := customMediaExecutorFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/upstream-upscale" {
+			t.Fatalf("upstream path = %q", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), `"model"`) {
+			t.Fatalf("model leaked into body: %s", body)
+		}
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}, operation)
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Payload: []byte(`{"model":"public-upscale","prompt":"draw"}`),
+	}, customMediaOptions(operation.Name, "public-upscale", "application/json"))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+func TestMediaExecutorUsesConfiguredCredentialHeaderAndBarePrefix(t *testing.T) {
+	operation := config.MediaOperation{
+		Name: config.MediaCapabilityRemoveBackground, Capability: config.MediaCapabilityRemoveBackground,
+		Method: http.MethodPost, Path: "/remove", RequestFormat: config.MediaRequestJSON,
+		ModelMode: config.MediaModelNone, ResponseFormat: config.MediaResponsePassthrough,
+	}
+	exec, auth := customMediaExecutorFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-API-Key"); got != "custom-key" {
+			t.Fatalf("X-API-Key = %q", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("Authorization = %q, want empty", got)
+		}
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}, operation)
+	auth.Attributes["api_key_header"] = "X-API-Key"
+	auth.Attributes["api_key_prefix"] = "-"
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Payload: []byte(`{"input":"data"}`),
+	}, customMediaOptions(operation.Name, "", "application/json"))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
 	}
 }

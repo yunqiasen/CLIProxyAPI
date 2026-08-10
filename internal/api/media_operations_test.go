@@ -189,3 +189,52 @@ func TestMediaRequestedModelFallsBackToQueryForMultipartAndGET(t *testing.T) {
 		t.Fatalf("multipart query model = %q", got)
 	}
 }
+
+func TestMediaOperationProvidersPrefersProviderDeclaringRequestedModel(t *testing.T) {
+	server := &Server{cfg: &config.Config{MediaProviders: []config.MediaProvider{
+		{
+			Name:    "model-free-upstream",
+			Kind:    config.MediaKindAudio,
+			BaseURL: "https://model-free.example.com/v1",
+			Operations: []config.MediaOperation{{
+				Name:          config.MediaCapabilitySpeech,
+				Capability:    config.MediaCapabilitySpeech,
+				Method:        http.MethodPost,
+				Path:          "/text-to-speech",
+				RequestFormat: config.MediaRequestMultipart,
+				ModelMode:     config.MediaModelNone,
+			}},
+		},
+		{
+			Name:    "declared-model-upstream",
+			Kind:    config.MediaKindAudio,
+			BaseURL: "https://declared.example.com/v1",
+			Models: []config.MediaModel{{
+				Name:         "upstream-tts",
+				Alias:        "public-tts",
+				Capabilities: []string{config.MediaCapabilitySpeech},
+			}},
+			Operations: []config.MediaOperation{{
+				Name:          config.MediaCapabilitySpeech,
+				Capability:    config.MediaCapabilitySpeech,
+				Method:        http.MethodPost,
+				Path:          "/chat/completions",
+				RequestFormat: config.MediaRequestJSON,
+				ModelMode:     config.MediaModelRequired,
+			}},
+		},
+	}}}
+
+	providers := server.mediaOperationProviders(config.MediaKindAudio, config.MediaCapabilitySpeech, "public-tts")
+	if len(providers) != 1 {
+		t.Fatalf("providers = %#v; want only the provider declaring the requested model", providers)
+	}
+	if !strings.Contains(providers[0], "declared-model-upstream") {
+		t.Fatalf("providers[0] = %q; want declared-model-upstream", providers[0])
+	}
+
+	fallback := server.mediaOperationProviders(config.MediaKindAudio, config.MediaCapabilitySpeech, "")
+	if len(fallback) != 1 || !strings.Contains(fallback[0], "model-free-upstream") {
+		t.Fatalf("fallback = %#v; want only the model-free provider when no model is requested", fallback)
+	}
+}

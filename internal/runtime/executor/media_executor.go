@@ -78,16 +78,28 @@ func (e *MediaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, errCapability
 	}
 
-	payload, contentType, errPayload := prepareMediaPayload(req.Payload, opts.Headers.Get("Content-Type"), operation, upstreamModel)
+	// When the upstream addresses the model through the URL, the model must not be
+	// repeated in the body or query; some upstreams reject the duplicated field.
+	payloadOperation := operation
+	operationPath := operation.Path
+	if mediaPathUsesModel(operation.Path) {
+		if strings.TrimSpace(upstreamModel) == "" {
+			return resp, mediaRequestError{code: http.StatusBadRequest, msg: fmt.Sprintf("model is required for media operation %s", operation.Name)}
+		}
+		payloadOperation.ModelMode = config.MediaModelNone
+		operationPath = expandMediaPathModel(operation.Path, upstreamModel)
+	}
+
+	payload, contentType, errPayload := prepareMediaPayload(req.Payload, opts.Headers.Get("Content-Type"), payloadOperation, upstreamModel)
 	if errPayload != nil {
 		return resp, errPayload
 	}
-	query := prepareMediaQuery(opts.Query, operation, upstreamModel)
+	query := prepareMediaQuery(opts.Query, payloadOperation, upstreamModel)
 	baseURL, apiKey := mediaCredentials(auth, provider)
 	if baseURL == "" {
 		return resp, statusErr{code: http.StatusUnauthorized, msg: "missing media provider baseURL"}
 	}
-	upstreamURL := joinMediaURL(baseURL, operation.Path, query)
+	upstreamURL := joinMediaURL(baseURL, operationPath, query)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, upstreamModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -310,13 +322,11 @@ func (e *MediaExecutor) executeHTTPRequest(ctx context.Context, client *http.Cli
 		httpReq.Header.Set("Content-Type", contentType)
 	}
 	httpReq.Header.Set("User-Agent", "cli-proxy-media")
-	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
+	applyMediaCredentialHeader(httpReq, apiKey, attrs)
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	recordMediaAPIRequest(ctx, e.cfg, httpReq, payload, e.Identifier(), auth)
 
@@ -471,6 +481,51 @@ func mediaMetadataString(metadata map[string]any, key string) string {
 	default:
 		return ""
 	}
+}
+
+// applyMediaCredentialHeader sends the credential using the provider's configured
+// header and value prefix. Upstreams differ here: most want "Authorization: Bearer <key>",
+// while others expect a bare value or a vendor-specific header such as X-API-Key.
+func applyMediaCredentialHeader(req *http.Request, apiKey string, attrs map[string]string) {
+	if req == nil || strings.TrimSpace(apiKey) == "" {
+		return
+	}
+	header := "Authorization"
+	if value := strings.TrimSpace(attrs["api_key_header"]); value != "" {
+		header = value
+	}
+	prefix := "Bearer "
+	if value := strings.TrimSpace(attrs["api_key_prefix"]); value != "" {
+		if value == "-" {
+			prefix = ""
+		} else {
+			prefix = value + " "
+		}
+	} else if _, ok := attrs["api_key_prefix"]; ok {
+		prefix = ""
+	}
+	req.Header.Set(header, prefix+apiKey)
+}
+
+// expandMediaPathModel substitutes {model} in an operation path. Some upstreams,
+// notably Cloudflare Workers AI, address the model through the URL instead of the body.
+func expandMediaPathModel(path, model string) string {
+	if !strings.Contains(path, "{model}") {
+		return path
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return strings.ReplaceAll(path, "{model}", "")
+	}
+	segments := strings.Split(model, "/")
+	for i := range segments {
+		segments[i] = url.PathEscape(segments[i])
+	}
+	return strings.ReplaceAll(path, "{model}", strings.Join(segments, "/"))
+}
+
+func mediaPathUsesModel(path string) bool {
+	return strings.Contains(path, "{model}")
 }
 
 func joinMediaURL(baseURL, operationPath string, query url.Values) string {
@@ -654,13 +709,11 @@ func (e *MediaExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 	provider := e.resolveProvider(auth)
 	_, apiKey := mediaCredentials(auth, provider)
 	httpReq := req.WithContext(ctx)
-	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
+	applyMediaCredentialHeader(httpReq, apiKey, attrs)
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	return helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0).Do(httpReq)
 }

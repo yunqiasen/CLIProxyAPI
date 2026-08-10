@@ -34,6 +34,7 @@ type MediaProvider = internalconfig.MediaProvider
 type MediaAPIKeyEntry = internalconfig.MediaAPIKeyEntry
 type MediaModel = internalconfig.MediaModel
 type MediaOperation = internalconfig.MediaOperation
+type MediaTestRequest = internalconfig.MediaTestRequest
 type MediaAsyncOperation = internalconfig.MediaAsyncOperation
 
 type TLS = internalconfig.TLSConfig

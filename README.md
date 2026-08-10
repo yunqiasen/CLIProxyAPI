@@ -231,6 +231,8 @@ Operation controls:
 
 - `model-mode: required` requires a request model unless the operation has a fixed `model`; `optional` accepts either form; `none` removes the model field and supports model-free APIs.
 - `request-format` accepts `json`, `multipart`, or `binary`.
+- `test-request` can define the real payload used by the management panel connectivity test: use `json` for JSON APIs or `multipart-fields` for form APIs. This is useful for providers such as MiMo and Noiz that reject the generic probe body.
+- `api-key-header` and `api-key-prefix` adapt nonstandard authentication; set `api-key-prefix: "-"` to send the key without `Bearer`.
 - `response-format` accepts `passthrough`, `json-url`, `json-base64`, or `binary`; JSON extraction uses `result-path`.
 - `async` submits once and polls the configured task endpoint with the same selected credential until a success/failure status is reached.
 - Omit `api-key-entries` for upstreams that do not use credentials. Providers with multiple keys use the existing priority, retry, cooldown, and failover scheduler.

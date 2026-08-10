@@ -453,6 +453,12 @@ func (s *ConfigSynthesizer) synthesizeMediaProviders(ctx *SynthesisContext) []*c
 			if key != "" {
 				attrs["api_key"] = key
 			}
+			if header := strings.TrimSpace(provider.APIKeyHeader); header != "" {
+				attrs["api_key_header"] = header
+			}
+			if prefix := strings.TrimSpace(provider.APIKeyPrefix); prefix != "" {
+				attrs["api_key_prefix"] = prefix
+			}
 			priority := provider.Priority
 			if entry.Priority != nil {
 				priority = *entry.Priority

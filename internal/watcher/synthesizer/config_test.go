@@ -1168,3 +1168,23 @@ func TestConfigSynthesizer_NoKeyMediaProviderUsesAPIKeyUsageIdentity(t *testing.
 		t.Fatalf("no-key media account info = %q/%q, want api_key/empty", kind, value)
 	}
 }
+
+func TestConfigSynthesizer_MediaProviderCredentialHeaderAndPrefix(t *testing.T) {
+	cfg := &config.Config{MediaProviders: []config.MediaProvider{{
+		Name: "Vendor Audio", Kind: config.MediaKindAudio, BaseURL: "https://audio.example/v1",
+		APIKeyHeader: "X-API-Key", APIKeyPrefix: "-",
+		APIKeyEntries: []config.MediaAPIKeyEntry{{APIKey: "vendor-key"}},
+	}}}
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config: cfg, Now: time.Now(), IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil || len(auths) != 1 {
+		t.Fatalf("Synthesize() count=%d error=%v", len(auths), err)
+	}
+	if got := auths[0].Attributes["api_key_header"]; got != "X-API-Key" {
+		t.Fatalf("api_key_header = %q", got)
+	}
+	if got := auths[0].Attributes["api_key_prefix"]; got != "-" {
+		t.Fatalf("api_key_prefix = %q", got)
+	}
+}

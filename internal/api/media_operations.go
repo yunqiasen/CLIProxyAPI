@@ -148,7 +148,9 @@ func (s *Server) mediaOperationProviders(kind, operationName, requestedModel str
 	if s == nil || s.cfg == nil {
 		return nil
 	}
-	providers := make([]string, 0)
+	requestedModel = strings.TrimSpace(requestedModel)
+	declared := make([]string, 0)
+	generic := make([]string, 0)
 	seen := make(map[string]struct{})
 	for i := range s.cfg.MediaProviders {
 		provider := &s.cfg.MediaProviders[i]
@@ -167,9 +169,18 @@ func (s *Server) mediaOperationProviders(kind, operationName, requestedModel str
 			continue
 		}
 		seen[key] = struct{}{}
-		providers = append(providers, key)
+		if requestedModel != "" && mediaProviderDeclaresModel(provider, requestedModel) {
+			declared = append(declared, key)
+			continue
+		}
+		generic = append(generic, key)
 	}
-	return providers
+	// A provider that declares the requested model wins over providers that only
+	// accept it because they declare no models at all.
+	if len(declared) > 0 {
+		return declared
+	}
+	return generic
 }
 
 func (s *Server) mediaOperationExists(kind, operationName string) bool {
@@ -240,7 +251,13 @@ func normalizeMediaOperationName(value string) string {
 func mediaOperationAcceptsModel(provider *config.MediaProvider, operation config.MediaOperation, requested string) bool {
 	requested = strings.TrimSpace(requested)
 	if operation.ModelMode == config.MediaModelNone {
-		return true
+		// A model-free operation still must not capture a request that explicitly
+		// names a model served by another provider, so only accept the request when
+		// the provider declares no models or declares the requested one.
+		if requested == "" || len(provider.Models) == 0 {
+			return true
+		}
+		return mediaProviderDeclaresModel(provider, requested)
 	}
 	if requested == "" {
 		return operation.ModelMode != config.MediaModelRequired || strings.TrimSpace(operation.Model) != ""
@@ -255,6 +272,16 @@ func mediaOperationAcceptsModel(provider *config.MediaProvider, operation config
 			continue
 		}
 		if capability == "" || len(model.Capabilities) == 0 || config.HasMediaCapability(model, capability) {
+			return true
+		}
+	}
+	return false
+}
+
+func mediaProviderDeclaresModel(provider *config.MediaProvider, requested string) bool {
+	for i := range provider.Models {
+		model := provider.Models[i]
+		if strings.EqualFold(strings.TrimSpace(model.Name), requested) || strings.EqualFold(strings.TrimSpace(model.Alias), requested) {
 			return true
 		}
 	}

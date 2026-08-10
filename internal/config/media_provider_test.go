@@ -31,6 +31,9 @@ media-providers:
         model-mode: NONE
         response-format: JSON-URL
         result-path: " data.0.url "
+        test-request:
+          multipart-fields:
+            prompt: test
         async:
           task-id-path: " task_id "
           poll-method: get
@@ -70,6 +73,9 @@ media-providers:
 	op := provider.Operations[0]
 	if op.Method != "POST" || op.Path != "/images/remove-background" || op.RequestFormat != MediaRequestMultipart || op.ModelMode != MediaModelNone || op.ResponseFormat != MediaResponseJSONURL {
 		t.Fatalf("operation normalization = %#v", op)
+	}
+	if op.TestRequest == nil || op.TestRequest.MultipartFields["prompt"] != "test" {
+		t.Fatalf("test request normalization = %#v", op.TestRequest)
 	}
 	if op.Async == nil || op.Async.PollMethod != "GET" || op.Async.PollPath != "/tasks/{task_id}" || op.Async.PollInterval != "2s" {
 		t.Fatalf("async normalization = %#v", op.Async)

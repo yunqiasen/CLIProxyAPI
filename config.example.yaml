@@ -569,6 +569,9 @@ nonstream-keepalive-interval: 0
 #         model-mode: "optional"
 #         model: "fixed-voice-v1"
 #         response-format: "binary"
+#         # Optional connectivity-test payload for upstream-specific contracts.
+#         test-request:
+#           json: '{"input":"CPA connectivity test","voice":"alloy"}'
 #       - name: "clone"
 #         capability: "clone"
 #         method: "POST"
@@ -576,6 +579,10 @@ nonstream-keepalive-interval: 0
 #         request-format: "multipart"
 #         model-mode: "none"
 #         response-format: "passthrough"
+#         test-request:
+#           multipart-fields:
+#             text: "CPA connectivity test"
+#             voice_id: "voice-id"
 
 # OpenAI compatibility providers
 # openai-compatibility:

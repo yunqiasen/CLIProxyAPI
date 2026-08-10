@@ -683,6 +683,14 @@ type thinkingModelEntry interface {
 	GetThinking() *registry.ThinkingSupport
 }
 
+type modelMaxContextLengthEntry interface {
+	GetMaxContextLength() int
+}
+
+type modelCompatEntry interface {
+	GetIsCompat() bool
+}
+
 func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, created int64, fallbackDisplayName string, userDefined bool) *ModelInfo {
 	name := strings.TrimSpace(model.GetName())
 	alias := strings.TrimSpace(model.GetAlias())
@@ -699,7 +707,7 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 	if displayName == "" {
 		displayName = alias
 	}
-	return &ModelInfo{
+	info := &ModelInfo{
 		ID:          alias,
 		Object:      "model",
 		Created:     created,
@@ -708,6 +716,16 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 		DisplayName: displayName,
 		UserDefined: userDefined,
 	}
+	if maxContextModel, okMaxContext := any(model).(modelMaxContextLengthEntry); okMaxContext {
+		if maxContextLength := maxContextModel.GetMaxContextLength(); maxContextLength > 0 {
+			info.ContextLength = maxContextLength
+			info.MaxContextLength = maxContextLength
+		}
+	}
+	if compatModel, okCompat := any(model).(modelCompatEntry); okCompat {
+		info.IsCompat = compatModel.GetIsCompat()
+	}
+	return info
 }
 
 func buildMediaProviderConfigModels(provider *config.MediaProvider) []*ModelInfo {

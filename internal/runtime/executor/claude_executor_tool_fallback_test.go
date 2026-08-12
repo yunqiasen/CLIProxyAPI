@@ -20,6 +20,7 @@ import (
 )
 
 const claudeUnsupportedWebSearchError = `{"type":"error","error":{"type":"invalid_request_error","message":"tool type 'web_search_20250305' is not supported for this model"}}`
+const claudeUnsupportedWebSearchBedrockError = `{"type":"error","error":{"type":"invalid_request_error","message":"InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: request-1, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1) [trace_id=trace-1] (request id: relay-1)"}}`
 
 func TestClaudeUnsupportedServerToolFallbackParserRequiresExactDeclaredType(t *testing.T) {
 	requestBody := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}]}`)
@@ -32,6 +33,96 @@ func TestClaudeUnsupportedServerToolFallbackParserRequiresExactDeclaredType(t *t
 			name: "exact declared tool type",
 			body: claudeUnsupportedWebSearchError,
 			want: true,
+		},
+		{
+			name: "exact bedrock validation wrapper",
+			body: claudeUnsupportedWebSearchBedrockError,
+			want: true,
+		},
+		{
+			name: "exact bedrock validation wrapper without trace suffix",
+			body: `{"error":{"message":"InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: request-1, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1)"}}`,
+			want: true,
+		},
+		{
+			name: "generic validation wrapper is rejected",
+			body: `{"error":{"message":"ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1)"}}`,
+			want: false,
+		},
+		{
+			name: "generic bedrock marker sequence is rejected",
+			body: `{"error":{"message":"Bedrock Runtime: StatusCode: 400, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1)"}}`,
+			want: false,
+		},
+		{
+			name: "bedrock wrapper missing outer request id is rejected",
+			body: `{"error":{"message":"InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1)"}}`,
+			want: false,
+		},
+		{
+			name: "bedrock wrapper outer request id with whitespace is rejected",
+			body: `{"error":{"message":"InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: request id, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1)"}}`,
+			want: false,
+		},
+		{
+			name: "bedrock wrapper inner request id with whitespace is rejected",
+			body: `{"error":{"message":"InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: request-1, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream id)"}}`,
+			want: false,
+		},
+		{
+			name: "bedrock wrapper unicode whitespace in request id is rejected",
+			body: `{"error":{"message":"InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: request\u00a0id, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1)"}}`,
+			want: false,
+		},
+		{
+			name: "bedrock wrapper unicode control in request id is rejected",
+			body: `{"error":{"message":"InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: request\u0085id, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1)"}}`,
+			want: false,
+		},
+		{
+			name: "bedrock wrapper unicode format control in request id is rejected",
+			body: `{"error":{"message":"InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: request\u200bid, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1)"}}`,
+			want: false,
+		},
+		{
+			name: "bedrock wrapper without request id boundary is rejected",
+			body: `{"error":{"message":"Bedrock Runtime: StatusCode: 400, ValidationException: tool type 'web_search_20250305' is not supported for this model"}}`,
+			want: false,
+		},
+		{
+			name: "bedrock wrapper with trailing clause text is rejected",
+			body: `{"error":{"message":"Bedrock Runtime: StatusCode: 400, ValidationException: tool type 'web_search_20250305' is not supported for this model; retry later (request id: upstream-1)"}}`,
+			want: false,
+		},
+		{
+			name: "bedrock marker substring is rejected",
+			body: `{"error":{"message":"InvokeModelWithResponseStream: operation error NotBedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: request-1, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1)"}}`,
+			want: false,
+		},
+		{
+			name: "bedrock status code prefix is rejected",
+			body: `{"error":{"message":"InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 4000, RequestID: request-1, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1)"}}`,
+			want: false,
+		},
+		{
+			name: "bedrock wrapper marker order is rejected",
+			body: `{"error":{"message":"InvokeModelWithResponseStream: operation error StatusCode: 400, Bedrock Runtime: InvokeModelWithResponseStream, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1)"}}`,
+			want: false,
+		},
+		{
+			name: "validation marker substring is rejected",
+			body: `{"error":{"message":"InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: request-1, NotValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1)"}}`,
+			want: false,
+		},
+		{
+			name: "bedrock wrapper trailing metadata text is rejected",
+			body: `{"error":{"message":"InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: request-1, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1); retry later"}}`,
+			want: false,
+		},
+		{
+			name: "bedrock wrapper empty request id is rejected",
+			body: `{"error":{"message":"InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: request-1, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: )"}}`,
+			want: false,
 		},
 		{
 			name: "generic unsupported message",
@@ -202,7 +293,7 @@ func TestClaudeExecutorRetriesOnceWithoutExplicitlyUnsupportedServerTool(t *test
 				mu.Unlock()
 
 				if attempt == 1 {
-					return claudeTestHTTPResponse(req, http.StatusBadRequest, "application/json", claudeUnsupportedWebSearchError), nil
+					return claudeTestHTTPResponse(req, http.StatusBadRequest, "application/json", claudeUnsupportedWebSearchBedrockError), nil
 				}
 				if stream {
 					return claudeTestHTTPResponse(req, http.StatusOK, "text/event-stream", claudeToolFallbackSuccessSSE()), nil
@@ -418,7 +509,7 @@ func TestClaudeExecutorUnsupportedServerToolFallbackWritesSeparateRequestLogAtte
 	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		transportAttempts++
 		if transportAttempts == 1 {
-			return claudeTestHTTPResponse(req, http.StatusBadRequest, "application/json", claudeUnsupportedWebSearchError), nil
+			return claudeTestHTTPResponse(req, http.StatusBadRequest, "application/json", claudeUnsupportedWebSearchBedrockError), nil
 		}
 		return claudeTestHTTPResponse(req, http.StatusOK, "application/json", claudeToolFallbackSuccessJSON()), nil
 	})

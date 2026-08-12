@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"unicode"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -148,6 +149,80 @@ func claudeUnsupportedServerToolFallbackFromError(statusCode int, body []byte, r
 }
 
 func claudeUnsupportedServerToolTypeFromMessage(message string) (string, bool) {
+	if toolType, ok := claudeUnsupportedServerToolTypeFromExactMessage(message); ok {
+		return toolType, true
+	}
+
+	const bedrockPrefix = "InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: "
+	if !strings.HasPrefix(message, bedrockPrefix) {
+		return "", false
+	}
+	wrapped := message[len(bedrockPrefix):]
+	const validationMarker = ", ValidationException: "
+	validationIndex := strings.Index(wrapped, validationMarker)
+	if validationIndex <= 0 || !claudeWrapperOpaqueID(wrapped[:validationIndex]) {
+		return "", false
+	}
+	wrapped = wrapped[validationIndex+len(validationMarker):]
+
+	const requestIDMarker = " (request id: "
+	requestIDIndex := strings.Index(wrapped, requestIDMarker)
+	if requestIDIndex < 0 {
+		return "", false
+	}
+	requestIDStart := requestIDIndex + len(requestIDMarker)
+	requestIDEndOffset := strings.Index(wrapped[requestIDStart:], ")")
+	if requestIDEndOffset <= 0 {
+		return "", false
+	}
+	requestIDEnd := requestIDStart + requestIDEndOffset
+	if !claudeWrapperOpaqueID(wrapped[requestIDStart:requestIDEnd]) {
+		return "", false
+	}
+	if !claudeBedrockWrapperSuffixValid(wrapped[requestIDEnd+1:]) {
+		return "", false
+	}
+	return claudeUnsupportedServerToolTypeFromExactMessage(wrapped[:requestIDIndex])
+}
+
+func claudeBedrockWrapperSuffixValid(suffix string) bool {
+	if suffix == "" {
+		return true
+	}
+	const tracePrefix = " [trace_id="
+	if !strings.HasPrefix(suffix, tracePrefix) {
+		return false
+	}
+	traceEndOffset := strings.Index(suffix[len(tracePrefix):], "]")
+	if traceEndOffset <= 0 {
+		return false
+	}
+	traceEnd := len(tracePrefix) + traceEndOffset
+	if !claudeWrapperOpaqueID(suffix[len(tracePrefix):traceEnd]) {
+		return false
+	}
+
+	const relayPrefix = " (request id: "
+	relay := suffix[traceEnd+1:]
+	if !strings.HasPrefix(relay, relayPrefix) || !strings.HasSuffix(relay, ")") {
+		return false
+	}
+	return claudeWrapperOpaqueID(relay[len(relayPrefix) : len(relay)-1])
+}
+
+func claudeWrapperOpaqueID(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || strings.ContainsRune("()[],", r) {
+			return false
+		}
+	}
+	return true
+}
+
+func claudeUnsupportedServerToolTypeFromExactMessage(message string) (string, bool) {
 	const prefix = "tool type '"
 	const suffix = "' is not supported for this model"
 	if !strings.HasPrefix(message, prefix) || !strings.HasSuffix(message, suffix) {

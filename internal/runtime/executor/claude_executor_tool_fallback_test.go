@@ -21,6 +21,7 @@ import (
 
 const claudeUnsupportedWebSearchError = `{"type":"error","error":{"type":"invalid_request_error","message":"tool type 'web_search_20250305' is not supported for this model"}}`
 const claudeUnsupportedWebSearchBedrockError = `{"type":"error","error":{"type":"invalid_request_error","message":"InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: request-1, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1) [trace_id=trace-1] (request id: relay-1)"}}`
+const claudeUnsupportedWebSearchRelayTraceError = `{"type":"error","error":{"type":"invalid_request_error","message":"tool type 'web_search_20250305' is not supported for this model, trace_id: upstream-trace [trace_id=relay-trace] (request id: relay-request)"}}`
 
 func TestClaudeUnsupportedServerToolFallbackParserRequiresExactDeclaredType(t *testing.T) {
 	requestBody := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}]}`)
@@ -43,6 +44,41 @@ func TestClaudeUnsupportedServerToolFallbackParserRequiresExactDeclaredType(t *t
 			name: "exact bedrock validation wrapper without trace suffix",
 			body: `{"error":{"message":"InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: request-1, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1)"}}`,
 			want: true,
+		},
+		{
+			name: "exact relay trace wrapper",
+			body: claudeUnsupportedWebSearchRelayTraceError,
+			want: true,
+		},
+		{
+			name: "relay trace wrapper missing first trace id is rejected",
+			body: `{"error":{"message":"tool type 'web_search_20250305' is not supported for this model [trace_id=relay-trace] (request id: relay-request)"}}`,
+			want: false,
+		},
+		{
+			name: "relay trace wrapper arbitrary suffix is rejected",
+			body: `{"error":{"message":"tool type 'web_search_20250305' is not supported for this model, trace_id: upstream-trace retry later [trace_id=relay-trace] (request id: relay-request)"}}`,
+			want: false,
+		},
+		{
+			name: "relay trace wrapper missing final request id is rejected",
+			body: `{"error":{"message":"tool type 'web_search_20250305' is not supported for this model, trace_id: upstream-trace [trace_id=relay-trace]"}}`,
+			want: false,
+		},
+		{
+			name: "relay trace wrapper unicode format control is rejected",
+			body: `{"error":{"message":"tool type 'web_search_20250305' is not supported for this model, trace_id: upstream\u200btrace [trace_id=relay-trace] (request id: relay-request)"}}`,
+			want: false,
+		},
+		{
+			name: "relay trace wrapper unicode control is rejected",
+			body: `{"error":{"message":"tool type 'web_search_20250305' is not supported for this model, trace_id: upstream-trace [trace_id=relay\u0085trace] (request id: relay-request)"}}`,
+			want: false,
+		},
+		{
+			name: "relay trace wrapper request id whitespace is rejected",
+			body: `{"error":{"message":"tool type 'web_search_20250305' is not supported for this model, trace_id: upstream-trace [trace_id=relay-trace] (request id: relay request)"}}`,
+			want: false,
 		},
 		{
 			name: "generic validation wrapper is rejected",
@@ -509,7 +545,7 @@ func TestClaudeExecutorUnsupportedServerToolFallbackWritesSeparateRequestLogAtte
 	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		transportAttempts++
 		if transportAttempts == 1 {
-			return claudeTestHTTPResponse(req, http.StatusBadRequest, "application/json", claudeUnsupportedWebSearchBedrockError), nil
+			return claudeTestHTTPResponse(req, http.StatusBadRequest, "application/json", claudeUnsupportedWebSearchRelayTraceError), nil
 		}
 		return claudeTestHTTPResponse(req, http.StatusOK, "application/json", claudeToolFallbackSuccessJSON()), nil
 	})

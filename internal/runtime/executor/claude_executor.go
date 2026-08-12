@@ -152,6 +152,9 @@ func claudeUnsupportedServerToolTypeFromMessage(message string) (string, bool) {
 	if toolType, ok := claudeUnsupportedServerToolTypeFromExactMessage(message); ok {
 		return toolType, true
 	}
+	if toolType, ok := claudeUnsupportedServerToolTypeFromRelayTraceMessage(message); ok {
+		return toolType, true
+	}
 
 	const bedrockPrefix = "InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: "
 	if !strings.HasPrefix(message, bedrockPrefix) {
@@ -183,6 +186,29 @@ func claudeUnsupportedServerToolTypeFromMessage(message string) (string, bool) {
 		return "", false
 	}
 	return claudeUnsupportedServerToolTypeFromExactMessage(wrapped[:requestIDIndex])
+}
+
+func claudeUnsupportedServerToolTypeFromRelayTraceMessage(message string) (string, bool) {
+	const upstreamTraceMarker = ", trace_id: "
+	traceIndex := strings.Index(message, upstreamTraceMarker)
+	if traceIndex <= 0 {
+		return "", false
+	}
+	toolType, ok := claudeUnsupportedServerToolTypeFromExactMessage(message[:traceIndex])
+	if !ok {
+		return "", false
+	}
+
+	wrapped := message[traceIndex+len(upstreamTraceMarker):]
+	const relayTraceMarker = " [trace_id="
+	relayTraceIndex := strings.Index(wrapped, relayTraceMarker)
+	if relayTraceIndex <= 0 || !claudeWrapperOpaqueID(wrapped[:relayTraceIndex]) {
+		return "", false
+	}
+	if !claudeBedrockWrapperSuffixValid(wrapped[relayTraceIndex:]) {
+		return "", false
+	}
+	return toolType, true
 }
 
 func claudeBedrockWrapperSuffixValid(suffix string) bool {

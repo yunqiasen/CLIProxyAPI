@@ -116,7 +116,7 @@ type WatcherWrapper struct {
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
 	dispatchPersistedAuth func(update watcher.AuthUpdate) bool
 	setPluginAuthParser   func(parser PluginAuthParser)
-	reloadConfigIfChanged func()
+	reloadConfigIfChanged func() bool
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -148,8 +148,7 @@ func (w *WatcherWrapper) ReloadConfigIfChanged() bool {
 	if w == nil || w.reloadConfigIfChanged == nil {
 		return false
 	}
-	w.reloadConfigIfChanged()
-	return true
+	return w.reloadConfigIfChanged()
 }
 
 // SetPluginAuthParser updates the plugin auth parser used by the watcher.

@@ -45,6 +45,7 @@ type Handler struct {
 	reloadMu                sync.Mutex
 	reloadGeneration        uint64
 	appliedReloadGeneration uint64
+	failedReloadGeneration  uint64
 	attemptsMu              sync.Mutex
 	failedAttempts          map[string]*attemptInfo // keyed by client IP
 	authManager             *coreauth.Manager
@@ -56,7 +57,7 @@ type Handler struct {
 	postAuthHook            coreauth.PostAuthHook
 	postAuthPersistHook     coreauth.PostAuthHook
 	pluginHost              *pluginhost.Host
-	configReloadHook        func(context.Context, *config.Config)
+	configReloadHook        func(context.Context, *config.Config) bool
 	pluginStoreRegistryURL  string
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginReleaseCacheMu    sync.Mutex
@@ -155,8 +156,18 @@ func (h *Handler) SetPluginHost(host *pluginhost.Host) {
 	h.mu.Unlock()
 }
 
+func (h *Handler) setConfigReloadStatusHeader(c *gin.Context) {
+	if h == nil || c == nil {
+		return
+	}
+	h.mu.Lock()
+	pending := h.reloadGeneration > h.appliedReloadGeneration && h.reloadGeneration > h.failedReloadGeneration
+	h.mu.Unlock()
+	c.Header("X-Config-Reload-Pending", fmt.Sprintf("%t", pending))
+}
+
 // SetConfigReloadHook updates the callback used after management saves config changes.
-func (h *Handler) SetConfigReloadHook(hook func(context.Context, *config.Config)) {
+func (h *Handler) SetConfigReloadHook(hook func(context.Context, *config.Config) bool) {
 	if h == nil {
 		return
 	}
@@ -205,10 +216,20 @@ func (h *Handler) reloadConfigAfterManagementSave(ctx context.Context, snapshot 
 	hook := h.configReloadHook
 	host := h.pluginHost
 	h.mu.Unlock()
+	applied := false
 	if hook != nil {
-		hook(ctx, snapshot.cfg)
+		applied = hook(ctx, snapshot.cfg)
 	} else if host != nil {
 		host.ApplyConfig(ctx, snapshot.cfg)
+		applied = ctx == nil || ctx.Err() == nil
+	}
+	if !applied {
+		h.mu.Lock()
+		if snapshot.generation > h.failedReloadGeneration {
+			h.failedReloadGeneration = snapshot.generation
+		}
+		h.mu.Unlock()
+		return
 	}
 
 	h.mu.Lock()

@@ -329,6 +329,102 @@ func TestMediaExecutorCustomNoModelOperationNormalizesJSONURL(t *testing.T) {
 	}
 }
 
+func TestMediaExecutorRejectsHTTP200ApplicationError(t *testing.T) {
+	operation := config.MediaOperation{
+		Name: "clone", Capability: config.MediaCapabilityClone,
+		Method: http.MethodPost, Path: "/voices", RequestFormat: config.MediaRequestJSON,
+		ModelMode: config.MediaModelNone, ResponseFormat: config.MediaResponsePassthrough,
+	}
+	exec, auth := customMediaExecutorFixture(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":400,"message":"credit limit exceeded"}`)
+	}, operation)
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Payload: []byte(`{"input":"voice"}`),
+	}, customMediaOptions(operation.Name, "", "application/json"))
+	if err == nil {
+		t.Fatal("Execute() accepted an application-level error")
+	}
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok || status.StatusCode() != http.StatusBadGateway {
+		t.Fatalf("status error = %T %v, want 502", err, err)
+	}
+	if !strings.Contains(err.Error(), "code 400") || !strings.Contains(err.Error(), "credit limit exceeded") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestMediaExecutorRejectsHTTP200NonSuccessBusinessCodes(t *testing.T) {
+	operation := config.MediaOperation{
+		Name: "clone", Capability: config.MediaCapabilityClone,
+		Method: http.MethodPost, Path: "/voices", RequestFormat: config.MediaRequestJSON,
+		ModelMode: config.MediaModelNone, ResponseFormat: config.MediaResponsePassthrough,
+	}
+	for _, body := range []string{
+		`{"code":-1,"message":"invalid key"}`,
+		`{"code":1001,"message":"insufficient balance"}`,
+		`{"code":"fail_to_fetch_task","message":"model is blocked"}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			exec, auth := customMediaExecutorFixture(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, body)
+			}, operation)
+
+			_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Payload: []byte(`{"input":"voice"}`),
+			}, customMediaOptions(operation.Name, "", "application/json"))
+			if err == nil {
+				t.Fatalf("Execute() accepted application error %s", body)
+			}
+		})
+	}
+}
+
+func TestMediaExecutorAcceptsHTTP200SuccessCodeAndPayloadWarning(t *testing.T) {
+	operation := config.MediaOperation{
+		Name: "clone", Capability: config.MediaCapabilityClone,
+		Method: http.MethodPost, Path: "/voices", RequestFormat: config.MediaRequestJSON,
+		ModelMode: config.MediaModelNone, ResponseFormat: config.MediaResponsePassthrough,
+	}
+	for _, body := range []string{
+		`{"code":201,"data":{"task_id":"task-1"}}`,
+		`{"ok":true,"data":{"task_id":"task-1"},"error":"fallback voice used"}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			exec, auth := customMediaExecutorFixture(t, func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, body)
+			}, operation)
+			if _, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{Payload: []byte(`{"input":"voice"}`)}, customMediaOptions(operation.Name, "", "application/json")); err != nil {
+				t.Fatalf("Execute() rejected successful payload %s: %v", body, err)
+			}
+		})
+	}
+}
+
+func TestMediaExecutorAcceptsHTTP200VendorSuccessCode(t *testing.T) {
+	operation := config.MediaOperation{
+		Name: "clone", Capability: config.MediaCapabilityClone,
+		Method: http.MethodPost, Path: "/voices", RequestFormat: config.MediaRequestJSON,
+		ModelMode: config.MediaModelNone, ResponseFormat: config.MediaResponsePassthrough,
+	}
+	exec, auth := customMediaExecutorFixture(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":10000,"data":{"voice_id":"voice-1"}}`)
+	}, operation)
+
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Payload: []byte(`{"input":"voice"}`),
+	}, customMediaOptions(operation.Name, "", "application/json"))
+	if err != nil {
+		t.Fatalf("Execute() rejected vendor success code: %v", err)
+	}
+	if !strings.Contains(string(resp.Payload), `"voice_id":"voice-1"`) {
+		t.Fatalf("response = %s", resp.Payload)
+	}
+}
+
 func TestMediaExecutorCustomOperationRewritesAliasAndUsesConfiguredPath(t *testing.T) {
 	operation := config.MediaOperation{
 		Name: "upscale", Capability: config.MediaCapabilityUpscale,
@@ -621,5 +717,17 @@ func TestMediaExecutorUsesConfiguredCredentialHeaderAndBarePrefix(t *testing.T) 
 	}, customMediaOptions(operation.Name, "", "application/json"))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+func TestMediaApplicationErrorAcceptsUnknownCodeWithResultPayload(t *testing.T) {
+	if err := mediaApplicationError([]byte(`{"code":1,"data":{"url":"https://img.example/out.png"}}`)); err != nil {
+		t.Fatalf("mediaApplicationError() = %v, want nil for payload-bearing response", err)
+	}
+}
+
+func TestMediaApplicationErrorAcceptsVendorSuccessCode1000(t *testing.T) {
+	if err := mediaApplicationError([]byte(`{"code":1000,"data":{"url":"https://img.example/out.png"}}`)); err != nil {
+		t.Fatalf("mediaApplicationError() = %v, want nil", err)
 	}
 }

@@ -62,11 +62,18 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	return out, nil
 }
 
-func nextNativeAuthID(idGen *StableIDGenerator, kind, apiKey, baseURL string, entryIndex int) (string, string) {
-	if entryIndex < 0 {
-		return idGen.Next(kind, apiKey, baseURL)
+func nextNativeAuthID(idGen *StableIDGenerator, kind string, key config.EffectiveNativeAPIKey, baseURL string) (string, string) {
+	if stableID := strings.TrimSpace(key.AuthID); stableID != "" && strings.HasPrefix(stableID, kind+":") {
+		token := strings.TrimPrefix(stableID, kind+":")
+		if strings.TrimSpace(token) == "" {
+			_, token = idGen.Next(kind, stableID)
+		}
+		return stableID, token
 	}
-	return idGen.Next(kind, apiKey, baseURL, strconv.Itoa(entryIndex))
+	if key.Index < 0 {
+		return idGen.Next(kind, key.APIKey, baseURL)
+	}
+	return idGen.Next(kind, key.APIKey, baseURL, strconv.Itoa(key.Index))
 }
 
 // synthesizeGeminiKeys creates Auth entries for Gemini API keys.
@@ -95,7 +102,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 			displayLabel = label
 		}
 		for _, effective := range effectiveKeys {
-			id, token := nextNativeAuthID(idGen, idKind, effective.APIKey, base, effective.Index)
+			id, token := nextNativeAuthID(idGen, idKind, effective, base)
 			attrs := map[string]string{
 				"source":       fmt.Sprintf("config:%s[%s]", sourceName, token),
 				"api_key":      effective.APIKey,
@@ -147,7 +154,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			label = "claude-apikey"
 		}
 		for _, effective := range effectiveKeys {
-			id, token := nextNativeAuthID(idGen, "claude:apikey", effective.APIKey, base, effective.Index)
+			id, token := nextNativeAuthID(idGen, "claude:apikey", effective, base)
 			attrs := map[string]string{
 				"source":       fmt.Sprintf("config:claude[%s]", token),
 				"api_key":      effective.APIKey,
@@ -211,7 +218,7 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 			label = provider + "-apikey"
 		}
 		for _, effective := range effectiveKeys {
-			id, token := nextNativeAuthID(idGen, provider+":apikey", effective.APIKey, baseURL, effective.Index)
+			id, token := nextNativeAuthID(idGen, provider+":apikey", effective, baseURL)
 			attrs := map[string]string{
 				"source":       fmt.Sprintf("config:%s[%s]", provider, token),
 				"api_key":      effective.APIKey,

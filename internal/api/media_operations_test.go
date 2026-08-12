@@ -238,3 +238,51 @@ func TestMediaOperationProvidersPrefersProviderDeclaringRequestedModel(t *testin
 		t.Fatalf("fallback = %#v; want only the model-free provider when no model is requested", fallback)
 	}
 }
+
+func TestMediaProviderPublicAliasRoutesAreRegistered(t *testing.T) {
+	server := newTestServer(t)
+	routes := make(map[string]struct{})
+	for _, route := range server.engine.Routes() {
+		routes[route.Method+" "+route.Path] = struct{}{}
+	}
+	for _, expected := range []string{
+		"POST /v1/videos/text-to-video",
+		"POST /v1/videos/image-to-video",
+		"POST /v1/videos/remove-watermark",
+		"POST /v1/audio/speech",
+		"POST /v1/audio/music",
+		"POST /v1/audio/clone",
+		"POST /v1/audio/voice-convert",
+		"POST /v1/audio/transcriptions",
+	} {
+		if _, ok := routes[expected]; !ok {
+			t.Fatalf("missing public media route %s", expected)
+		}
+	}
+}
+
+func TestMediaOperationProvidersPrefersModelFreeProviderWhenRequestOmitsModel(t *testing.T) {
+	server := &Server{cfg: &config.Config{MediaProviders: []config.MediaProvider{
+		{
+			Name: "fixed-speech", Kind: config.MediaKindAudio, BaseURL: "https://fixed.example.com/v1",
+			Operations: []config.MediaOperation{{
+				Name: config.MediaCapabilitySpeech, Capability: config.MediaCapabilitySpeech,
+				Method: http.MethodPost, Path: "/chat/completions", RequestFormat: config.MediaRequestJSON,
+				ModelMode: config.MediaModelRequired, Model: "fixed-tts",
+			}},
+		},
+		{
+			Name: "model-free-speech", Kind: config.MediaKindAudio, BaseURL: "https://free.example.com/v1",
+			Operations: []config.MediaOperation{{
+				Name: config.MediaCapabilitySpeech, Capability: config.MediaCapabilitySpeech,
+				Method: http.MethodPost, Path: "/text-to-speech", RequestFormat: config.MediaRequestMultipart,
+				ModelMode: config.MediaModelNone,
+			}},
+		},
+	}}}
+
+	providers := server.mediaOperationProviders(config.MediaKindAudio, config.MediaCapabilitySpeech, "")
+	if len(providers) != 1 || !strings.Contains(providers[0], "model-free-speech") {
+		t.Fatalf("providers = %#v; want only model-free-speech when the request omits model", providers)
+	}
+}

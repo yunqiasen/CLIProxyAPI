@@ -256,14 +256,15 @@ func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Con
 
 	registrationCtx := coreauth.WithDeferredAPIKeyModelAliasRebuild(ctx)
 	tasks := make([]modelRegistrationTask, 0, len(auths))
-	activeMediaAuthIDs := make(map[string]struct{})
+	activeConfigAuthIDs := make(map[string]struct{})
 	needsAliasRebuild := false
 	for _, auth := range auths {
 		isMediaAuth := isConfigMediaProviderAuth(auth)
-		if isMediaAuth {
-			activeMediaAuthIDs[auth.ID] = struct{}{}
+		isConfigAPIKeyAuth := coreauth.IsConfigAPIKeyAuth(auth)
+		if isConfigAPIKeyAuth || isMediaAuth {
+			activeConfigAuthIDs[auth.ID] = struct{}{}
 		}
-		if !coreauth.IsConfigAPIKeyAuth(auth) && !isMediaAuth {
+		if !isConfigAPIKeyAuth && !isMediaAuth {
 			continue
 		}
 		prepared := s.prepareCoreAuthForModelRegistration(registrationCtx, auth)
@@ -285,10 +286,10 @@ func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Con
 	}
 	s.runModelRegistrationTasks(registrationCtx, tasks)
 	for _, existing := range s.coreManager.List() {
-		if !isConfigMediaProviderAuth(existing) {
+		if !coreauth.IsConfigAPIKeyAuth(existing) && !isConfigMediaProviderAuth(existing) {
 			continue
 		}
-		if _, active := activeMediaAuthIDs[existing.ID]; active {
+		if _, active := activeConfigAuthIDs[existing.ID]; active {
 			continue
 		}
 		s.applyCoreAuthRemoval(registrationCtx, existing.ID)

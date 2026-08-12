@@ -150,6 +150,7 @@ func (s *Server) mediaOperationProviders(kind, operationName, requestedModel str
 	}
 	requestedModel = strings.TrimSpace(requestedModel)
 	declared := make([]string, 0)
+	modelFree := make([]string, 0)
 	generic := make([]string, 0)
 	seen := make(map[string]struct{})
 	for i := range s.cfg.MediaProviders {
@@ -169,6 +170,10 @@ func (s *Server) mediaOperationProviders(kind, operationName, requestedModel str
 			continue
 		}
 		seen[key] = struct{}{}
+		if requestedModel == "" && operation.ModelMode == config.MediaModelNone {
+			modelFree = append(modelFree, key)
+			continue
+		}
 		if requestedModel != "" && mediaProviderDeclaresModel(provider, requestedModel) {
 			declared = append(declared, key)
 			continue
@@ -179,6 +184,9 @@ func (s *Server) mediaOperationProviders(kind, operationName, requestedModel str
 	// accept it because they declare no models at all.
 	if len(declared) > 0 {
 		return declared
+	}
+	if requestedModel == "" && len(modelFree) > 0 {
+		return modelFree
 	}
 	return generic
 }

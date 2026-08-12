@@ -93,7 +93,7 @@ func (h *Handler) liveAuthIndexByID() map[string]string {
 	return out
 }
 
-func (h *Handler) liveAuthIDByIndex() map[string]string {
+func (h *Handler) liveAuthIDByIndex(providers ...string) map[string]string {
 	out := map[string]string{}
 	if h == nil {
 		return out
@@ -104,9 +104,20 @@ func (h *Handler) liveAuthIDByIndex() map[string]string {
 	if manager == nil {
 		return out
 	}
+	allowedProviders := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		if provider = strings.ToLower(strings.TrimSpace(provider)); provider != "" {
+			allowedProviders[provider] = struct{}{}
+		}
+	}
 	for _, auth := range manager.List() {
 		if auth == nil || strings.TrimSpace(auth.ID) == "" {
 			continue
+		}
+		if len(allowedProviders) > 0 {
+			if _, allowed := allowedProviders[strings.ToLower(strings.TrimSpace(auth.Provider))]; !allowed {
+				continue
+			}
 		}
 		index := strings.TrimSpace(auth.Index)
 		if index == "" {
@@ -148,7 +159,10 @@ func (h *Handler) geminiKeysWithAuthIndex() []geminiKeyWithAuthIndex {
 			response.APIKeyEntries = make([]nativeAPIKeyEntryWithAuthIndex, len(entry.APIKeyEntries))
 			for j := range entry.APIKeyEntries {
 				keyEntry := entry.APIKeyEntries[j]
-				id, _ := idGen.Next("gemini:apikey", keyEntry.APIKey, entry.BaseURL, strconv.Itoa(j))
+				id := strings.TrimSpace(keyEntry.AuthID)
+				if id == "" {
+					id, _ = idGen.Next("gemini:apikey", keyEntry.APIKey, entry.BaseURL, strconv.Itoa(j))
+				}
 				response.APIKeyEntries[j] = nativeAPIKeyEntryWithAuthIndex{
 					NativeAPIKeyEntry: keyEntry,
 					AuthIndex:         liveIndexByID[id],
@@ -218,7 +232,10 @@ func (h *Handler) claudeKeysWithAuthIndex() []claudeKeyWithAuthIndex {
 			response.APIKeyEntries = make([]nativeAPIKeyEntryWithAuthIndex, len(entry.APIKeyEntries))
 			for j := range entry.APIKeyEntries {
 				keyEntry := entry.APIKeyEntries[j]
-				id, _ := idGen.Next("claude:apikey", keyEntry.APIKey, entry.BaseURL, strconv.Itoa(j))
+				id := strings.TrimSpace(keyEntry.AuthID)
+				if id == "" {
+					id, _ = idGen.Next("claude:apikey", keyEntry.APIKey, entry.BaseURL, strconv.Itoa(j))
+				}
 				response.APIKeyEntries[j] = nativeAPIKeyEntryWithAuthIndex{
 					NativeAPIKeyEntry: keyEntry,
 					AuthIndex:         liveIndexByID[id],
@@ -259,7 +276,10 @@ func (h *Handler) codexKeysWithAuthIndex() []codexKeyWithAuthIndex {
 			response.APIKeyEntries = make([]nativeAPIKeyEntryWithAuthIndex, len(entry.APIKeyEntries))
 			for j := range entry.APIKeyEntries {
 				keyEntry := entry.APIKeyEntries[j]
-				id, _ := idGen.Next("codex:apikey", keyEntry.APIKey, entry.BaseURL, strconv.Itoa(j))
+				id := strings.TrimSpace(keyEntry.AuthID)
+				if id == "" {
+					id, _ = idGen.Next("codex:apikey", keyEntry.APIKey, entry.BaseURL, strconv.Itoa(j))
+				}
 				response.APIKeyEntries[j] = nativeAPIKeyEntryWithAuthIndex{
 					NativeAPIKeyEntry: keyEntry,
 					AuthIndex:         liveIndexByID[id],

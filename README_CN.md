@@ -233,6 +233,14 @@ POST /v1/images/upscale
 POST /v1/images/super-resolution
 POST /v1/images/remove-background
 POST /v1/images/background/remove
+POST /v1/videos/text-to-video
+POST /v1/videos/image-to-video
+POST /v1/videos/remove-watermark
+POST /v1/audio/speech
+POST /v1/audio/music
+POST /v1/audio/clone
+POST /v1/audio/voice-convert
+POST /v1/audio/transcriptions
 ```
 
 两个标准图片接口按 `generate`、`edit` 能力选择模型。通用接口执行已配置的图片、视频或音频操作，覆盖生成、编辑、放大、去背景、视频去水印、语音/音乐生成、克隆和变声等场景。
@@ -250,6 +258,7 @@ POST /v1/images/background/remove
 原有 `openai-compatibility` 图片模型继续正常使用。只有需要媒体专属操作配置时再迁移。完整图片/视频/音频示例见 [`config.example.yaml`](config.example.yaml)，管理 CRUD 接口为 `/v0/management/media-providers`。
 
 `request-log: true` 用于生成请求日志页面和供应商成功统计所需的结构化成功请求记录。`request-log-retention-days` 控制保留时长（默认 `7` 天，`0` 为永久）；即使关闭结构化请求日志，失败重试仍计入实时统计。
+媒体供应商表单里的两个测试按钮职责不同：每个 Key 的“测试”只测上游；**测试 CPA API** 会带着当前选择的操作/模型调用 CPA 对外接口，并写入结构化请求日志。请求日志表同时显示请求模型和具体供应商；不需要模型的接口显示为 `无需模型`。
 
 管理面板热加载保存供应商名称、Base URL、Key、模型或操作配置时，会保留已有 Key 的稳定身份以及成功/失败统计；新增 Key 会创建独立统计身份。
 

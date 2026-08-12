@@ -254,7 +254,13 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		pendingToolUseParts = append(pendingToolUseParts, toolUse)
 	}
 
-	if input := root.Get("input"); input.Exists() && input.IsArray() {
+	input := root.Get("input")
+	if input.Type == gjson.String && input.String() != "" {
+		contentPart := []byte(`{"type":"text","text":""}`)
+		contentPart, _ = sjson.SetBytes(contentPart, "text", input.String())
+		appendParts("user", contentPart)
+	}
+	if input.Exists() && input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
 			// System-level items already became top-level system blocks.
 			if isResponsesSystemLevelRole(item.Get("role").String()) {
@@ -266,14 +272,18 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			}
 			switch typ {
 			case "message":
-				// Determine role and construct Claude-compatible content parts.
-				var role string
+				// The containing message role is authoritative. Content part names are
+				// only a fallback for clients that omit the role.
+				role := strings.ToLower(strings.TrimSpace(item.Get("role").String()))
+				if role != "user" && role != "assistant" {
+					role = ""
+				}
 				var partsJSON [][]byte
 				if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
 					parts.ForEach(func(_, part gjson.Result) bool {
 						ptype := part.Get("type").String()
 						switch ptype {
-						case "input_text", "output_text":
+						case "input_text", "output_text", "text":
 							if t := part.Get("text"); t.Exists() {
 								txt := t.String()
 								contentPart := []byte(`{"type":"text","text":""}`)
@@ -281,10 +291,13 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 								contentPart = common.AttachCacheControl(contentPart, part)
 								partsJSON = append(partsJSON, contentPart)
 							}
-							if ptype == "input_text" {
-								role = "user"
-							} else {
-								role = "assistant"
+							if role == "" {
+								switch ptype {
+								case "input_text":
+									role = "user"
+								case "output_text":
+									role = "assistant"
+								}
 							}
 						case "input_image":
 							url := part.Get("image_url").String()

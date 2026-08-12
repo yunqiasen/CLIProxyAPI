@@ -1123,3 +1123,69 @@ func TestConvertOpenAIResponsesRequestToClaude_SystemItemCacheControlAppliesToLa
 		t.Fatalf("system[1].cache_control.type = %q, want ephemeral", got)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToClaude_AcceptsTopLevelStringInput(t *testing.T) {
+	inputJSON := `{"model":"claude-test","input":"阿福"}`
+
+	root := gjson.ParseBytes(ConvertOpenAIResponsesRequestToClaude("claude-test", []byte(inputJSON), false))
+	messages := root.Get("messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("messages = %d, want 1. Output: %s", len(messages), root.Raw)
+	}
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("messages[0].role = %q, want user. Output: %s", got, root.Raw)
+	}
+	if got := messages[0].Get("content").String(); got != "阿福" {
+		t.Fatalf("messages[0].content = %q, want 阿福. Output: %s", got, root.Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_AcceptsGenericTextPartsByMessageRole(t *testing.T) {
+	inputJSON := `{
+		"model":"claude-test",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"text","text":"用户内容"}]},
+			{"type":"message","role":"assistant","content":[{"type":"text","text":"助手历史"}]}
+		]
+	}`
+
+	root := gjson.ParseBytes(ConvertOpenAIResponsesRequestToClaude("claude-test", []byte(inputJSON), false))
+	messages := root.Get("messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("messages = %d, want 2. Output: %s", len(messages), root.Raw)
+	}
+	for index, want := range []struct {
+		role string
+		text string
+	}{{role: "user", text: "用户内容"}, {role: "assistant", text: "助手历史"}} {
+		if got := messages[index].Get("role").String(); got != want.role {
+			t.Fatalf("messages[%d].role = %q, want %q. Output: %s", index, got, want.role, root.Raw)
+		}
+		if got := messages[index].Get("content").String(); got != want.text {
+			t.Fatalf("messages[%d].content = %q, want %q. Output: %s", index, got, want.text, root.Raw)
+		}
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_MessageRoleWinsForMixedTextPartNames(t *testing.T) {
+	inputJSON := `{
+		"model":"claude-test",
+		"input":[{
+			"type":"message",
+			"role":"user",
+			"content":[
+				{"type":"text","text":"first"},
+				{"type":"output_text","text":"second"}
+			]
+		}]
+	}`
+
+	root := gjson.ParseBytes(ConvertOpenAIResponsesRequestToClaude("claude-test", []byte(inputJSON), false))
+	if got := root.Get("messages.0.role").String(); got != "user" {
+		t.Fatalf("messages.0.role = %q, want user. Output: %s", got, root.Raw)
+	}
+	content := root.Get("messages.0.content").Array()
+	if len(content) != 2 {
+		t.Fatalf("content = %d parts, want 2. Output: %s", len(content), root.Raw)
+	}
+}

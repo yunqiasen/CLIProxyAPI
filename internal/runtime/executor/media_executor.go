@@ -352,7 +352,118 @@ func (e *MediaExecutor) executeHTTPRequest(ctx context.Context, client *http.Cli
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		return nil, headers, statusErr{code: httpResp.StatusCode, msg: string(body)}
 	}
+	if errApplication := mediaApplicationError(body); errApplication != nil {
+		return nil, headers, errApplication
+	}
 	return body, headers, nil
+}
+
+func mediaApplicationError(body []byte) error {
+	if !json.Valid(body) {
+		return nil
+	}
+	codeResult := gjson.GetBytes(body, "code")
+	_, codeValue, hasCode := mediaApplicationCode(codeResult)
+	successResult := gjson.GetBytes(body, "success")
+	okResult := gjson.GetBytes(body, "ok")
+	successFailed := successResult.Raw == "false" || okResult.Raw == "false"
+	status := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "status").String()))
+	statusFailed := mediaApplicationFailureStatus(status)
+	explicitSuccess := successResult.Raw == "true" || okResult.Raw == "true" || mediaApplicationSuccessStatus(status)
+	errorResult := gjson.GetBytes(body, "error")
+	hasError := errorResult.Exists() && errorResult.Raw != "null" && errorResult.Raw != "false" && errorResult.Raw != `""` && errorResult.Raw != "{}"
+	message := strings.TrimSpace(gjson.GetBytes(body, "error.message").String())
+	if message == "" {
+		message = strings.TrimSpace(gjson.GetBytes(body, "message").String())
+	}
+	if message == "" && errorResult.Type == gjson.String {
+		message = strings.TrimSpace(errorResult.String())
+	}
+	hasPayload := mediaApplicationHasPayload(body)
+	businessCodeFailed := hasCode && !mediaApplicationSuccessCode(codeValue) && !explicitSuccess && !hasPayload
+	errorFailed := hasError && !explicitSuccess && !hasPayload
+	messageOnlyFailed := !hasCode && !hasError && !explicitSuccess && !hasPayload && mediaApplicationFailureMessage(message)
+	if !businessCodeFailed && !successFailed && !statusFailed && !errorFailed && !messageOnlyFailed {
+		return nil
+	}
+	if message == "" {
+		message = strings.TrimSpace(string(body))
+	}
+	if hasCode && codeValue != "" {
+		message = fmt.Sprintf("media application error (code %s): %s", codeValue, message)
+	}
+	return statusErr{code: http.StatusBadGateway, msg: message}
+}
+
+func mediaApplicationCode(result gjson.Result) (code int, normalized string, exists bool) {
+	if !result.Exists() || result.Raw == "null" || result.Raw == `""` {
+		return 0, "", false
+	}
+	normalized = strings.ToLower(strings.TrimSpace(result.String()))
+	if normalized == "" {
+		return 0, "", false
+	}
+	if result.Type == gjson.Number {
+		code = int(result.Int())
+	} else if parsed, errParse := strconv.Atoi(normalized); errParse == nil {
+		code = parsed
+	}
+	return code, normalized, true
+}
+
+func mediaApplicationSuccessCode(code string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(code))
+	if numeric, errParse := strconv.Atoi(normalized); errParse == nil && numeric >= 200 && numeric < 300 {
+		return true
+	}
+	switch normalized {
+	case "0", "1000", "10000", "ok", "success", "succeeded", "completed":
+		return true
+	default:
+		return false
+	}
+}
+
+func mediaApplicationFailureStatus(status string) bool {
+	switch status {
+	case "error", "failed", "failure", "cancelled", "canceled":
+		return true
+	default:
+		return false
+	}
+}
+
+func mediaApplicationSuccessStatus(status string) bool {
+	switch status {
+	case "ok", "success", "succeeded", "completed", "done":
+		return true
+	default:
+		return false
+	}
+}
+
+func mediaApplicationHasPayload(body []byte) bool {
+	for _, path := range []string{"data", "result", "output", "outputs", "url", "id", "task_id"} {
+		result := gjson.GetBytes(body, path)
+		if !result.Exists() || result.Raw == "null" || result.Raw == "false" || result.Raw == `""` || result.Raw == "{}" || result.Raw == "[]" {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func mediaApplicationFailureMessage(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	if message == "" {
+		return false
+	}
+	for _, part := range []string{"error", "invalid", "fail", "denied", "insufficient", "exceeded", "blocked", "unavailable", "not found", "too short", "credit", "balance"} {
+		if strings.Contains(message, part) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *MediaExecutor) pollAsyncOperation(ctx context.Context, client *http.Client, auth *cliproxyauth.Auth, apiKey, baseURL string, operation config.MediaOperation, submitBody []byte) ([]byte, http.Header, error) {

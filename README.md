@@ -233,6 +233,14 @@ POST /v1/images/upscale
 POST /v1/images/super-resolution
 POST /v1/images/remove-background
 POST /v1/images/background/remove
+POST /v1/videos/text-to-video
+POST /v1/videos/image-to-video
+POST /v1/videos/remove-watermark
+POST /v1/audio/speech
+POST /v1/audio/music
+POST /v1/audio/clone
+POST /v1/audio/voice-convert
+POST /v1/audio/transcriptions
 ```
 
 The two standard image routes select models with `generate` or `edit` capability. The generic route serves configured image, video, or audio operations, including generation, editing, upscaling, background removal, video watermark removal, speech/music generation, cloning, and voice conversion.
@@ -250,6 +258,7 @@ Operation controls:
 Existing image models under `openai-compatibility` keep working unchanged. Move one only when it needs the dedicated media operation controls. See the complete image/video/audio examples in [`config.example.yaml`](config.example.yaml). Management CRUD is available at `/v0/management/media-providers`.
 
 `request-log: true` enables structured successful-request records used by the request-log page and provider success totals. `request-log-retention-days` controls their retention (`7` by default, `0` forever). Failed attempts continue to feed live retry statistics even when structured request logging is off.
+The media form has two separate test buttons: per-key upstream testing and **Test CPA API**, which calls the public CPA route with the selected operation/model and writes a structured request log. The request-log table shows both the requested model and the concrete provider name, including model-free operations as `无需模型`.
 
 Hot-reload edits to a provider name, Base URL, key, model, or operation retain each existing key's stable identity and success/failure totals. A newly added key receives its own independent usage identity.
 

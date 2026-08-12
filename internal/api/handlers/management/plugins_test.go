@@ -44,11 +44,30 @@ func waitForReloadDone(t *testing.T, done <-chan struct{}) {
 func captureConfigReload(h *Handler) (<-chan *config.Config, <-chan struct{}) {
 	reloads := make(chan *config.Config, 1)
 	done := make(chan struct{})
-	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) {
+	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) bool {
 		defer close(done)
 		reloads <- cfg
+		return true
 	})
 	return reloads, done
+}
+
+func TestConfigReloadGenerationSettlesWhenRuntimeApplyFails(t *testing.T) {
+	h := &Handler{cfg: &config.Config{}}
+	h.SetConfigReloadHook(func(context.Context, *config.Config) bool { return false })
+	h.mu.Lock()
+	snapshot := h.reloadSnapshotConfigLocked()
+	h.mu.Unlock()
+	h.reloadConfigAfterManagementSave(context.Background(), snapshot)
+	if h.appliedReloadGeneration != 0 || h.failedReloadGeneration != snapshot.generation || h.reloadGeneration != snapshot.generation {
+		t.Fatalf("reload generations = applied %d failed %d requested %d", h.appliedReloadGeneration, h.failedReloadGeneration, h.reloadGeneration)
+	}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	h.setConfigReloadStatusHeader(ctx)
+	if got := recorder.Header().Get("X-Config-Reload-Pending"); got != "false" {
+		t.Fatalf("X-Config-Reload-Pending = %q, want false after failed apply settled", got)
+	}
 }
 
 func TestConfigReloadGenerationSkipsOlderSnapshot(t *testing.T) {
@@ -64,8 +83,9 @@ func TestConfigReloadGenerationSkipsOlderSnapshot(t *testing.T) {
 		},
 	}
 	reloadedModes := make([]string, 0, 1)
-	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) {
+	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) bool {
 		reloadedModes = append(reloadedModes, pluginRawScalarValue(t, cfg.Plugins.Configs["sample"], "mode"))
+		return true
 	})
 
 	h.mu.Lock()
@@ -404,10 +424,11 @@ func TestPatchPluginEnabledReloadSnapshotRawImmutability(t *testing.T) {
 	reloads := make(chan *config.Config, 1)
 	releaseReload := make(chan struct{})
 	reloadDone := make(chan struct{})
-	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) {
+	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) bool {
 		defer close(reloadDone)
 		reloads <- cfg
 		<-releaseReload
+		return true
 	})
 
 	rec := httptest.NewRecorder()
@@ -596,10 +617,11 @@ func TestDeletePluginRemovesDiscoveredFileAndConfig(t *testing.T) {
 	reloads := make(chan *config.Config, 1)
 	releaseReload := make(chan struct{})
 	reloadDone := make(chan struct{})
-	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) {
+	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) bool {
 		defer close(reloadDone)
 		reloads <- cfg
 		<-releaseReload
+		return true
 	})
 
 	path, errPath := pluginFilePath(pluginsDir, "sample")

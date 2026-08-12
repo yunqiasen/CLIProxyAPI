@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -8,9 +9,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	openaihandlers "github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -109,6 +114,87 @@ func TestBuildMediaProviderConfigModelsIncludesCustomMediaModels(t *testing.T) {
 			models := buildMediaProviderConfigModels(provider)
 			if len(models) != 1 || models[0].ID != "public-model" || models[0].Type != tt.wantType {
 				t.Fatalf("registered models = %#v, want public-model type %q", models, tt.wantType)
+			}
+		})
+	}
+}
+
+func TestBuildMediaProviderConfigModelsTreatsEmptyImageCapabilitiesAsStandardImage(t *testing.T) {
+	provider := &config.MediaProvider{
+		Name: "Image Relay", Kind: config.MediaKindImage,
+		Models: []config.MediaModel{{Name: "discovered-image"}},
+		Operations: []config.MediaOperation{{
+			Name: config.MediaCapabilityGenerate, Capability: config.MediaCapabilityGenerate,
+			Method: http.MethodPost, Path: "/images/generations", RequestFormat: internalconfig.MediaRequestJSON,
+			ModelMode: internalconfig.MediaModelRequired, ResponseFormat: internalconfig.MediaResponsePassthrough,
+		}},
+	}
+
+	models := buildMediaProviderConfigModels(provider)
+	if len(models) != 1 || models[0].ID != "discovered-image" || models[0].Type != registry.OpenAIImageModelType {
+		t.Fatalf("registered models = %#v, want discovered-image type %q", models, registry.OpenAIImageModelType)
+	}
+}
+
+func TestMediaProviderDiscoveredModelRoutesThroughStandardImageEndpoints(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/images/generations" && r.URL.Path != "/v1/images/edits" {
+			t.Fatalf("upstream path = %q", r.URL.Path)
+		}
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatal(errRead)
+		}
+		if !strings.Contains(string(body), `"model":"upstream-discovered-image"`) {
+			t.Fatalf("upstream body = %s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"created":1,"data":[{"url":"https://images.example/result.png"}]}`)
+	}))
+	t.Cleanup(upstream.Close)
+
+	provider := config.MediaProvider{
+		Name: "Discovered Image Relay", Kind: config.MediaKindImage, BaseURL: upstream.URL + "/v1",
+		Models: []config.MediaModel{{Name: "upstream-discovered-image", Alias: "discovered-image"}},
+		Operations: []config.MediaOperation{
+			{Name: config.MediaCapabilityGenerate, Capability: config.MediaCapabilityGenerate, Method: http.MethodPost, Path: "/images/generations", RequestFormat: internalconfig.MediaRequestJSON, ModelMode: internalconfig.MediaModelRequired, ResponseFormat: internalconfig.MediaResponsePassthrough},
+			{Name: config.MediaCapabilityEdit, Capability: config.MediaCapabilityEdit, Method: http.MethodPost, Path: "/images/edits", RequestFormat: internalconfig.MediaRequestJSON, ModelMode: internalconfig.MediaModelRequired, ResponseFormat: internalconfig.MediaResponsePassthrough},
+		},
+	}
+	auth := testMediaAuth(provider)
+	auth.ID = "media-discovered-image-auth"
+	cfg := &config.Config{MediaProviders: []config.MediaProvider{provider}}
+	manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
+	manager.SetConfig(cfg)
+	service := &Service{cfg: cfg, coreManager: manager}
+	service.registerExecutorForAuth(auth, false)
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	service.registerModelsForAuth(context.Background(), auth)
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	handler := openaihandlers.NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&config.SDKConfig{}, manager))
+	tests := []struct {
+		name string
+		path string
+		body string
+		fn   gin.HandlerFunc
+	}{
+		{name: "generations", path: "/v1/images/generations", body: `{"model":"discovered-image","prompt":"draw"}`, fn: handler.ImagesGenerations},
+		{name: "edits", path: "/v1/images/edits", body: `{"model":"discovered-image","prompt":"edit","images":[{"image_url":"data:image/png;base64,AA=="}]}`, fn: handler.ImagesEdits},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			router := gin.New()
+			router.POST(tt.path, tt.fn)
+			req := httptest.NewRequest(http.MethodPost, tt.path, bytes.NewBufferString(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			resp := httptest.NewRecorder()
+			router.ServeHTTP(resp, req)
+			if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), "result.png") {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 			}
 		})
 	}

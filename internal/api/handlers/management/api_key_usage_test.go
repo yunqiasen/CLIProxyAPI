@@ -750,3 +750,167 @@ func TestGetAPIKeyUsageIncludesNoKeyMediaProvider(t *testing.T) {
 		t.Fatalf("no-key media totals = %d/%d, want 1/0; payload=%#v", entry.Success, entry.Failed, payload)
 	}
 }
+
+func TestGetAPIKeyUsageReportsPendingManagementConfigReload(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{}, manager)
+	h.reloadGeneration = 4
+	h.appliedReloadGeneration = 3
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/api-key-usage", nil)
+	h.GetAPIKeyUsage(ginCtx)
+
+	if got := rec.Header().Get("X-Config-Reload-Pending"); got != "true" {
+		t.Fatalf("X-Config-Reload-Pending = %q, want true", got)
+	}
+
+	h.appliedReloadGeneration = 4
+	rec = httptest.NewRecorder()
+	ginCtx, _ = gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/api-key-usage", nil)
+	h.GetAPIKeyUsage(ginCtx)
+	if got := rec.Header().Get("X-Config-Reload-Pending"); got != "false" {
+		t.Fatalf("X-Config-Reload-Pending = %q, want false", got)
+	}
+}
+
+func TestGetAPIKeyUsageReportsSettledAfterManagementConfigReloadFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{}, coreauth.NewManager(nil, nil, nil))
+	h.reloadGeneration = 4
+	h.appliedReloadGeneration = 3
+	h.failedReloadGeneration = 4
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/api-key-usage", nil)
+	h.GetAPIKeyUsage(ginCtx)
+
+	if got := rec.Header().Get("X-Config-Reload-Pending"); got != "false" {
+		t.Fatalf("X-Config-Reload-Pending = %q, want false after reload failure settled", got)
+	}
+}
+
+func TestUniqueAPIKeyUsageProtocolBaseMatchRejectsMultipleKeysInSameProvider(t *testing.T) {
+	lookup := map[string]apiKeyUsageLookupKey{
+		"first":  {Provider: "relay", Protocol: "claude", BaseURL: "https://relay.example/v1", Composite: "https://relay.example/v1|first-key"},
+		"second": {Provider: "relay", Protocol: "claude", BaseURL: "https://relay.example/v1", Composite: "https://relay.example/v1|second-key"},
+	}
+	if got, ok := uniqueAPIKeyUsageProtocolBaseMatch(lookup, apiKeyUsageHistoricalIdentity{
+		Provider: "relay", Protocol: "claude", UpstreamURL: "https://relay.example/v1/messages",
+	}); ok {
+		t.Fatalf("ambiguous protocol/base history matched arbitrary key: %#v", got)
+	}
+}
+
+func TestUniqueAPIKeyUsageProviderMatchDoesNotAssignHistoryToConcreteSingleKey(t *testing.T) {
+	lookup := map[string]apiKeyUsageLookupKey{
+		"new-auth": {Provider: "relay", Protocol: "claude", BaseURL: "https://relay.example/v1", Composite: "https://relay.example/v1|new-key"},
+	}
+	if got, ok := uniqueAPIKeyUsageProviderMatch(lookup, "relay"); ok {
+		t.Fatalf("provider-only history matched unrelated concrete key: %#v", got)
+	}
+}
+
+func TestUniqueAPIKeyUsageProviderMatchRejectsMultipleKeys(t *testing.T) {
+	lookup := map[string]apiKeyUsageLookupKey{
+		"first":  {Provider: "relay", Protocol: "claude", BaseURL: "https://first.example/v1", Composite: "https://first.example/v1|first-key"},
+		"second": {Provider: "relay", Protocol: "claude", BaseURL: "https://second.example/v1", Composite: "https://second.example/v1|second-key"},
+	}
+	if got, ok := uniqueAPIKeyUsageProviderMatch(lookup, "relay"); ok {
+		t.Fatalf("ambiguous provider history matched arbitrary key: %#v", got)
+	}
+}
+
+func TestGetAPIKeyUsageKeepsAmbiguousNativeHistoryAtProviderLevel(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	for _, auth := range []*coreauth.Auth{
+		{
+			ID:       "current-first-auth",
+			Provider: "claude",
+			Attributes: map[string]string{
+				"api_key":       "first-key",
+				"base_url":      "https://relay.example/v1",
+				"provider_name": "Relay A",
+			},
+		},
+		{
+			ID:       "current-second-auth",
+			Provider: "claude",
+			Attributes: map[string]string{
+				"api_key":       "second-key",
+				"base_url":      "https://relay.example/v1",
+				"provider_name": "Relay A",
+			},
+		},
+	} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register auth: %v", err)
+		}
+	}
+
+	logsDir := t.TempDir()
+	store, err := openRequestLogStore(logsDir)
+	if err != nil {
+		t.Fatalf("open request log store: %v", err)
+	}
+	now := time.Now()
+	for i := 0; i < 9; i++ {
+		success := 1
+		status := http.StatusOK
+		if i == 8 {
+			success = 0
+			status = http.StatusBadGateway
+		}
+		id := fmt.Sprintf("ambiguous-history-%02d", i)
+		_, err = store.db.ExecContext(context.Background(), `INSERT INTO request_log_entries (id, name, raw_log_path, size, modified, timestamp_text, timestamp_unix, provider, provider_name, auth_id, upstream_url, status, success, has_error, model, error_preview, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, id+".log", id+".log", 1, now.Unix(), now.Format(time.RFC3339Nano), now.Unix(), "claude", "Old Relay Name", "historical-auth", "https://relay.example/v1/messages", status, success, boolInt(success == 0), "claude-history", "fixture failure", now.Unix(), now.Unix())
+		if err != nil {
+			t.Fatalf("insert historical request %d: %v", i, err)
+		}
+	}
+	if err := store.close(); err != nil {
+		t.Fatalf("close request log store: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{RequestLogRetentionDays: 7}, manager)
+	h.SetLogDirectory(logsDir)
+	attachTestRequestLogSnapshot(t, h, logsDir)
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/api-key-usage", nil)
+	h.GetAPIKeyUsage(ginCtx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var payload map[string]map[string]apiKeyUsageEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	bucket := payload["relay a"]
+	if entry := bucket["https://relay.example/v1|first-key"]; entry.Success != 0 || entry.Failed != 0 {
+		t.Fatalf("first key received ambiguous history: %#v", entry)
+	}
+	if entry := bucket["https://relay.example/v1|second-key"]; entry.Success != 0 || entry.Failed != 0 {
+		t.Fatalf("second key received ambiguous history: %#v", entry)
+	}
+	unassigned := bucket["https://relay.example/v1|"]
+	if unassigned.Success != 8 || unassigned.Failed != 1 {
+		t.Fatalf("provider-level history = %d/%d, want 8/1; payload=%#v", unassigned.Success, unassigned.Failed, payload)
+	}
+
+	var total int64
+	for _, entry := range bucket {
+		total += entry.Success + entry.Failed
+	}
+	if total != 9 {
+		t.Fatalf("provider history counted %d times, want 9", total)
+	}
+}

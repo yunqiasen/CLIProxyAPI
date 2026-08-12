@@ -279,3 +279,52 @@ func openAIModelIDSet(models []map[string]any) map[string]struct{} {
 	}
 	return ids
 }
+
+func TestApplyWatcherConfigUpdateRemovesDeletedNativeAuthBeforeReturn(t *testing.T) {
+	const authID = "codex:apikey:persisted-deleted"
+	oldConfig := &config.Config{CodexKey: []config.CodexKey{{
+		BaseURL:       "https://codex.example/v1",
+		APIKeyEntries: []internalconfig.NativeAPIKeyEntry{{AuthID: authID, APIKey: "deleted-key"}},
+	}}}
+	manager := coreauth.NewManager(nil, nil, nil)
+	service := &Service{cfg: oldConfig, coreManager: manager}
+	service.registerConfigAPIKeyAuths(context.Background(), oldConfig)
+	if _, ok := manager.GetByID(authID); !ok {
+		t.Fatal("initial native auth was not registered")
+	}
+
+	service.applyWatcherConfigUpdate(&config.Config{})
+	if stale, ok := manager.GetByID(authID); ok {
+		t.Fatalf("deleted native auth remains after watcher callback returned: %#v", stale)
+	}
+}
+
+func TestApplyWatcherConfigUpdateSynchronizesNativeAuthAndCountersBeforeReturn(t *testing.T) {
+	const authID = "codex:apikey:persisted-sync"
+	oldConfig := &config.Config{CodexKey: []config.CodexKey{{
+		Name: "Before", BaseURL: "https://before.example/v1",
+		APIKeyEntries: []internalconfig.NativeAPIKeyEntry{{AuthID: authID, APIKey: "before-key"}},
+	}}}
+	manager := coreauth.NewManager(nil, nil, nil)
+	service := &Service{cfg: oldConfig, coreManager: manager}
+	service.registerConfigAPIKeyAuths(context.Background(), oldConfig)
+	manager.MarkResult(context.Background(), coreauth.Result{AuthID: authID, Provider: "codex", Model: "gpt-5", Success: true})
+	manager.MarkResult(context.Background(), coreauth.Result{AuthID: authID, Provider: "codex", Model: "gpt-5", Success: false})
+
+	newConfig := &config.Config{CodexKey: []config.CodexKey{{
+		Name: "After", BaseURL: "https://after.example/v2",
+		APIKeyEntries: []internalconfig.NativeAPIKeyEntry{{AuthID: authID, APIKey: "after-key"}},
+	}}}
+	service.applyWatcherConfigUpdate(newConfig)
+
+	updated, ok := manager.GetByID(authID)
+	if !ok || updated == nil {
+		t.Fatal("updated native auth is unavailable after watcher callback returned")
+	}
+	if updated.Label != "After" || updated.Attributes["api_key"] != "after-key" || updated.Attributes["base_url"] != "https://after.example/v2" {
+		t.Fatalf("updated native auth = %#v", updated)
+	}
+	if updated.Success != 1 || updated.Failed != 1 {
+		t.Fatalf("updated native counters = %d/%d, want 1/1", updated.Success, updated.Failed)
+	}
+}

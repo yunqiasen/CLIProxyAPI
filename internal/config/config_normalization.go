@@ -215,6 +215,7 @@ func sanitizeNativeAPIKeyEntries(entries []NativeAPIKeyEntry) []NativeAPIKeyEntr
 	out := make([]NativeAPIKeyEntry, 0, len(entries))
 	for index := range entries {
 		entry := entries[index]
+		entry.AuthID = strings.TrimSpace(entry.AuthID)
 		entry.APIKey = strings.TrimSpace(entry.APIKey)
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		if entry.APIKey == "" {

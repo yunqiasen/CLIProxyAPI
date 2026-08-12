@@ -33,6 +33,9 @@ func setConfigAPIKeyExcludedAll(models []string, disable bool) []string {
 
 func matchesNativeConfigAuthID(idGen *synthesizer.StableIDGenerator, authID, kind, legacyKey string, priority int, proxyURL string, entries []config.NativeAPIKeyEntry, baseURL string) bool {
 	for _, effective := range config.EffectiveNativeAPIKeys(legacyKey, priority, proxyURL, entries) {
+		if stableID := strings.TrimSpace(effective.AuthID); stableID != "" && stableID == authID {
+			return true
+		}
 		var id string
 		if effective.Index < 0 {
 			id, _ = idGen.Next(kind, effective.APIKey, baseURL)

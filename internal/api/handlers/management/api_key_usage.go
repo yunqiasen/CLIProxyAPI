@@ -298,7 +298,7 @@ func uniqueAPIKeyUsageProtocolBaseMatch(lookup map[string]apiKeyUsageLookupKey, 
 		if baseURL != "" && upstreamURL != baseURL && !strings.HasPrefix(upstreamURL, baseURL+"/") {
 			continue
 		}
-		groupKey := candidate.Provider + "\x00" + candidate.BaseURL
+		groupKey := candidate.Provider + "\x00" + candidate.BaseURL + "\x00" + candidate.Composite
 		matches[groupKey] = candidate
 		if candidate.Provider != candidate.Protocol {
 			customMatches[groupKey] = candidate
@@ -312,6 +312,70 @@ func uniqueAPIKeyUsageProtocolBaseMatch(lookup map[string]apiKeyUsageLookupKey, 
 	if len(matches) == 1 {
 		for _, candidate := range matches {
 			return candidate, true
+		}
+	}
+	return apiKeyUsageLookupKey{}, false
+}
+
+func uniqueAPIKeyUsageProviderMatch(lookup map[string]apiKeyUsageLookupKey, provider string) (apiKeyUsageLookupKey, bool) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return apiKeyUsageLookupKey{}, false
+	}
+	var match apiKeyUsageLookupKey
+	matched := false
+	for _, candidate := range lookup {
+		if candidate.Provider != provider || candidate.Composite == "" || !strings.HasSuffix(candidate.Composite, "|") {
+			continue
+		}
+		if matched && candidate.Composite != match.Composite {
+			return apiKeyUsageLookupKey{}, false
+		}
+		match = candidate
+		matched = true
+	}
+	return match, matched
+}
+
+func unassignedAPIKeyUsageProtocolBaseMatch(lookup map[string]apiKeyUsageLookupKey, identity apiKeyUsageHistoricalIdentity) (apiKeyUsageLookupKey, bool) {
+	groups := make(map[string]apiKeyUsageLookupKey)
+	counts := make(map[string]int)
+	customGroups := make(map[string]apiKeyUsageLookupKey)
+	customCounts := make(map[string]int)
+	for _, candidate := range lookup {
+		if !usageProtocolsMatch(identity.Protocol, candidate.Protocol) {
+			continue
+		}
+		upstreamURL := strings.TrimRight(strings.ToLower(identity.UpstreamURL), "/")
+		baseURL := strings.TrimRight(strings.ToLower(candidate.BaseURL), "/")
+		if baseURL != "" && upstreamURL != baseURL && !strings.HasPrefix(upstreamURL, baseURL+"/") {
+			continue
+		}
+		groupKey := candidate.Provider + "\x00" + candidate.BaseURL
+		groups[groupKey] = apiKeyUsageLookupKey{
+			Provider:  candidate.Provider,
+			Protocol:  candidate.Protocol,
+			BaseURL:   candidate.BaseURL,
+			Composite: candidate.BaseURL + "|",
+		}
+		counts[groupKey]++
+		if candidate.Provider != candidate.Protocol {
+			customGroups[groupKey] = groups[groupKey]
+			customCounts[groupKey]++
+		}
+	}
+	if len(customGroups) == 1 {
+		for groupKey, candidate := range customGroups {
+			if customCounts[groupKey] > 1 {
+				return candidate, true
+			}
+		}
+	}
+	if len(groups) == 1 {
+		for groupKey, candidate := range groups {
+			if counts[groupKey] > 1 {
+				return candidate, true
+			}
 		}
 	}
 	return apiKeyUsageLookupKey{}, false
@@ -335,15 +399,6 @@ func (h *Handler) persistedAPIKeyUsage(ctx context.Context, now time.Time, looku
 	if errIdentity != nil {
 		return nil
 	}
-	providerFallback := make(map[string]apiKeyUsageLookupKey)
-	for _, key := range lookup {
-		if key.Provider != "" && key.Composite != "" {
-			if _, exists := providerFallback[key.Provider]; !exists {
-				providerFallback[key.Provider] = key
-			}
-		}
-	}
-
 	out := make(map[apiKeyUsageLookupKey]apiKeyUsageEntry)
 	for authID, usage := range byAuthID {
 		identity := identityByAuthID[authID]
@@ -353,9 +408,12 @@ func (h *Handler) persistedAPIKeyUsage(ctx context.Context, now time.Time, looku
 			ok = true
 		}
 		if !ok {
-			key, ok = providerFallback[identity.Provider]
+			key, ok = uniqueAPIKeyUsageProviderMatch(lookup, identity.Provider)
 			if !ok {
 				key, ok = uniqueAPIKeyUsageProtocolBaseMatch(lookup, identity)
+			}
+			if !ok {
+				key, ok = unassignedAPIKeyUsageProtocolBaseMatch(lookup, identity)
 			}
 		}
 		if !ok || key.Provider == "" || key.Composite == "" {
@@ -576,5 +634,6 @@ func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 	}
 
 	h.setRequestLogSyncHeaders(c)
+	h.setConfigReloadStatusHeader(c)
 	c.JSON(http.StatusOK, out)
 }

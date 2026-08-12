@@ -4,6 +4,8 @@ import "strings"
 
 // NativeAPIKeyEntry is one credential in a native provider group.
 type NativeAPIKeyEntry struct {
+	// AuthID is an internal stable runtime identity retained across key edits.
+	AuthID   string `yaml:"auth-id,omitempty" json:"auth-index,omitempty"`
 	APIKey   string `yaml:"api-key" json:"api-key"`
 	Priority *int   `yaml:"priority,omitempty" json:"priority,omitempty"`
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
@@ -11,6 +13,7 @@ type NativeAPIKeyEntry struct {
 
 // EffectiveNativeAPIKey contains the resolved per-key routing values used at runtime.
 type EffectiveNativeAPIKey struct {
+	AuthID   string
 	APIKey   string
 	Priority int
 	ProxyURL string
@@ -39,7 +42,7 @@ func EffectiveNativeAPIKeys(legacyKey string, defaultPriority int, defaultProxy 
 		if proxyURL == "" {
 			proxyURL = defaultProxy
 		}
-		out = append(out, EffectiveNativeAPIKey{APIKey: key, Priority: priority, ProxyURL: proxyURL, Index: index})
+		out = append(out, EffectiveNativeAPIKey{AuthID: strings.TrimSpace(entries[index].AuthID), APIKey: key, Priority: priority, ProxyURL: proxyURL, Index: index})
 	}
 	if len(out) > 0 {
 		return out

@@ -147,3 +147,25 @@ func TestToggleConfigAPIKeyExcludedAll_GroupedNativeAuthIDs(t *testing.T) {
 		})
 	}
 }
+
+func TestToggleConfigAPIKeyExcludedAll_PersistedNativeAuthID(t *testing.T) {
+	const stableID = "claude:apikey:persisted"
+	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
+		BaseURL:       "https://claude.example/v1",
+		APIKeyEntries: []config.NativeAPIKeyEntry{{AuthID: stableID, APIKey: "changed-key"}},
+	}}}
+	auth := &coreauth.Auth{
+		ID: stableID, Provider: "claude",
+		Attributes: map[string]string{
+			"api_key": "changed-key", "base_url": "https://claude.example/v1",
+			"auth_kind": "apikey", "source": "config:claude[persisted]",
+		},
+	}
+	handled, err := toggleConfigAPIKeyExcludedAll(cfg, auth, true)
+	if err != nil || !handled {
+		t.Fatalf("toggle persisted auth: handled=%v err=%v", handled, err)
+	}
+	if got := cfg.ClaudeKey[0].ExcludedModels; len(got) != 1 || got[0] != "*" {
+		t.Fatalf("excluded-models = %#v, want [*]", got)
+	}
+}

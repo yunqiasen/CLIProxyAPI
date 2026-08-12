@@ -1072,6 +1072,23 @@ func TestConfigSynthesizer_NativeAuthIDCompatibility(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_NativeGroupedKeyUsesPersistedAuthIDAfterKeyEdit(t *testing.T) {
+	const stableID = "claude:apikey:persisted"
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config: &config.Config{ClaudeKey: []config.ClaudeKey{{
+			Name: "relay", BaseURL: "https://claude.example/v1",
+			APIKeyEntries: []config.NativeAPIKeyEntry{{AuthID: stableID, APIKey: "changed-key"}},
+		}}},
+		Now: time.Now(), IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil || len(auths) != 1 {
+		t.Fatalf("synthesize auths: count=%d err=%v", len(auths), err)
+	}
+	if auths[0].ID != stableID {
+		t.Fatalf("auth ID = %q, want %q", auths[0].ID, stableID)
+	}
+}
+
 func TestConfigSynthesizer_MediaProviderKeys(t *testing.T) {
 	zero := 0
 	twenty := 20
@@ -1197,5 +1214,22 @@ func TestConfigSynthesizer_MediaProviderCredentialHeaderAndPrefix(t *testing.T) 
 	}
 	if got := auths[0].Attributes["api_key_prefix"]; got != "-" {
 		t.Fatalf("api_key_prefix = %q", got)
+	}
+}
+
+func TestConfigSynthesizer_NativeGroupedKeyRejectsForeignPersistedAuthID(t *testing.T) {
+	foreignID := "gemini:apikey:foreign"
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config: &config.Config{ClaudeKey: []config.ClaudeKey{{
+			BaseURL:       "https://claude.example/v1",
+			APIKeyEntries: []config.NativeAPIKeyEntry{{AuthID: foreignID, APIKey: "claude-key"}},
+		}}},
+		Now: time.Now(), IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil || len(auths) != 1 {
+		t.Fatalf("synthesize auths: count=%d err=%v", len(auths), err)
+	}
+	if auths[0].ID == foreignID || !strings.HasPrefix(auths[0].ID, "claude:apikey:") {
+		t.Fatalf("foreign native auth ID was accepted: %q", auths[0].ID)
 	}
 }

@@ -12,11 +12,48 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
+
+func clientUpdateSummary(cfg *config.Config, authEntries int) string {
+	if cfg == nil {
+		return "server clients and configuration updated: 0 clients"
+	}
+	geminiAPIKeyCount := len(cfg.GeminiKey)
+	interactionsAPIKeyCount := len(cfg.InteractionsKey)
+	claudeAPIKeyCount := len(cfg.ClaudeKey)
+	codexAPIKeyCount := len(cfg.CodexKey)
+	xaiAPIKeyCount := len(cfg.XAIKey)
+	vertexAICompatCount := len(cfg.VertexCompatAPIKey)
+	openAICompatCount := 0
+	for i := range cfg.OpenAICompatibility {
+		entry := cfg.OpenAICompatibility[i]
+		if entry.Disabled {
+			continue
+		}
+		openAICompatCount += len(entry.APIKeyEntries)
+	}
+	imageMediaCount, videoMediaCount, audioMediaCount := watcher.BuildMediaProviderKeyCounts(cfg)
+	total := authEntries + geminiAPIKeyCount + interactionsAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + vertexAICompatCount + openAICompatCount + imageMediaCount + videoMediaCount + audioMediaCount
+	return fmt.Sprintf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Interactions API keys + %d Claude API keys + %d Codex keys + %d xAI keys + %d Vertex-compat + %d OpenAI-compat + %d image media auths + %d video media auths + %d audio media auths)",
+		total,
+		authEntries,
+		geminiAPIKeyCount,
+		interactionsAPIKeyCount,
+		claudeAPIKeyCount,
+		codexAPIKeyCount,
+		xaiAPIKeyCount,
+		vertexAICompatCount,
+		openAICompatCount,
+		imageMediaCount,
+		videoMediaCount,
+		audioMediaCount,
+	)
+}
 
 func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) bool {
 	if s == nil || s.accessManager == nil || newCfg == nil {
@@ -210,33 +247,7 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 			return false
 		}
 	}
-	geminiAPIKeyCount := len(cfg.GeminiKey)
-	interactionsAPIKeyCount := len(cfg.InteractionsKey)
-	claudeAPIKeyCount := len(cfg.ClaudeKey)
-	codexAPIKeyCount := len(cfg.CodexKey)
-	xaiAPIKeyCount := len(cfg.XAIKey)
-	vertexAICompatCount := len(cfg.VertexCompatAPIKey)
-	openAICompatCount := 0
-	for i := range cfg.OpenAICompatibility {
-		entry := cfg.OpenAICompatibility[i]
-		if entry.Disabled {
-			continue
-		}
-		openAICompatCount += len(entry.APIKeyEntries)
-	}
-
-	total := authEntries + geminiAPIKeyCount + interactionsAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + vertexAICompatCount + openAICompatCount
-	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Interactions API keys + %d Claude API keys + %d Codex keys + %d xAI keys + %d Vertex-compat + %d OpenAI-compat)\n",
-		total,
-		authEntries,
-		geminiAPIKeyCount,
-		interactionsAPIKeyCount,
-		claudeAPIKeyCount,
-		codexAPIKeyCount,
-		xaiAPIKeyCount,
-		vertexAICompatCount,
-		openAICompatCount,
-	)
+	fmt.Println(clientUpdateSummary(cfg, authEntries))
 	return ctx.Err() == nil
 }
 

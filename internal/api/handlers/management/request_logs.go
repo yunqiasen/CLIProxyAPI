@@ -754,6 +754,8 @@ func isAIRequestLogFilename(name string) bool {
 		"v1-completions-",
 		"v1-messages-",
 		"v1-images-",
+		"v1-videos-",
+		"v1-audio-",
 		"v1-media-",
 		"v1beta-models-",
 		"api-provider-",

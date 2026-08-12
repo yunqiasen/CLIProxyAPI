@@ -13,7 +13,8 @@ claude-api-key:
     priority: 8
     proxy-url: http://provider-proxy
     api-key-entries:
-      - api-key: key-a
+      - auth-id: claude:apikey:persisted-a
+        api-key: key-a
         priority: 0
       - api-key: key-b
         priority: 20
@@ -42,6 +43,9 @@ gemini-api-key:
 	if claude.APIKeyEntries[0].Priority == nil || *claude.APIKeyEntries[0].Priority != 0 {
 		t.Fatalf("explicit zero priority lost: %#v", claude.APIKeyEntries[0].Priority)
 	}
+	if claude.APIKeyEntries[0].AuthID != "claude:apikey:persisted-a" {
+		t.Fatalf("stable auth ID lost: %#v", claude.APIKeyEntries[0])
+	}
 	if !claude.RebuildMidSystemMessage || !claude.ExperimentalCCHSigning {
 		t.Fatalf("Claude-specific settings lost: %#v", claude)
 	}
@@ -69,6 +73,13 @@ func TestEffectiveNativeAPIKeysPrefersGroupedEntriesAndInheritsDefaults(t *testi
 	}
 	if got[1].APIKey != "key-b" || got[1].Priority != 20 || got[1].ProxyURL != "http://key-proxy" || got[1].Index != 1 {
 		t.Fatalf("second effective key = %#v", got[1])
+	}
+}
+
+func TestEffectiveNativeAPIKeysPreservesStableAuthID(t *testing.T) {
+	got := EffectiveNativeAPIKeys("", 0, "", []NativeAPIKeyEntry{{AuthID: "claude:apikey:persisted", APIKey: "changed-key"}})
+	if len(got) != 1 || got[0].AuthID != "claude:apikey:persisted" {
+		t.Fatalf("effective key identity = %#v", got)
 	}
 }
 

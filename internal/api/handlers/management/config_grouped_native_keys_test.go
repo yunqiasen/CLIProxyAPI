@@ -137,6 +137,93 @@ func TestGetNativeKeysPreservesLegacyTopLevelAuthIndex(t *testing.T) {
 	}
 }
 
+func TestPutNativeKeysPersistsStableIdentityFromAuthIndex(t *testing.T) {
+	tests := []struct {
+		name     string
+		kind     string
+		provider string
+		put      func(*Handler, *gin.Context)
+		entries  func(*config.Config) []config.NativeAPIKeyEntry
+	}{
+		{name: "gemini", kind: "gemini:apikey", provider: "gemini", put: (*Handler).PutGeminiKeys, entries: func(cfg *config.Config) []config.NativeAPIKeyEntry { return cfg.GeminiKey[0].APIKeyEntries }},
+		{name: "claude", kind: "claude:apikey", provider: "claude", put: (*Handler).PutClaudeKeys, entries: func(cfg *config.Config) []config.NativeAPIKeyEntry { return cfg.ClaudeKey[0].APIKeyEntries }},
+		{name: "codex", kind: "codex:apikey", provider: "codex", put: (*Handler).PutCodexKeys, entries: func(cfg *config.Config) []config.NativeAPIKeyEntry { return cfg.CodexKey[0].APIKeyEntries }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const stableID = "stable-native-auth-id"
+			manager := coreauth.NewManager(nil, nil, nil)
+			if _, err := manager.Register(context.Background(), &coreauth.Auth{ID: stableID, Index: "public-auth-index", Provider: tt.provider, Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "old-key"}}); err != nil {
+				t.Fatal(err)
+			}
+			h := NewHandler(&config.Config{}, writeTestConfigFile(t), manager)
+			if got := h.liveAuthIDByIndex()["public-auth-index"]; got != stableID {
+				t.Fatalf("live auth reverse lookup = %q", got)
+			}
+			body := `[{"name":"relay","base-url":"https://native.example/v1","api-key-entries":[{"api-key":"changed-key","auth-index":"public-auth-index"}]}]`
+			rec := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(rec)
+			ctx.Request = httptest.NewRequest(http.MethodPut, "/v0/management/"+tt.name+"-api-key", strings.NewReader(body))
+			ctx.Request.Header.Set("Content-Type", "application/json")
+			tt.put(h, ctx)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			entries := tt.entries(h.cfg)
+			if len(entries) != 1 || entries[0].AuthID != stableID {
+				t.Fatalf("persisted entries = %#v", entries)
+			}
+		})
+	}
+}
+
+func TestPatchNativeKeysPersistsStableIdentityFromAuthIndex(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		config   *config.Config
+		patch    func(*Handler, *gin.Context)
+		entries  func(*config.Config) []config.NativeAPIKeyEntry
+	}{
+		{name: "gemini", provider: "gemini", config: &config.Config{GeminiKey: []config.GeminiKey{{Name: "relay", APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: "old-key", AuthID: "stable-native-auth-id"}}}}}, patch: (*Handler).PatchGeminiKey, entries: func(cfg *config.Config) []config.NativeAPIKeyEntry { return cfg.GeminiKey[0].APIKeyEntries }},
+		{name: "claude", provider: "claude", config: &config.Config{ClaudeKey: []config.ClaudeKey{{Name: "relay", APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: "old-key", AuthID: "stable-native-auth-id"}}}}}, patch: (*Handler).PatchClaudeKey, entries: func(cfg *config.Config) []config.NativeAPIKeyEntry { return cfg.ClaudeKey[0].APIKeyEntries }},
+		{name: "codex", provider: "codex", config: &config.Config{CodexKey: []config.CodexKey{{Name: "relay", BaseURL: "https://native.example/v1", APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: "old-key", AuthID: "stable-native-auth-id"}}}}}, patch: (*Handler).PatchCodexKey, entries: func(cfg *config.Config) []config.NativeAPIKeyEntry { return cfg.CodexKey[0].APIKeyEntries }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := coreauth.NewManager(nil, nil, nil)
+			if _, err := manager.Register(context.Background(), &coreauth.Auth{ID: "stable-native-auth-id", Index: "public-auth-index", Provider: tt.provider, Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "old-key"}}); err != nil {
+				t.Fatal(err)
+			}
+			h := NewHandler(tt.config, writeTestConfigFile(t), manager)
+			body := `{"index":0,"value":{"api-key-entries":[{"api-key":"changed-key","auth-index":"public-auth-index"}]}}`
+			rec := performPatch(t, func(c *gin.Context) { tt.patch(h, c) }, body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			entries := tt.entries(h.cfg)
+			if len(entries) != 1 || entries[0].AuthID != "stable-native-auth-id" {
+				t.Fatalf("persisted entries = %#v", entries)
+			}
+		})
+	}
+}
+
+func TestPrepareNativeAuthIDsDoesNotReuseDeletedIdentityForNewKey(t *testing.T) {
+	previous := []config.NativeAPIKeyEntry{{APIKey: "old-key", AuthID: "claude:apikey:old"}}
+	prepared := prepareNativeAuthIDs("claude:apikey", previous, []config.NativeAPIKeyEntry{{APIKey: "new-key"}})
+	if len(prepared) != 1 || prepared[0].AuthID == "" || prepared[0].AuthID == previous[0].AuthID {
+		t.Fatalf("prepared entries = %#v", prepared)
+	}
+}
+
+func TestPrepareNativeAuthIDsRejectsUntrustedIncomingIdentity(t *testing.T) {
+	prepared := prepareNativeAuthIDs("claude:apikey", nil, []config.NativeAPIKeyEntry{{APIKey: "new-key", AuthID: "other-provider-auth"}})
+	if len(prepared) != 1 || prepared[0].AuthID == "" || prepared[0].AuthID == "other-provider-auth" {
+		t.Fatalf("prepared entries = %#v", prepared)
+	}
+}
+
 func TestPutNativeKeysAcceptsGroupedEntries(t *testing.T) {
 	tests := []struct {
 		name string
@@ -301,5 +388,175 @@ func TestPatchNativeKeyKeepsOnlyGroupsWithEffectiveKeys(t *testing.T) {
 				t.Fatalf("entry count = %d, want 0", got)
 			}
 		})
+	}
+}
+
+func TestPutNativeKeysRejectsAuthIndexFromAnotherNativeProvider(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	const foreignID = "gemini:apikey:foreign"
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: foreignID, Index: "foreign-public-index", Provider: "gemini", Status: coreauth.StatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandler(&config.Config{}, writeTestConfigFile(t), manager)
+	body := `[{
+		"name":"claude-group",
+		"base-url":"https://claude.example/v1",
+		"api-key-entries":[{"api-key":"claude-key","auth-index":"foreign-public-index"}]
+	}]`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/v0/management/claude-api-key", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	h.PutClaudeKeys(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	entries := h.cfg.ClaudeKey[0].APIKeyEntries
+	if len(entries) != 1 || entries[0].AuthID == foreignID {
+		t.Fatalf("foreign auth identity was accepted: %#v", entries)
+	}
+}
+
+func TestPutNativeKeysMatchesReorderedGroupsBeforeReusingSharedKeyIdentity(t *testing.T) {
+	previous := []config.ClaudeKey{
+		{
+			Name: "First Relay", BaseURL: "https://first.example/v1",
+			APIKeyEntries: []config.NativeAPIKeyEntry{{AuthID: "claude:apikey:first", APIKey: "shared-key"}},
+		},
+		{
+			Name: "Second Relay", BaseURL: "https://second.example/v1",
+			APIKeyEntries: []config.NativeAPIKeyEntry{{AuthID: "claude:apikey:second", APIKey: "shared-key"}},
+		},
+	}
+	h := NewHandler(&config.Config{ClaudeKey: previous}, writeTestConfigFile(t), nil)
+	body := `[{
+		"name":"Second Relay",
+		"base-url":"https://second.example/v1",
+		"api-key-entries":[{"api-key":"shared-key"}]
+	},{
+		"name":"First Relay",
+		"base-url":"https://first.example/v1",
+		"api-key-entries":[{"api-key":"shared-key"}]
+	}]`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/v0/management/claude-api-key", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	h.PutClaudeKeys(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := h.cfg.ClaudeKey[0].APIKeyEntries[0].AuthID; got != "claude:apikey:second" {
+		t.Fatalf("reordered second group auth ID = %q", got)
+	}
+	if got := h.cfg.ClaudeKey[1].APIKeyEntries[0].AuthID; got != "claude:apikey:first" {
+		t.Fatalf("reordered first group auth ID = %q", got)
+	}
+}
+
+func TestPutNativeKeysUsesAuthIndexWhenProviderNameAndBaseURLChange(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	const stableID = "claude:apikey:stable"
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: stableID, Index: "stable-public-index", Provider: "claude", Status: coreauth.StatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	previous := []config.ClaudeKey{{
+		Name: "Old Relay", BaseURL: "https://old.example/v1",
+		APIKeyEntries: []config.NativeAPIKeyEntry{{AuthID: stableID, APIKey: "old-key"}},
+	}}
+	h := NewHandler(&config.Config{ClaudeKey: previous}, writeTestConfigFile(t), manager)
+	body := `[{
+		"name":"New Relay",
+		"base-url":"https://new.example/v2",
+		"api-key-entries":[{"api-key":"new-key","auth-index":"stable-public-index"}]
+	}]`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/v0/management/claude-api-key", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	h.PutClaudeKeys(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := h.cfg.ClaudeKey[0].APIKeyEntries[0].AuthID; got != stableID {
+		t.Fatalf("edited provider auth ID = %q", got)
+	}
+}
+
+func TestPutNativeKeysReorderedGroupsUseAuthIndexesWhenAllFieldsChange(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	for _, auth := range []*coreauth.Auth{
+		{ID: "claude:apikey:first", Index: "first-public-index", Provider: "claude", Status: coreauth.StatusActive},
+		{ID: "claude:apikey:second", Index: "second-public-index", Provider: "claude", Status: coreauth.StatusActive},
+	} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previous := []config.ClaudeKey{
+		{Name: "First Relay", BaseURL: "https://first.example/v1", APIKeyEntries: []config.NativeAPIKeyEntry{{AuthID: "claude:apikey:first", APIKey: "first-old"}}},
+		{Name: "Second Relay", BaseURL: "https://second.example/v1", APIKeyEntries: []config.NativeAPIKeyEntry{{AuthID: "claude:apikey:second", APIKey: "second-old"}}},
+	}
+	h := NewHandler(&config.Config{ClaudeKey: previous}, writeTestConfigFile(t), manager)
+	body := `[{
+		"name":"Second Renamed",
+		"base-url":"https://second-new.example/v2",
+		"api-key-entries":[{"api-key":"second-new","auth-index":"second-public-index"}]
+	},{
+		"name":"First Renamed",
+		"base-url":"https://first-new.example/v2",
+		"api-key-entries":[{"api-key":"first-new","auth-index":"first-public-index"}]
+	}]`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/v0/management/claude-api-key", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	h.PutClaudeKeys(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := h.cfg.ClaudeKey[0].APIKeyEntries[0].AuthID; got != "claude:apikey:second" {
+		t.Fatalf("reordered second group auth ID = %q", got)
+	}
+	if got := h.cfg.ClaudeKey[1].APIKeyEntries[0].AuthID; got != "claude:apikey:first" {
+		t.Fatalf("reordered first group auth ID = %q", got)
+	}
+}
+
+func TestPutNativeKeysMigratesLegacyGroupedIdentityOnNameEdit(t *testing.T) {
+	const apiKey = "legacy-key"
+	const baseURL = "https://claude.example/v1"
+	legacyID, _ := synthesizer.NewStableIDGenerator().Next("claude:apikey", apiKey, baseURL, "0")
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: legacyID, Provider: "claude", Status: coreauth.StatusActive,
+		Attributes: map[string]string{"api_key": apiKey, "base_url": baseURL},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	previous := []config.ClaudeKey{{
+		Name: "Old Relay", BaseURL: baseURL,
+		APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: apiKey}},
+	}}
+	h := NewHandler(&config.Config{ClaudeKey: previous}, writeTestConfigFile(t), manager)
+	body := `[{
+		"name":"Renamed Relay",
+		"base-url":"https://claude.example/v1",
+		"api-key-entries":[{"api-key":"legacy-key"}]
+	}]`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/v0/management/claude-api-key", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	h.PutClaudeKeys(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := h.cfg.ClaudeKey[0].APIKeyEntries[0].AuthID; got != legacyID {
+		t.Fatalf("legacy grouped auth ID = %q, want %q", got, legacyID)
 	}
 }

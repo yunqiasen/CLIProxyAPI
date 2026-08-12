@@ -80,6 +80,8 @@ func TestIsAIRequestLogFilenameIncludesMediaRoutes(t *testing.T) {
 		"v1-images-remove-background-2026-07-26T134302-image-op.log",
 		"v1-media-video-text-to-video-2026-07-26T134302-video.log",
 		"v1-media-audio-speech-2026-07-26T134302-audio.log",
+		"v1-videos-text-to-video-2026-07-26T134302-video-alias.log",
+		"v1-audio-speech-2026-07-26T134302-audio-alias.log",
 	} {
 		if !isAIRequestLogFilename(name) {
 			t.Errorf("isAIRequestLogFilename(%q) = false, want true", name)

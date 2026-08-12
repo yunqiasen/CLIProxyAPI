@@ -225,19 +225,25 @@ func TestReloadConfigIfChanged_TriggersOnChangeAndSkipsUnchanged(t *testing.T) {
 		reloadCallback: func(*config.Config) { reloads++ },
 	}
 
-	w.reloadConfigIfChanged()
+	if !w.reloadConfigIfChanged() {
+		t.Fatal("expected first reload to report runtime apply success")
+	}
 	if reloads != 1 {
 		t.Fatalf("expected first reload to trigger callback once, got %d", reloads)
 	}
 
-	// Same content should be skipped by hash check.
-	w.reloadConfigIfChanged()
+	// Same content is already applied and must report success without reloading.
+	if !w.reloadConfigIfChanged() {
+		t.Fatal("expected unchanged config to report already applied")
+	}
 	if reloads != 1 {
 		t.Fatalf("expected unchanged config to be skipped, callback count %d", reloads)
 	}
 
 	writeConfig(9090, true)
-	w.reloadConfigIfChanged()
+	if !w.reloadConfigIfChanged() {
+		t.Fatal("expected changed config to report runtime apply success")
+	}
 	if reloads != 2 {
 		t.Fatalf("expected changed config to trigger reload, callback count %d", reloads)
 	}
@@ -245,6 +251,91 @@ func TestReloadConfigIfChanged_TriggersOnChangeAndSkipsUnchanged(t *testing.T) {
 	defer w.clientsMutex.RUnlock()
 	if w.config == nil || w.config.Port != 9090 || !w.config.RemoteManagement.AllowRemote {
 		t.Fatalf("expected config to be updated after reload, got %+v", w.config)
+	}
+}
+
+func TestReloadConfigIfChangedSerializesConcurrentApplies(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	writeConfig := func(port int) {
+		data, err := yaml.Marshal(&config.Config{Port: port, AuthDir: authDir, CredentialInFlight: config.DefaultCredentialInFlightConfig()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(configPath, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeConfig(8080)
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var appliedMu sync.Mutex
+	applied := make([]int, 0, 2)
+	w := &Watcher{
+		configPath: configPath,
+		authDir:    authDir,
+		reloadCallback: func(cfg *config.Config) {
+			switch cfg.Port {
+			case 8080:
+				close(firstStarted)
+				<-releaseFirst
+			case 9090:
+				close(secondStarted)
+			}
+			appliedMu.Lock()
+			applied = append(applied, cfg.Port)
+			appliedMu.Unlock()
+		},
+	}
+
+	firstDone := make(chan bool, 1)
+	go func() { firstDone <- w.reloadConfigIfChanged() }()
+	<-firstStarted
+	writeConfig(9090)
+	secondDone := make(chan bool, 1)
+	go func() { secondDone <- w.reloadConfigIfChanged() }()
+
+	select {
+	case <-secondStarted:
+		close(releaseFirst)
+		<-firstDone
+		<-secondDone
+		t.Fatal("second config apply started before the first apply completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	if !<-firstDone || !<-secondDone {
+		t.Fatal("expected both config reloads to apply")
+	}
+
+	appliedMu.Lock()
+	defer appliedMu.Unlock()
+	if len(applied) != 2 || applied[0] != 8080 || applied[1] != 9090 {
+		t.Fatalf("concurrent apply order = %v, want [8080 9090]", applied)
+	}
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if w.config == nil || w.config.Port != 9090 {
+		t.Fatalf("final config = %+v, want port 9090", w.config)
+	}
+}
+
+func TestReloadConfigIfChangedReportsFailureWhenReloadFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: [invalid\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w := &Watcher{configPath: configPath}
+	if w.reloadConfigIfChanged() {
+		t.Fatal("invalid config was reported as applied")
 	}
 }
 

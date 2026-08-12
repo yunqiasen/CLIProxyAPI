@@ -742,6 +742,12 @@ func buildMediaProviderConfigModels(provider *config.MediaProvider) []*ModelInfo
 		model := provider.Models[i]
 		modelType := "media-" + kind
 		if kind == config.MediaKindImage {
+			// Empty capabilities retain the legacy unrestricted behavior used by
+			// media operation selection, so discovered image models must also be
+			// routable through the standard OpenAI image endpoints.
+			if len(model.Capabilities) == 0 {
+				modelType = registry.OpenAIImageModelType
+			}
 			for _, capability := range model.Capabilities {
 				if strings.EqualFold(strings.TrimSpace(capability), config.MediaCapabilityGenerate) || strings.EqualFold(strings.TrimSpace(capability), config.MediaCapabilityEdit) {
 					modelType = registry.OpenAIImageModelType

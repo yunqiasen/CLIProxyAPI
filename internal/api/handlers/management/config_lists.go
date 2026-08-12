@@ -171,8 +171,18 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 			return
 		}
 	}
+	liveAuthIDs := h.liveAuthIDByIndex("gemini")
+	for i := range arr {
+		h.decodeNativeAuthIndexes(arr[i].APIKeyEntries, liveAuthIDs)
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	arr = prepareNativeProviderAuthIDs(
+		"gemini:apikey", h.cfg.GeminiKey, arr,
+		func(entry *config.GeminiKey) *[]config.NativeAPIKeyEntry { return &entry.APIKeyEntries },
+		func(entry config.GeminiKey) string { return nativeProviderIdentity(entry.Name, entry.BaseURL) },
+		liveAuthIDs,
+	)
 	h.cfg.GeminiKey = append([]config.GeminiKey(nil), arr...)
 	h.cfg.SanitizeGeminiKeys()
 	h.persistLocked(c)
@@ -202,6 +212,7 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 		return
 	}
 
+	liveAuthIDs := h.liveAuthIDByIndex("gemini")
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	targetIndex := -1
@@ -229,7 +240,9 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 		entry.Name = strings.TrimSpace(*body.Value.Name)
 	}
 	if body.Value.APIKeyEntries != nil {
-		entry.APIKeyEntries = normalizeNativeAPIKeyEntries(*body.Value.APIKeyEntries)
+		incomingEntries := normalizeNativeAPIKeyEntries(*body.Value.APIKeyEntries)
+		h.decodeNativeAuthIndexes(incomingEntries, liveAuthIDs)
+		entry.APIKeyEntries = prepareNativeAuthIDs("gemini:apikey", entry.APIKeyEntries, incomingEntries, liveAuthIDs)
 	}
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
@@ -535,8 +548,18 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 			return
 		}
 	}
+	liveAuthIDs := h.liveAuthIDByIndex("claude")
+	for i := range arr {
+		h.decodeNativeAuthIndexes(arr[i].APIKeyEntries, liveAuthIDs)
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	arr = prepareNativeProviderAuthIDs(
+		"claude:apikey", h.cfg.ClaudeKey, arr,
+		func(entry *config.ClaudeKey) *[]config.NativeAPIKeyEntry { return &entry.APIKeyEntries },
+		func(entry config.ClaudeKey) string { return nativeProviderIdentity(entry.Name, entry.BaseURL) },
+		liveAuthIDs,
+	)
 	h.cfg.ClaudeKey = arr
 	h.cfg.SanitizeClaudeKeys()
 	h.persistLocked(c)
@@ -569,6 +592,7 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		return
 	}
 
+	liveAuthIDs := h.liveAuthIDByIndex("claude")
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	targetIndex := -1
@@ -594,7 +618,9 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		entry.Name = strings.TrimSpace(*body.Value.Name)
 	}
 	if body.Value.APIKeyEntries != nil {
-		entry.APIKeyEntries = normalizeNativeAPIKeyEntries(*body.Value.APIKeyEntries)
+		incomingEntries := normalizeNativeAPIKeyEntries(*body.Value.APIKeyEntries)
+		h.decodeNativeAuthIndexes(incomingEntries, liveAuthIDs)
+		entry.APIKeyEntries = prepareNativeAuthIDs("claude:apikey", entry.APIKeyEntries, incomingEntries, liveAuthIDs)
 	}
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
@@ -1261,8 +1287,18 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 		}
 		filtered = append(filtered, entry)
 	}
+	liveAuthIDs := h.liveAuthIDByIndex("codex")
+	for i := range filtered {
+		h.decodeNativeAuthIndexes(filtered[i].APIKeyEntries, liveAuthIDs)
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	filtered = prepareNativeProviderAuthIDs(
+		"codex:apikey", h.cfg.CodexKey, filtered,
+		func(entry *config.CodexKey) *[]config.NativeAPIKeyEntry { return &entry.APIKeyEntries },
+		func(entry config.CodexKey) string { return nativeProviderIdentity(entry.Name, entry.BaseURL) },
+		liveAuthIDs,
+	)
 	h.cfg.CodexKey = filtered
 	h.cfg.SanitizeCodexKeys()
 	h.persistLocked(c)
@@ -1294,6 +1330,7 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		return
 	}
 
+	liveAuthIDs := h.liveAuthIDByIndex("codex")
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	targetIndex := -1
@@ -1319,7 +1356,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		entry.Name = strings.TrimSpace(*body.Value.Name)
 	}
 	if body.Value.APIKeyEntries != nil {
-		entry.APIKeyEntries = normalizeNativeAPIKeyEntries(*body.Value.APIKeyEntries)
+		incomingEntries := normalizeNativeAPIKeyEntries(*body.Value.APIKeyEntries)
+		h.decodeNativeAuthIndexes(incomingEntries, liveAuthIDs)
+		entry.APIKeyEntries = prepareNativeAuthIDs("codex:apikey", entry.APIKeyEntries, incomingEntries, liveAuthIDs)
 	}
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
@@ -1662,6 +1701,7 @@ func normalizeNativeAPIKeyEntries(entries []config.NativeAPIKeyEntry) []config.N
 	out := make([]config.NativeAPIKeyEntry, len(entries))
 	copy(out, entries)
 	for i := range out {
+		out[i].AuthID = strings.TrimSpace(out[i].AuthID)
 		out[i].APIKey = strings.TrimSpace(out[i].APIKey)
 		out[i].ProxyURL = strings.TrimSpace(out[i].ProxyURL)
 	}

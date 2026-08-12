@@ -21,6 +21,7 @@ import (
 
 const claudeUnsupportedWebSearchError = `{"type":"error","error":{"type":"invalid_request_error","message":"tool type 'web_search_20250305' is not supported for this model"}}`
 const claudeUnsupportedWebSearchBedrockError = `{"type":"error","error":{"type":"invalid_request_error","message":"InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: request-1, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1) [trace_id=trace-1] (request id: relay-1)"}}`
+const claudeUnsupportedWebSearchBedrockNonStreamError = `{"type":"error","error":{"type":"invalid_request_error","message":"InvokeModel: operation error Bedrock Runtime: InvokeModel, https response error StatusCode: 400, RequestID: request-1, ValidationException: tool type 'web_search_20250305' is not supported for this model (request id: upstream-1) [trace_id=trace-1] (request id: relay-1)"}}`
 const claudeUnsupportedWebSearchRelayTraceError = `{"type":"error","error":{"type":"invalid_request_error","message":"tool type 'web_search_20250305' is not supported for this model, trace_id: upstream-trace [trace_id=relay-trace] (request id: relay-request)"}}`
 
 func TestClaudeUnsupportedServerToolFallbackParserRequiresExactDeclaredType(t *testing.T) {
@@ -38,6 +39,11 @@ func TestClaudeUnsupportedServerToolFallbackParserRequiresExactDeclaredType(t *t
 		{
 			name: "exact bedrock validation wrapper",
 			body: claudeUnsupportedWebSearchBedrockError,
+			want: true,
+		},
+		{
+			name: "exact bedrock non-stream validation wrapper",
+			body: claudeUnsupportedWebSearchBedrockNonStreamError,
 			want: true,
 		},
 		{
@@ -329,7 +335,11 @@ func TestClaudeExecutorRetriesOnceWithoutExplicitlyUnsupportedServerTool(t *test
 				mu.Unlock()
 
 				if attempt == 1 {
-					return claudeTestHTTPResponse(req, http.StatusBadRequest, "application/json", claudeUnsupportedWebSearchBedrockError), nil
+					errorBody := claudeUnsupportedWebSearchBedrockNonStreamError
+					if stream {
+						errorBody = claudeUnsupportedWebSearchBedrockError
+					}
+					return claudeTestHTTPResponse(req, http.StatusBadRequest, "application/json", errorBody), nil
 				}
 				if stream {
 					return claudeTestHTTPResponse(req, http.StatusOK, "text/event-stream", claudeToolFallbackSuccessSSE()), nil

@@ -92,6 +92,84 @@ func TestApplyClaudeHeaders_UnknownBodyBetaDroppedOnAnthropic(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeHeaders_ModelSuffixRequestsContext1MBeta(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-context-1m"}}
+	req := httptest.NewRequest(http.MethodPost, "https://anyrouter.top/v1/messages?beta=true", nil)
+	body := []byte(`{"model":"claude-opus-5[1m]"}`)
+
+	if err := applyClaudeHeaders(req, auth, "key-context-1m", false, nil, body, nil, nil, false); err != nil {
+		t.Fatalf("applyClaudeHeaders() error = %v", err)
+	}
+
+	got := req.Header.Get("Anthropic-Beta")
+	parts := strings.Split(got, ",")
+	if len(parts) < 2 || parts[1] != claudeContext1MBeta {
+		t.Fatalf("Anthropic-Beta = %q, want %s at position 2 for [1m] model", got, claudeContext1MBeta)
+	}
+}
+
+func TestApplyClaudeHeaders_ConfirmedClientGetsCredentialRequiredContext1MBeta(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-confirmed-context-1m"}}
+	incoming := http.Header{}
+	incoming.Set("Anthropic-Beta", claudeCodeBeta+","+claudeEffortBeta)
+	req := httptest.NewRequest(http.MethodPost, "https://anyrouter.top/v1/messages?beta=true", nil)
+	body := []byte(`{"model":"claude-opus-5[1m]"}`)
+
+	if err := applyClaudeHeaders(req, auth, "key-confirmed-context-1m", false, nil, body, nil, incoming, true); err != nil {
+		t.Fatalf("applyClaudeHeaders() error = %v", err)
+	}
+
+	got := req.Header.Get("Anthropic-Beta")
+	if want := claudeCodeBeta + "," + claudeContext1MBeta + "," + claudeEffortBeta; got != want {
+		t.Fatalf("Anthropic-Beta = %q, want %q", got, want)
+	}
+}
+
+func TestApplyClaudeHeaders_CountTokensModelSuffixRequestsContext1MBeta(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-context-1m-count"}}
+	req := httptest.NewRequest(http.MethodPost, "https://anyrouter.top/v1/messages/count_tokens?beta=true", nil)
+	body := []byte(`{"model":"claude-opus-5[1m]"}`)
+
+	if err := applyClaudeHeaders(req, auth, "key-context-1m-count", false, nil, body, nil, nil, false); err != nil {
+		t.Fatalf("applyClaudeHeaders() error = %v", err)
+	}
+
+	got := req.Header.Get("Anthropic-Beta")
+	if want := claudeCodeBeta + "," + claudeContext1MBeta + ",interleaved-thinking-2025-05-14,context-management-2025-06-27," + claudeTokenCountingBeta; got != want {
+		t.Fatalf("Anthropic-Beta = %q, want %q for [1m] count_tokens", got, want)
+	}
+}
+
+func TestApplyClaudeHeaders_ConfirmedClientCountTokensGetsContext1MBeta(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-confirmed-context-1m-count"}}
+	incoming := http.Header{}
+	incoming.Set("Anthropic-Beta", claudeCodeBeta+",interleaved-thinking-2025-05-14,context-management-2025-06-27,"+claudeTokenCountingBeta)
+	req := httptest.NewRequest(http.MethodPost, "https://anyrouter.top/v1/messages/count_tokens?beta=true", nil)
+	body := []byte(`{"model":"claude-opus-5[1m]"}`)
+
+	if err := applyClaudeHeaders(req, auth, "key-confirmed-context-1m-count", false, nil, body, nil, incoming, true); err != nil {
+		t.Fatalf("applyClaudeHeaders() error = %v", err)
+	}
+
+	got := req.Header.Get("Anthropic-Beta")
+	if want := claudeCodeBeta + "," + claudeContext1MBeta + ",interleaved-thinking-2025-05-14,context-management-2025-06-27," + claudeTokenCountingBeta; got != want {
+		t.Fatalf("Anthropic-Beta = %q, want %q", got, want)
+	}
+}
+
+func TestApplyClaudeHeaders_OrdinaryModelDoesNotRequestContext1MBeta(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-standard-context"}}
+	req := httptest.NewRequest(http.MethodPost, "https://anyrouter.top/v1/messages?beta=true", nil)
+	body := []byte(`{"model":"claude-opus-5"}`)
+
+	if err := applyClaudeHeaders(req, auth, "key-standard-context", false, nil, body, nil, nil, false); err != nil {
+		t.Fatalf("applyClaudeHeaders() error = %v", err)
+	}
+	if got := req.Header.Get("Anthropic-Beta"); strings.Contains(got, claudeContext1MBeta) {
+		t.Fatalf("Anthropic-Beta = %q, want no %s for ordinary model", got, claudeContext1MBeta)
+	}
+}
+
 func TestApplyClaudeHeaders_KnownBodyBetaStillPlacedOnAnthropic(t *testing.T) {
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-known-body-beta"}}
 	req := newClaudeHeaderTestRequest(t, nil)

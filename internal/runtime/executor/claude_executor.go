@@ -156,11 +156,20 @@ func claudeUnsupportedServerToolTypeFromMessage(message string) (string, bool) {
 		return toolType, true
 	}
 
-	const bedrockPrefix = "InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: "
-	if !strings.HasPrefix(message, bedrockPrefix) {
+	bedrockPrefixes := [...]string{
+		"InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, https response error StatusCode: 400, RequestID: ",
+		"InvokeModel: operation error Bedrock Runtime: InvokeModel, https response error StatusCode: 400, RequestID: ",
+	}
+	wrapped := ""
+	for _, prefix := range bedrockPrefixes {
+		if strings.HasPrefix(message, prefix) {
+			wrapped = message[len(prefix):]
+			break
+		}
+	}
+	if wrapped == "" {
 		return "", false
 	}
-	wrapped := message[len(bedrockPrefix):]
 	const validationMarker = ", ValidationException: "
 	validationIndex := strings.Index(wrapped, validationMarker)
 	if validationIndex <= 0 || !claudeWrapperOpaqueID(wrapped[:validationIndex]) {

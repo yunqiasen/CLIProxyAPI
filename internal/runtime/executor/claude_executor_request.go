@@ -191,6 +191,30 @@ func claudeCountTokensBetasForCredential(oauthToken bool) string {
 	return strings.Join(betas, ",")
 }
 
+func withClaudeContext1MBeta(betas string) string {
+	parts := make([]string, 0, 16)
+	seen := make(map[string]bool)
+	for _, beta := range strings.Split(betas, ",") {
+		if beta = strings.TrimSpace(beta); beta != "" && !seen[beta] {
+			parts = append(parts, beta)
+			seen[beta] = true
+		}
+	}
+	if seen[claudeContext1MBeta] {
+		return strings.Join(parts, ",")
+	}
+	insertAt := 0
+	for i, beta := range parts {
+		if beta == claudeCodeBeta || beta == claudeOAuthBeta {
+			insertAt = i + 1
+		}
+	}
+	parts = append(parts, "")
+	copy(parts[insertAt+1:], parts[insertAt:])
+	parts[insertAt] = claudeContext1MBeta
+	return strings.Join(parts, ",")
+}
+
 func withClaudeCountTokensOAuthBeta(betas string) string {
 	parts := make([]string, 0, len(claudeCountTokensBetas)+1)
 	seen := make(map[string]bool)
@@ -292,6 +316,11 @@ func claudeBodyIndicatesFastModeCredits(body []byte) bool {
 
 // claudeRequestedBetas collects every beta the caller asked for, from the
 // Anthropic-Beta header and from betas lifted out of the request body.
+func claudeModelRequestsContext1M(body []byte) bool {
+	model := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "model").String()))
+	return strings.Contains(model, "[1m]")
+}
+
 func claudeRequestedBetas(incomingBetas string, extraBetas []string) map[string]bool {
 	requested := make(map[string]bool)
 	for _, beta := range strings.Split(incomingBetas, ",") {
@@ -585,9 +614,16 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 
 	incomingBetas := strings.TrimSpace(strings.Join(incomingHeaders.Values("Anthropic-Beta"), ","))
 	countTokens := r.URL != nil && strings.HasSuffix(r.URL.Path, "/count_tokens")
-	baseBetas := claudeCodeCLIBetas(body, claudeRequestedBetas(incomingBetas, extraBetas), oauthToken)
+	requestedBetas := claudeRequestedBetas(incomingBetas, extraBetas)
+	if claudeModelRequestsContext1M(body) {
+		requestedBetas[claudeContext1MBeta] = true
+	}
+	baseBetas := claudeCodeCLIBetas(body, requestedBetas, oauthToken)
 	if countTokens {
 		baseBetas = claudeCountTokensBetasForCredential(oauthToken)
+		if requestedBetas[claudeContext1MBeta] {
+			baseBetas = withClaudeContext1MBeta(baseBetas)
+		}
 	}
 	if confirmedClaudeCode && incomingBetas != "" {
 		baseBetas = incomingBetas
@@ -597,6 +633,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 			} else {
 				baseBetas = withClaudeOAuthCredentialBetas(baseBetas)
 			}
+		}
+		if requestedBetas[claudeContext1MBeta] {
+			baseBetas = withClaudeContext1MBeta(baseBetas)
 		}
 	}
 	existingSet := make(map[string]bool)

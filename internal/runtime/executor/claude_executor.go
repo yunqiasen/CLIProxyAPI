@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -104,6 +105,104 @@ func sanitizeClaudeWebSearchDomains(body []byte) []byte {
 		return true
 	})
 	return body
+}
+
+type claudeUnsupportedServerToolFallback struct {
+	toolTypes map[string]bool
+	toolNames map[string]bool
+}
+
+func claudeUnsupportedServerToolFallbackFromError(statusCode int, body []byte, requestBody []byte) (claudeUnsupportedServerToolFallback, bool) {
+	if statusCode < http.StatusBadRequest || statusCode >= http.StatusInternalServerError {
+		return claudeUnsupportedServerToolFallback{}, false
+	}
+	message := gjson.GetBytes(body, "error.message").String()
+	if message == "" {
+		message = string(body)
+	}
+	unsupportedType, ok := claudeUnsupportedServerToolTypeFromMessage(message)
+	if !ok {
+		return claudeUnsupportedServerToolFallback{}, false
+	}
+
+	fallback := claudeUnsupportedServerToolFallback{
+		toolTypes: make(map[string]bool),
+		toolNames: make(map[string]bool),
+	}
+	tools := gjson.GetBytes(requestBody, "tools")
+	if !tools.IsArray() {
+		return claudeUnsupportedServerToolFallback{}, false
+	}
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		toolType := tool.Get("type").String()
+		if !helps.IsClaudeServerToolType(toolType) || toolType != unsupportedType {
+			return true
+		}
+		fallback.toolTypes[toolType] = true
+		if name := strings.TrimSpace(tool.Get("name").String()); name != "" {
+			fallback.toolNames[name] = true
+		}
+		return true
+	})
+	return fallback, len(fallback.toolTypes) > 0
+}
+
+func claudeUnsupportedServerToolTypeFromMessage(message string) (string, bool) {
+	const prefix = "tool type '"
+	const suffix = "' is not supported for this model"
+	if !strings.HasPrefix(message, prefix) || !strings.HasSuffix(message, suffix) {
+		return "", false
+	}
+	toolType := message[len(prefix) : len(message)-len(suffix)]
+	if toolType == "" || strings.TrimSpace(toolType) != toolType || strings.ContainsAny(toolType, "'\"") {
+		return "", false
+	}
+	return toolType, true
+}
+
+func removeClaudeUnsupportedServerTools(body []byte, fallback claudeUnsupportedServerToolFallback) ([]byte, bool) {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return body, false
+	}
+	filtered := make([]json.RawMessage, 0, len(tools.Array()))
+	removed := false
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		toolType := tool.Get("type").String()
+		if fallback.toolTypes[toolType] {
+			removed = true
+			return true
+		}
+		filtered = append(filtered, json.RawMessage(tool.Raw))
+		return true
+	})
+	if !removed {
+		return body, false
+	}
+	if len(filtered) == 0 {
+		body, _ = sjson.DeleteBytes(body, "tools")
+	} else if rawTools, errMarshal := json.Marshal(filtered); errMarshal == nil {
+		body, _ = sjson.SetRawBytes(body, "tools", rawTools)
+	}
+
+	toolChoice := gjson.GetBytes(body, "tool_choice")
+	if toolChoice.Exists() {
+		choiceType := strings.TrimSpace(toolChoice.Get("type").String())
+		choiceName := strings.TrimSpace(toolChoice.Get("name").String())
+		choiceStillExists := false
+		if choiceName != "" {
+			for _, tool := range filtered {
+				if strings.TrimSpace(gjson.GetBytes(tool, "name").String()) == choiceName {
+					choiceStillExists = true
+					break
+				}
+			}
+		}
+		if len(filtered) == 0 || fallback.toolTypes[choiceType] || (fallback.toolNames[choiceName] && !choiceStillExists) {
+			body, _ = sjson.DeleteBytes(body, "tool_choice")
+		}
+	}
+	return body, true
 }
 
 func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, report sigcompat.SignatureSanitizeReport) {

@@ -151,40 +151,46 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
-	if err != nil {
-		return nil, err
-	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, bodyForUpstream, e.cfg, incomingHeaders, confirmedClaudeCode && !cloaked, claudeSessionID); errHeaders != nil {
-		return nil, errHeaders
-	}
-	fastRequest := isAnthropicUpstreamBase(baseURL) && claudeRequestIsFast(httpReq, bodyForUpstream)
-	authID, authLabel, authType, authValue := claudeAuthLogIdentity(auth)
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:          url,
-		Method:       http.MethodPost,
-		Headers:      httpReq.Header.Clone(),
-		Body:         bodyForUpstream,
-		Provider:     e.upstreamRequestLogProvider(),
-		AuthID:       authID,
-		AuthLabel:    authLabel,
-		ProviderName: helps.RequestLogProviderName(auth),
-		AuthType:     authType,
-		AuthValue:    authValue,
-	})
-
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := doClaudeUpstreamRequest(httpClient, httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, wrapClaudeFastRequestError(fastRequest, 0, err)
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+	authID, authLabel, authType, authValue := claudeAuthLogIdentity(auth)
+	var httpResp *http.Response
+	fastRequest := false
+	for attempt := 0; ; attempt++ {
+		httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
+		if errRequest != nil {
+			return nil, errRequest
+		}
+		if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, bodyForUpstream, e.cfg, incomingHeaders, confirmedClaudeCode && !cloaked, claudeSessionID); errHeaders != nil {
+			return nil, errHeaders
+		}
+		fastRequest = isAnthropicUpstreamBase(baseURL) && claudeRequestIsFast(httpReq, bodyForUpstream)
+		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+			URL:          url,
+			Method:       http.MethodPost,
+			Headers:      httpReq.Header.Clone(),
+			Body:         bodyForUpstream,
+			Provider:     e.upstreamRequestLogProvider(),
+			AuthID:       authID,
+			AuthLabel:    authLabel,
+			ProviderName: helps.RequestLogProviderName(auth),
+			AuthType:     authType,
+			AuthValue:    authValue,
+		})
+
+		httpResp, err = doClaudeUpstreamRequest(httpClient, httpReq)
+		if err != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, err)
+			return nil, wrapClaudeFastRequestError(fastRequest, 0, err)
+		}
+		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+			break
+		}
+
 		// Decompress error responses — pass the Content-Encoding value (may be empty)
 		// and let decodeResponseBody handle both header-declared and magic-byte-detected
-		// compression.  This keeps error-path behaviour consistent with the success path.
+		// compression. This keeps error-path behaviour consistent with the success path.
 		errBody, decErr := decodeResponseBody(httpResp.Body, claudeResponseContentEncoding(httpResp.Header))
 		if decErr != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
@@ -203,6 +209,22 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
+		}
+
+		if attempt == 0 {
+			if fallback, ok := claudeUnsupportedServerToolFallbackFromError(httpResp.StatusCode, b, bodyForUpstream); ok {
+				if retryBody, removed := removeClaudeUnsupportedServerTools(bodyForUpstream, fallback); removed {
+					if cchSigning {
+						retryBody, err = finalizeAnthropicMessagesBodyCCH(retryBody, cchBilling)
+						if err != nil {
+							return nil, fmt.Errorf("finalize Claude CCH after unsupported tool fallback: %w", err)
+						}
+					}
+					helps.LogWithRequestID(ctx).Debug("claude executor: retrying once without an explicitly unsupported server tool")
+					bodyForUpstream = retryBody
+					continue
+				}
+			}
 		}
 		if fastRequest {
 			return nil, newClaudeFastDirectResponseError(httpResp, b)

@@ -135,7 +135,7 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 
 对于会校验调用客户端的 Claude、Codex 兼容中转站，CPA 会重建上游需要的 Claude Code 或 Codex 请求身份。下游客户端继续使用标准 Claude Messages、OpenAI Chat Completions 或 OpenAI Responses 接口即可，不需要自己拼 CLI 专用请求头和元数据。
 
-Claude 模型名包含 `[1m]` 时，CPA 会自动启用 `context-1m-2025-08-07` Beta。若上游 Bedrock 渠道明确不支持某个 Claude 服务端工具，CPA 会移除该服务端工具后重试一次，普通 function tools 保持不变。
+Claude 模型名包含 `[1m]` 时，CPA 会自动启用 `context-1m-2025-08-07` Beta。若上游 Bedrock 渠道明确不支持某个 Claude 服务端工具，CPA 会移除该服务端工具后重试一次，普通 function tools 保持不变。在 OpenAI Responses 路径中，CPA 会在向下游发送任何内容前识别 Claude 中转的终止拒绝，并切换其他凭证，避免返回空白或截断的完成响应。
 
 ## 新手入门
 

@@ -1234,6 +1234,8 @@ func resultErrorFromError(err error) *Error {
 		resultErr.HTTPStatus = statusCodeFromError(err)
 	}
 	switch {
+	case isCredentialFallbackError(err):
+		resultErr.Code = credentialFallbackErrorCode
 	case isRequestScopedError(err) || isRequestInvalidError(err):
 		// Prefer true request-scoped faults (including Claude OAuth cancellation)
 		// over the broader connection-lifecycle classification.
@@ -1252,7 +1254,19 @@ func resultErrorFromError(err error) *Error {
 // Connection lifecycle is intentionally separate from request_scoped so transport
 // drops do not also stop credential rotation via isRequestInvalidError.
 func shouldSkipCredentialCooldown(err *Error) bool {
-	return isRequestScopedResultError(err) || isConnectionLifecycleResultError(err)
+	return isCredentialFallbackResultError(err) || isRequestScopedResultError(err) || isConnectionLifecycleResultError(err)
+}
+
+func isCredentialFallbackError(err error) bool {
+	if err == nil {
+		return false
+	}
+	fallbackErr, ok := errors.AsType[cliproxyexecutor.CredentialFallbackError](err)
+	return ok && fallbackErr != nil && fallbackErr.IsCredentialFallback()
+}
+
+func isCredentialFallbackResultError(err *Error) bool {
+	return err != nil && err.Code == credentialFallbackErrorCode
 }
 
 // isConnectionLifecycleError reports transport/session lifecycle failures that must
@@ -1696,6 +1710,12 @@ func isMissingModelPhrase(value string) bool {
 // errors remain eligible for alternate routing and keep their model-level state.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
+		return false
+	}
+	if isCredentialFallbackError(err) {
+		return false
+	}
+	if resultErr, ok := err.(*Error); ok && isCredentialFallbackResultError(resultErr) {
 		return false
 	}
 	if isRequestScopedError(err) {

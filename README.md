@@ -135,7 +135,7 @@ PackyCode provides special discounts for our software users: register using <a h
 
 For Claude- and Codex-compatible relay providers that validate the calling client, CPA reconstructs the upstream Claude Code or Codex request identity. Downstream callers can therefore keep using the standard Claude Messages, OpenAI Chat Completions, or OpenAI Responses APIs instead of reproducing CLI-only headers and request metadata themselves.
 
-Claude model IDs containing `[1m]` automatically enable the `context-1m-2025-08-07` beta. If an upstream Bedrock route explicitly rejects a Claude server-side tool, CPA retries once without that unsupported server tool while retaining ordinary function tools.
+Claude model IDs containing `[1m]` automatically enable the `context-1m-2025-08-07` beta. If an upstream Bedrock route explicitly rejects a Claude server-side tool, CPA retries once without that unsupported server tool while retaining ordinary function tools. On the OpenAI Responses path, a terminal Claude relay refusal is detected before any downstream bytes are released, so CPA can try another credential instead of returning an empty or truncated completed response.
 
 ## Getting Started
 

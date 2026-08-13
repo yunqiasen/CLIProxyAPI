@@ -339,12 +339,21 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		var param any
 		var upstreamMessageID string
 		upstreamCompleted := false
+		bufferTranslatedStream := shouldBufferClaudeTranslatedStream(responseFormat, baseURL)
+		bufferedPayloads := make([][]byte, 0, 16)
+		var refusalErr error
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
+			}
+			if bufferTranslatedStream && refusalErr == nil {
+				if candidate, ok := claudeStreamRefusalError(req.Model, line); ok {
+					refusalErr = candidate
+					continue
+				}
 			}
 			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
 			if errRestore != nil {
@@ -363,6 +372,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				&param,
 			)
 			for i := range chunks {
+				if bufferTranslatedStream {
+					bufferedPayloads = append(bufferedPayloads, bytes.Clone(chunks[i]))
+					continue
+				}
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
@@ -384,8 +397,27 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			return
 		}
+		if refusalErr != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, refusalErr)
+			reporter.PublishFailure(ctx, refusalErr)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: refusalErr}:
+			case <-ctx.Done():
+			}
+			return
+		}
 		if upstreamCompleted {
 			commitClaudeDiagnostics(diagnosticsState, upstreamMessageID)
+		}
+		if bufferTranslatedStream {
+			for _, payload := range bufferedPayloads {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: payload}:
+				case <-ctx.Done():
+					emitCancellation(ctx.Err())
+					return
+				}
+			}
 		}
 	}()
 	result := &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}

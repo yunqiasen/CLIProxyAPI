@@ -222,3 +222,11 @@ type RequestScopedError interface {
 	error
 	IsRequestScoped() bool
 }
+
+// CredentialFallbackError identifies an upstream response that should rotate to
+// another credential without marking the current credential unavailable.
+// Unlike RequestScopedError, the same request may succeed with another account.
+type CredentialFallbackError interface {
+	error
+	IsCredentialFallback() bool
+}

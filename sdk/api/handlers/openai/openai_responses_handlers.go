@@ -540,8 +540,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				errChan = nil
 				continue
 			}
-			// Upstream failed immediately. Return proper error status and JSON.
-			h.WriteErrorResponse(c, errMsg)
+			h.writeResponsesStreamBootstrapError(c, flusher, upstreamHeaders, errMsg)
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
 			} else {
@@ -572,6 +571,34 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			return
 		}
 	}
+}
+
+func (h *OpenAIResponsesAPIHandler) writeResponsesStreamBootstrapError(c *gin.Context, flusher http.Flusher, upstreamHeaders http.Header, errMsg *interfaces.ErrorMessage) {
+	if !isCodexResponsesClientRequest(c) || !shouldExposeResponsesUpstreamError(errMsg) {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("Access-Control-Allow-Origin", "*")
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+
+	status := http.StatusInternalServerError
+	errText := http.StatusText(status)
+	if errMsg != nil {
+		if errMsg.StatusCode > 0 {
+			status = errMsg.StatusCode
+			errText = http.StatusText(status)
+		}
+		if errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
+			errText = errMsg.Error.Error()
+		}
+	}
+	chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, 0)
+	_, _ = fmt.Fprintf(c.Writer, "event: response.failed\ndata: %s\n\n", string(chunk))
+	flusher.Flush()
 }
 
 // isCodexResponsesClientRequest limits the alternate terminal event to official Codex clients.

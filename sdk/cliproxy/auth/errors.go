@@ -2,6 +2,8 @@ package auth
 
 const requestScopedErrorCode = "request_scoped"
 
+const credentialFallbackErrorCode = "credential_fallback"
+
 // connectionLifecycleErrorCode marks transport/session lifecycle failures that
 // must skip credential cooldown without being treated as request-scoped faults.
 const connectionLifecycleErrorCode = "connection_lifecycle"

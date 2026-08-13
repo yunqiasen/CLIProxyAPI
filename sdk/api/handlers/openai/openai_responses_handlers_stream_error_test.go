@@ -125,3 +125,43 @@ func TestForwardResponsesStreamUsesResponseFailedForCodex(t *testing.T) {
 		t.Fatalf("missing nested Codex error detail: %q", body)
 	}
 }
+
+func TestWriteResponsesStreamBootstrapErrorUsesResponseFailedForCodex(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	h := NewOpenAIResponsesAPIHandler(base)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request.Header.Set("User-Agent", "Codex Desktop/26.803.41515")
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		t.Fatal("expected gin writer to implement http.Flusher")
+	}
+
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadGateway,
+		Error:      errors.New(`{"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`),
+	}
+	h.writeResponsesStreamBootstrapError(c, flusher, nil, errMsg)
+
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d for SSE response.failed", recorder.Code, http.StatusOK)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", got)
+	}
+	if !strings.Contains(body, "event: response.failed") {
+		t.Fatalf("missing response.failed event: %q", body)
+	}
+	if strings.Contains(body, "event: error") {
+		t.Fatalf("unexpected legacy error event: %q", body)
+	}
+	if !strings.Contains(body, `"code":"cyber_policy"`) {
+		t.Fatalf("missing nested policy code: %q", body)
+	}
+}

@@ -724,7 +724,7 @@ func findRequestLogCandidateByIDWithCutoff(dir, id string, cutoff *time.Time) (r
 	}
 	suffix := "-" + id + ".log"
 	for _, candidate := range candidates {
-		if strings.HasSuffix(candidate.name, suffix) {
+		if requestLogIDFromFilename(candidate.name) == id || strings.HasSuffix(candidate.name, suffix) {
 			return candidate, nil
 		}
 	}
@@ -963,44 +963,55 @@ func extractRequestModel(body, requestURL string) string {
 
 func extractUpstreamMetadata(apiRequests, apiResponses, apiErrors []string) requestLogUpstreamMetadata {
 	var out requestLogUpstreamMetadata
-	for _, section := range apiRequests {
-		if strings.TrimSpace(section) == "" {
-			continue
+	attemptIndex := -1
+	for index := len(apiRequests) - 1; index >= 0; index-- {
+		if strings.TrimSpace(apiRequests[index]) != "" {
+			attemptIndex = index
+			break
 		}
+	}
+	if attemptIndex >= 0 {
+		section := apiRequests[attemptIndex]
 		values := parseUpstreamHeaderLines(section)
-		if out.UpstreamURL == "" {
-			out.UpstreamURL = firstNonEmptyRequestLogValue(values["Upstream URL"], values["URL"])
-		}
+		out.UpstreamURL = firstNonEmptyRequestLogValue(values["Upstream URL"], values["URL"])
 		if authLine := values["Auth"]; authLine != "" {
 			auth := parseRequestLogAuthLine(authLine)
-			if out.Provider == "" {
-				out.Provider = auth["provider"]
-			}
-			if out.ProviderName == "" {
-				out.ProviderName = auth["provider_name"]
-			}
-			if out.AuthID == "" {
-				out.AuthID = auth["auth_id"]
-			}
-			if out.AuthType == "" {
-				out.AuthType = auth["type"]
-			}
+			out.Provider = auth["provider"]
+			out.ProviderName = auth["provider_name"]
+			out.AuthID = auth["auth_id"]
+			out.AuthType = auth["type"]
+		}
+		out.UpstreamModel = extractModel(extractUpstreamBody(section))
+		if out.UpstreamModel == "" {
+			out.UpstreamModel = extractUpstreamModelForAttempt(apiResponses, attemptIndex, len(apiRequests))
 		}
 		if out.UpstreamModel == "" {
-			out.UpstreamModel = extractModel(extractUpstreamBody(section))
+			out.UpstreamModel = extractUpstreamModelForAttempt(apiErrors, attemptIndex, len(apiRequests))
 		}
-	}
-	if out.UpstreamModel == "" {
+	} else {
 		out.UpstreamModel = extractUpstreamModelFromSections(apiResponses)
-	}
-	if out.UpstreamModel == "" {
-		out.UpstreamModel = extractUpstreamModelFromSections(apiErrors)
+		if out.UpstreamModel == "" {
+			out.UpstreamModel = extractUpstreamModelFromSections(apiErrors)
+		}
 	}
 	if out.Provider == "" {
 		out.Provider = inferProviderFromUpstream(out.UpstreamModel, out.UpstreamURL)
 	}
 	out.ChannelModel = buildChannelModel(firstNonEmptyRequestLogValue(out.ProviderName, out.Provider), out.UpstreamModel, out.UpstreamURL)
 	return out
+}
+
+func extractUpstreamModelForAttempt(sections []string, attemptIndex, attemptCount int) string {
+	if attemptIndex < 0 || len(sections) == 0 {
+		return ""
+	}
+	if len(sections) == attemptCount && attemptIndex < len(sections) {
+		return extractUpstreamModelFromSections([]string{sections[attemptIndex]})
+	}
+	if attemptCount == 1 {
+		return extractUpstreamModelFromSections(sections)
+	}
+	return ""
 }
 
 func parseUpstreamHeaderLines(section string) map[string]string {
@@ -2384,11 +2395,7 @@ func requestLogHeader(headers map[string]string, key string) string {
 }
 
 func requestLogIDFromFilename(name string) string {
-	base := strings.TrimSuffix(name, ".log")
-	if idx := strings.LastIndex(base, "-"); idx >= 0 && idx < len(base)-1 {
-		return base[idx+1:]
-	}
-	return base
+	return strings.TrimSuffix(strings.TrimSpace(name), ".log")
 }
 
 func previewText(text string) string {

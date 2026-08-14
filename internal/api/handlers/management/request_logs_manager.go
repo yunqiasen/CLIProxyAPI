@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sort"
 	"sync"
 	"time"
 )
@@ -140,9 +139,14 @@ func (m *requestLogIndexManager) Detail(ctx context.Context, id string) (request
 		return requestLogDetail{}, fmt.Errorf("request log index unavailable")
 	}
 	cutoff := requestLogRetentionCutoff(m.now(), m.retentionDays())
-	detail, err := m.store.detailWithCutoff(ctx, id, cutoff)
-	if err == nil || !errors.Is(err, sql.ErrNoRows) {
-		return detail, err
+	resolvedID, errResolve := m.store.resolveID(ctx, id)
+	if errResolve == nil {
+		detail, err := m.store.detailWithCutoff(ctx, resolvedID, cutoff)
+		if err == nil || !errors.Is(err, sql.ErrNoRows) {
+			return detail, err
+		}
+	} else if !errors.Is(errResolve, sql.ErrNoRows) {
+		return requestLogDetail{}, errResolve
 	}
 	candidate, err := findRequestLogCandidateByIDWithCutoff(m.dir, id, requestLogCutoffTime(cutoff))
 	if err != nil {
@@ -158,7 +162,7 @@ func (m *requestLogIndexManager) Detail(ctx context.Context, id string) (request
 	if err := m.store.upsertParsed(ctx, parsed, candidate); err != nil {
 		return requestLogDetail{}, err
 	}
-	return m.store.detailWithCutoff(ctx, id, cutoff)
+	return m.store.detailWithCutoff(ctx, parsed.ID, cutoff)
 }
 
 func (m *requestLogIndexManager) Export(ctx context.Context, w io.Writer, opts requestLogQueryOptions, format string) error {
@@ -263,17 +267,32 @@ func (m *requestLogIndexManager) sync(ctx context.Context) error {
 			return err
 		}
 	}
-	states, err := m.store.compactSyncStates(ctx)
+	ids := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		ids = append(ids, requestLogIDFromFilename(candidate.name))
+	}
+	states, err := m.store.compactSyncStates(ctx, ids)
 	if err != nil {
 		return err
 	}
 
-	seen := make(map[string]struct{}, len(candidates))
-	changed := make([]parsedRequestLogCandidate, 0)
+	batch := make([]parsedRequestLogCandidate, 0, m.batchSize)
 	parseErrors := make([]error, 0)
+	flushBatch := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if m.batchHook != nil {
+			m.batchHook(len(batch))
+		}
+		if err := m.store.upsertParsedBatch(ctx, batch); err != nil {
+			return err
+		}
+		batch = batch[:0]
+		return nil
+	}
 	for _, candidate := range candidates {
 		id := requestLogIDFromFilename(candidate.name)
-		seen[id] = struct{}{}
 		if state, ok := states[id]; ok && state.size == candidate.size && state.modified == candidate.modTime.Unix() && !state.needsRefresh {
 			continue
 		}
@@ -282,39 +301,17 @@ func (m *requestLogIndexManager) sync(ctx context.Context) error {
 			parseErrors = append(parseErrors, fmt.Errorf("parse %s: %w", candidate.name, errParse))
 			continue
 		}
-		changed = append(changed, parsedRequestLogCandidate{parsed: parsed, candidate: candidate})
+		batch = append(batch, parsedRequestLogCandidate{parsed: parsed, candidate: candidate})
+		if len(batch) == m.batchSize {
+			if err := flushBatch(); err != nil {
+				return err
+			}
+		}
+	}
+	if err := flushBatch(); err != nil {
+		return err
 	}
 
-	for start := 0; start < len(changed); start += m.batchSize {
-		end := start + m.batchSize
-		if end > len(changed) {
-			end = len(changed)
-		}
-		batch := changed[start:end]
-		if m.batchHook != nil {
-			m.batchHook(len(batch))
-		}
-		if err := m.store.upsertParsedBatch(ctx, batch); err != nil {
-			return err
-		}
-	}
-
-	staleIDs := make([]string, 0)
-	for id := range states {
-		if _, ok := seen[id]; !ok {
-			staleIDs = append(staleIDs, id)
-		}
-	}
-	sort.Strings(staleIDs)
-	for start := 0; start < len(staleIDs); start += m.batchSize {
-		end := start + m.batchSize
-		if end > len(staleIDs) {
-			end = len(staleIDs)
-		}
-		if err := m.store.deleteIDs(ctx, staleIDs[start:end]); err != nil {
-			return err
-		}
-	}
 	if cutoffTime != nil {
 		if err := m.store.pruneBefore(ctx, *cutoffTime); err != nil {
 			return err

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -17,8 +18,9 @@ import (
 )
 
 const (
-	requestLogDBFilename     = "request_logs.db"
-	requestLogParserRevision = 1
+	requestLogDBFilename              = "request_logs.db"
+	requestLogParserRevision          = 2
+	requestLogFilenameIDSchemaVersion = 1
 )
 
 type requestLogStore struct {
@@ -165,7 +167,45 @@ CREATE INDEX IF NOT EXISTS idx_request_log_entries_upstream_model ON request_log
 CREATE INDEX IF NOT EXISTS idx_request_log_entries_auth_time ON request_log_entries(auth_id, timestamp_unix DESC);
 CREATE INDEX IF NOT EXISTS idx_request_log_entries_provider_time ON request_log_entries(provider, timestamp_unix DESC);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.migrateFilenameIDs(ctx)
+}
+
+func (s *requestLogStore) migrateFilenameIDs(ctx context.Context) error {
+	var schemaVersion int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&schemaVersion); err != nil {
+		return err
+	}
+	if schemaVersion >= requestLogFilenameIDSchemaVersion {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.ExecContext(ctx, `DELETE FROM request_log_entries AS legacy
+WHERE legacy.name LIKE '%.log'
+  AND legacy.id <> substr(legacy.name, 1, length(legacy.name) - 4)
+  AND EXISTS (
+    SELECT 1 FROM request_log_entries AS current
+    WHERE current.id = substr(legacy.name, 1, length(legacy.name) - 4)
+  )`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE request_log_entries
+SET id = substr(name, 1, length(name) - 4)
+WHERE name LIKE '%.log'
+  AND id <> substr(name, 1, length(name) - 4)`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, requestLogFilenameIDSchemaVersion)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *requestLogStore) pruneBefore(ctx context.Context, cutoff time.Time) error {
@@ -273,24 +313,43 @@ func (s *requestLogStore) upsertParsedBatch(ctx context.Context, batch []parsedR
 	return tx.Commit()
 }
 
-func (s *requestLogStore) compactSyncStates(ctx context.Context) (map[string]requestLogSyncState, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, size, modified, url, model, parser_revision FROM request_log_entries`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	states := make(map[string]requestLogSyncState)
-	for rows.Next() {
-		var id, requestURL, model string
-		var size, modified, parserRevision int64
-		if err := rows.Scan(&id, &size, &modified, &requestURL, &model, &parserRevision); err != nil {
+func (s *requestLogStore) compactSyncStates(ctx context.Context, ids []string) (map[string]requestLogSyncState, error) {
+	states := make(map[string]requestLogSyncState, len(ids))
+	for start := 0; start < len(ids); start += defaultRequestLogBatchSize {
+		end := start + defaultRequestLogBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		args := make([]any, len(batch))
+		for index, id := range batch {
+			args[index] = id
+		}
+		rows, err := s.db.QueryContext(ctx, `SELECT id, size, modified, COALESCE(url, ''), COALESCE(model, ''), COALESCE(parser_revision, 0) FROM request_log_entries WHERE id IN (`+placeholders+`)`, args...)
+		if err != nil {
 			return nil, err
 		}
-		if strings.TrimSpace(id) != "" {
-			states[id] = requestLogSyncState{size: size, modified: modified, needsRefresh: needsRequestLogParserRefresh(requestURL, model, parserRevision)}
+		for rows.Next() {
+			var id, requestURL, model string
+			var size, modified, parserRevision int64
+			if err := rows.Scan(&id, &size, &modified, &requestURL, &model, &parserRevision); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			if strings.TrimSpace(id) != "" {
+				states[id] = requestLogSyncState{size: size, modified: modified, needsRefresh: needsRequestLogParserRefresh(requestURL, model, parserRevision)}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
 		}
 	}
-	return states, rows.Err()
+	return states, nil
 }
 
 func (s *requestLogStore) deleteIDs(ctx context.Context, ids []string) error {
@@ -367,7 +426,10 @@ func (s *requestLogStore) syncStates(ctx context.Context) (map[string]requestLog
 }
 
 func needsRequestLogParserRefresh(requestURL, model string, parserRevision int64) bool {
-	if parserRevision >= requestLogParserRevision || strings.TrimSpace(model) != "" {
+	if parserRevision < requestLogParserRevision {
+		return true
+	}
+	if strings.TrimSpace(model) != "" {
 		return false
 	}
 	parsed, err := url.Parse(strings.TrimSpace(requestURL))
@@ -410,6 +472,29 @@ func (s *requestLogStore) list(ctx context.Context, opts requestLogQueryOptions)
 		items = append(items, item)
 	}
 	return items, total, rows.Err()
+}
+
+func (s *requestLogStore) resolveID(ctx context.Context, id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", sql.ErrNoRows
+	}
+	var resolved string
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM request_log_entries WHERE id = ?`, id).Scan(&resolved); err == nil {
+		return resolved, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	legacySuffix := "%-" + escapeRequestLogLike(id) + ".log"
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM request_log_entries WHERE name LIKE ? ESCAPE '\' ORDER BY timestamp_unix DESC LIMIT 1`, legacySuffix).Scan(&resolved); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+func escapeRequestLogLike(value string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(value)
 }
 
 func (s *requestLogStore) detail(ctx context.Context, id string) (requestLogDetail, error) {

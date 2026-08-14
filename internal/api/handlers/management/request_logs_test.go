@@ -782,6 +782,129 @@ func TestExportRequestLogsHonorsPages(t *testing.T) {
 	}
 }
 
+func TestParseRequestLogUsesSuccessfulRetryProvider(t *testing.T) {
+	logsDir := t.TempDir()
+	stamp, timestamp := requestLogTestTimestamp(0)
+	logPath := filepath.Join(logsDir, fmt.Sprintf("v1-responses-%s-provider-retry.log", stamp))
+	content := strings.Join([]string{
+		"=== REQUEST INFO ===",
+		"Timestamp: " + timestamp,
+		"URL: /v1/responses",
+		"Method: POST",
+		"",
+		"=== REQUEST BODY ===",
+		`{"model":"opus5","input":"hello"}`,
+		"",
+		"=== API REQUEST 1 ===",
+		"Upstream URL: https://agentrouter.org/v1/messages?beta=true",
+		"HTTP Method: POST",
+		"Auth: provider=claude, provider_name=AgentRouter, auth_id=claude:apikey:agent, type=api_key",
+		"",
+		"Body:",
+		`{"model":"claude-opus-5","messages":[{"role":"user","content":"hello"}]}`,
+		"",
+		"=== API REQUEST 2 ===",
+		"Upstream URL: https://relay.example/v1/messages?beta=true",
+		"HTTP Method: POST",
+		"Auth: provider=claude, provider_name=FinalRelay, auth_id=claude:apikey:final, type=api_key",
+		"",
+		"Body:",
+		`{"model":"claude-opus-5-final","messages":[{"role":"user","content":"hello"}]}`,
+		"",
+		"=== API RESPONSE ===",
+		`{"error":{"message":"first relay failed"}}`,
+		"",
+		"=== API RESPONSE 1 ===",
+		"Status: 403",
+		"",
+		"Body:",
+		`{"error":{"message":"quota exhausted"}}`,
+		"",
+		"=== API RESPONSE 2 ===",
+		"Status: 200",
+		"",
+		"Body:",
+		`{"model":"claude-opus-5-final","content":[{"type":"text","text":"ok"}]}`,
+		"",
+		"=== RESPONSE ===",
+		"Status: 200",
+		"Content-Type: application/json",
+		"",
+		`{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}`,
+	}, "\n")
+	if err := os.WriteFile(logPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write retry log: %v", err)
+	}
+	info, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat retry log: %v", err)
+	}
+
+	parsed, err := parseRequestLogFile(requestLogCandidate{name: filepath.Base(logPath), path: logPath, size: info.Size(), modTime: info.ModTime(), logTime: info.ModTime()})
+	if err != nil {
+		t.Fatalf("parse retry log: %v", err)
+	}
+	if parsed.Provider != "FinalRelay" || parsed.ProtocolProvider != "claude" {
+		t.Fatalf("providers = display:%q protocol:%q, want FinalRelay/claude", parsed.Provider, parsed.ProtocolProvider)
+	}
+	if parsed.AuthID != "claude:apikey:final" || parsed.UpstreamURL != "https://relay.example/v1/messages?beta=true" {
+		t.Fatalf("selected retry = auth:%q url:%q", parsed.AuthID, parsed.UpstreamURL)
+	}
+	if parsed.UpstreamModel != "claude-opus-5-final" || parsed.ChannelModel != "FinalRelay / claude-opus-5-final" {
+		t.Fatalf("channel = upstream:%q display:%q", parsed.UpstreamModel, parsed.ChannelModel)
+	}
+
+	store, err := openRequestLogStore(logsDir)
+	if err != nil {
+		t.Fatalf("open request log store: %v", err)
+	}
+	defer store.close()
+	if err := syncRequestLogStore(context.Background(), store, logsDir); err != nil {
+		t.Fatalf("sync retry log: %v", err)
+	}
+	usage, err := store.apiKeyUsageByAuthID(context.Background(), time.Now(), nil)
+	if err != nil {
+		t.Fatalf("load retry usage: %v", err)
+	}
+	if _, exists := usage["claude:apikey:agent"]; exists {
+		t.Fatalf("failed first provider received final request usage: %#v", usage["claude:apikey:agent"])
+	}
+	finalUsage := usage["claude:apikey:final"]
+	if finalUsage.Success != 1 || finalUsage.Failed != 0 {
+		t.Fatalf("final provider usage = success:%d failed:%d, want 1/0", finalUsage.Success, finalUsage.Failed)
+	}
+}
+
+func TestExtractUpstreamMetadataKeepsFinalAttemptAtomicWhenAuthOrModelIsMissing(t *testing.T) {
+	requests := []string{
+		strings.Join([]string{
+			"Upstream URL: https://first.example/v1/messages",
+			"Auth: provider=claude, provider_name=FirstRelay, auth_id=first-auth, type=api_key",
+			"",
+			"Body:",
+			`{"model":"claude-first"}`,
+		}, "\n"),
+		strings.Join([]string{
+			"Upstream URL: https://final.example/v1/messages",
+			"",
+			"Body:",
+			`{"messages":[{"role":"user","content":"hello"}]}`,
+		}, "\n"),
+	}
+	responses := []string{
+		"Body:\n" + `{"model":"claude-first","content":[{"type":"text","text":"failed"}]}`,
+		"Body:\n" + `{"model":"claude-final","content":[{"type":"text","text":"ok"}]}`,
+	}
+
+	got := extractUpstreamMetadata(requests, responses, nil)
+	if got.UpstreamURL != "https://final.example/v1/messages" || got.UpstreamModel != "claude-final" {
+		t.Fatalf("final attempt URL/model = %q/%q", got.UpstreamURL, got.UpstreamModel)
+	}
+	if got.ProviderName != "" || got.AuthID != "" || got.AuthType != "" {
+		t.Fatalf("final attempt inherited prior auth metadata: %#v", got)
+	}
+}
+
 func TestRequestLogProviderNameParserStoreAndFallback(t *testing.T) {
 	logsDir := t.TempDir()
 	stamp, timestamp := requestLogTestTimestamp(0)

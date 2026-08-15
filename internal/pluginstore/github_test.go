@@ -115,6 +115,34 @@ func TestParseChecksumsAndVerifyChecksum(t *testing.T) {
 	}
 }
 
+func TestVerifyChecksumAcceptsPrefixedArchivePath(t *testing.T) {
+	t.Parallel()
+
+	data := []byte("zip-data")
+	sum := sha256.Sum256(data)
+	checksums := map[string]string{
+		"dist/sample-provider_0.1.0_linux_amd64.zip": hex.EncodeToString(sum[:]),
+	}
+	if errVerify := VerifyChecksum("sample-provider_0.1.0_linux_amd64.zip", data, checksums); errVerify != nil {
+		t.Fatalf("VerifyChecksum() prefixed path error = %v", errVerify)
+	}
+}
+
+func TestVerifyChecksumRejectsAmbiguousPrefixedArchivePaths(t *testing.T) {
+	t.Parallel()
+
+	data := []byte("zip-data")
+	sum := sha256.Sum256(data)
+	checksums := map[string]string{
+		"dist/sample-provider.zip":  hex.EncodeToString(sum[:]),
+		"other/sample-provider.zip": hex.EncodeToString(sum[:]),
+	}
+	errVerify := VerifyChecksum("sample-provider.zip", data, checksums)
+	if errVerify == nil || !strings.Contains(errVerify.Error(), "ambiguous") {
+		t.Fatalf("VerifyChecksum() error = %v, want ambiguous checksum error", errVerify)
+	}
+}
+
 func TestVerifyChecksumRejectsMissingAndMismatch(t *testing.T) {
 	t.Parallel()
 

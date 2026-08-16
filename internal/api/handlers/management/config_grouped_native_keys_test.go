@@ -298,13 +298,13 @@ func TestPatchClaudeKeyAcceptsGroupedAndProtocolFields(t *testing.T) {
 
 func TestPatchCodexKeyAcceptsGroupedAndProtocolFields(t *testing.T) {
 	h := &Handler{cfg: &config.Config{CodexKey: []config.CodexKey{{APIKey: "old", BaseURL: "https://old.example"}}}, configFilePath: writeTestConfigFile(t)}
-	body := `{"index":0,"value":{"name":"codex-group","api-key-entries":[{"api-key":"codex-key","priority":8,"proxy-url":"http://key-proxy"}],"api-key":"legacy","priority":6,"prefix":"codex","base-url":"https://codex.example","websockets":true,"proxy-url":"http://group-proxy","models":[{"name":"codex-model","alias":"model"}],"headers":{"X-Test":" value "},"excluded-models":[" excluded "],"disable-cooling":true}}`
+	body := `{"index":0,"value":{"name":"codex-group","api-key-entries":[{"api-key":"codex-key","priority":8,"proxy-url":"http://key-proxy"}],"api-key":"legacy","priority":6,"prefix":"codex","base-url":"https://codex.example","websockets":true,"proxy-url":"http://group-proxy","models":[{"name":"codex-model","alias":"model"}],"headers":{"X-Test":" value "},"excluded-models":[" excluded "],"disable-image-generation":true,"disable-cooling":true}}`
 	rec := performPatch(t, h.PatchCodexKey, body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	entry := h.cfg.CodexKey[0]
-	if entry.Name != "codex-group" || entry.Priority != 6 || len(entry.APIKeyEntries) != 1 || entry.APIKeyEntries[0].APIKey != "codex-key" || entry.APIKey != "legacy" || entry.Prefix != "codex" || entry.BaseURL != "https://codex.example" || !entry.Websockets || entry.ProxyURL != "http://group-proxy" || len(entry.Models) != 1 || entry.Models[0].Name != "codex-model" || entry.Headers["X-Test"] != "value" || len(entry.ExcludedModels) != 1 || entry.ExcludedModels[0] != "excluded" || !entry.DisableCooling {
+	if entry.Name != "codex-group" || entry.Priority != 6 || len(entry.APIKeyEntries) != 1 || entry.APIKeyEntries[0].APIKey != "codex-key" || entry.APIKey != "legacy" || entry.Prefix != "codex" || entry.BaseURL != "https://codex.example" || !entry.Websockets || entry.ProxyURL != "http://group-proxy" || len(entry.Models) != 1 || entry.Models[0].Name != "codex-model" || entry.Headers["X-Test"] != "value" || len(entry.ExcludedModels) != 1 || entry.ExcludedModels[0] != "excluded" || !entry.DisableImageGeneration || !entry.DisableCooling {
 		t.Fatalf("patched Codex entry = %#v", entry)
 	}
 }
@@ -558,5 +558,59 @@ func TestPutNativeKeysMigratesLegacyGroupedIdentityOnNameEdit(t *testing.T) {
 	}
 	if got := h.cfg.ClaudeKey[0].APIKeyEntries[0].AuthID; got != legacyID {
 		t.Fatalf("legacy grouped auth ID = %q, want %q", got, legacyID)
+	}
+}
+
+func TestCodexDisableImageGenerationPersistsAcrossGetPutAndPatch(t *testing.T) {
+	configPath := writeTestConfigFile(t)
+	h := &Handler{cfg: &config.Config{}, configFilePath: configPath}
+
+	putBody := `[{"name":"relay","base-url":"https://relay.example/v1","api-key":"key","disable-image-generation":true}]`
+	putRec := httptest.NewRecorder()
+	putCtx, _ := gin.CreateTestContext(putRec)
+	putCtx.Request = httptest.NewRequest(http.MethodPut, "/v0/management/codex-api-key", strings.NewReader(putBody))
+	putCtx.Request.Header.Set("Content-Type", "application/json")
+	h.PutCodexKeys(putCtx)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want %d; body=%s", putRec.Code, http.StatusOK, putRec.Body.String())
+	}
+	if len(h.cfg.CodexKey) != 1 || !h.cfg.CodexKey[0].DisableImageGeneration {
+		t.Fatalf("PUT config = %#v, want disable-image-generation true", h.cfg.CodexKey)
+	}
+	persistedTrue, errLoadTrue := config.LoadConfig(configPath)
+	if errLoadTrue != nil {
+		t.Fatalf("load persisted true config: %v", errLoadTrue)
+	}
+	if len(persistedTrue.CodexKey) != 1 || !persistedTrue.CodexKey[0].DisableImageGeneration {
+		t.Fatalf("persisted PUT config = %#v, want true", persistedTrue.CodexKey)
+	}
+
+	getRec := httptest.NewRecorder()
+	getCtx, _ := gin.CreateTestContext(getRec)
+	getCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/codex-api-key", nil)
+	h.GetCodexKeys(getCtx)
+	var getBody struct {
+		Items []config.CodexKey `json:"codex-api-key"`
+	}
+	if errDecode := json.Unmarshal(getRec.Body.Bytes(), &getBody); errDecode != nil {
+		t.Fatalf("decode GET response: %v", errDecode)
+	}
+	if len(getBody.Items) != 1 || !getBody.Items[0].DisableImageGeneration {
+		t.Fatalf("GET response = %s, want true", getRec.Body.String())
+	}
+
+	patchRec := performPatch(t, h.PatchCodexKey, `{"index":0,"value":{"disable-image-generation":false}}`)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, want %d; body=%s", patchRec.Code, http.StatusOK, patchRec.Body.String())
+	}
+	if len(h.cfg.CodexKey) != 1 || h.cfg.CodexKey[0].DisableImageGeneration {
+		t.Fatalf("PATCH config = %#v, want disable-image-generation false", h.cfg.CodexKey)
+	}
+	persistedFalse, errLoadFalse := config.LoadConfig(configPath)
+	if errLoadFalse != nil {
+		t.Fatalf("load persisted false config: %v", errLoadFalse)
+	}
+	if len(persistedFalse.CodexKey) != 1 || persistedFalse.CodexKey[0].DisableImageGeneration {
+		t.Fatalf("persisted PATCH config = %#v, want false", persistedFalse.CodexKey)
 	}
 }

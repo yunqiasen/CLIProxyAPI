@@ -1387,6 +1387,19 @@ func TestApplyCodexPromptCacheHeadersClaudeRejectsBareUserID(t *testing.T) {
 	}
 }
 
+func TestApplyCodexWebsocketHeadersKeepsSessionIDAlignedWithPromptCacheKey(t *testing.T) {
+	headers := http.Header{}
+	setHeaderCasePreserved(headers, "session_id", "cache-session")
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"header:Session_id": "custom-session-id",
+	}}
+
+	got := applyCodexWebsocketHeaders(context.Background(), headers, auth, "token", nil)
+	if sessionID := codexSessionHeaderValue(got); sessionID != "cache-session" {
+		t.Fatalf("session_id = %q, want prompt_cache_key %q", sessionID, "cache-session")
+	}
+}
+
 func TestApplyCodexWebsocketHeadersIdentityConfuseRemapsPromptCacheKey(t *testing.T) {
 	cfg := &config.Config{
 		Routing: config.RoutingConfig{SessionAffinity: true},
@@ -2066,5 +2079,80 @@ func TestCodexWebsocketLifecycleBindFailureReleasesSessionRequestLock(t *testing
 	case <-acquired:
 	case <-time.After(time.Second):
 		t.Fatal("lifecycle bind failure left the session request lock held")
+	}
+}
+
+func TestCodexWebsocketsExecuteDisabledProviderStripsImageGenBeforeDispatch(t *testing.T) {
+	assertCodexWebsocketImageGenSuppressed(t, false)
+}
+
+func TestCodexWebsocketsExecuteStreamDisabledProviderStripsImageGenBeforeDispatch(t *testing.T) {
+	assertCodexWebsocketImageGenSuppressed(t, true)
+}
+
+func assertCodexWebsocketImageGenSuppressed(t *testing.T, stream bool) {
+	t.Helper()
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	capturedPayload := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("upgrade websocket: %v", errUpgrade)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		_, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		capturedPayload <- bytes.Clone(payload)
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-imagegen-disabled","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Errorf("write completed websocket message: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Provider: "codex", Attributes: map[string]string{
+		cliproxyauth.AttributeAPIKey: "sk-test",
+		"base_url":                   server.URL,
+		cliproxyauth.AttributeCodexDisableImageGeneration: "true",
+	}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol",
+		Payload: []byte(`{"model":"gpt-5.6-sol","input":"hello","tools":[{"type":"function","function":{"name":"image_gen.imagegen"}},{"type":"image_generation"}],"tool_choice":{"type":"function","function":{"name":"image_gen.imagegen"}},"parallel_tool_calls":true}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
+
+	if stream {
+		result, errExecute := exec.ExecuteStream(context.Background(), auth, req, opts)
+		if errExecute != nil {
+			t.Fatalf("ExecuteStream() error = %v", errExecute)
+		}
+		for chunk := range result.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("stream chunk error = %v", chunk.Err)
+			}
+		}
+	} else if _, errExecute := exec.Execute(context.Background(), auth, req, opts); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+
+	select {
+	case payload := <-capturedPayload:
+		if tools := gjson.GetBytes(payload, "tools"); !tools.Exists() || len(tools.Array()) != 0 {
+			t.Fatalf("upstream tools = %s, want empty after suppression; payload=%s", tools.Raw, payload)
+		}
+		if gjson.GetBytes(payload, "tool_choice").Exists() {
+			t.Fatalf("upstream tool_choice was not removed: %s", payload)
+		}
+		if gjson.GetBytes(payload, "parallel_tool_calls").Exists() {
+			t.Fatalf("upstream parallel_tool_calls should be removed with empty tools: %s", payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream websocket payload")
 	}
 }

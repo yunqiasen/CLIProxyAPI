@@ -78,3 +78,56 @@ func TestCodexExecutorCompactAddsDefaultInstructionsWithoutInjectingImageTool(t 
 		})
 	}
 }
+
+func TestCodexCompactDisabledProviderStripsImageGenAcrossExecutors(t *testing.T) {
+	tests := []struct {
+		name    string
+		execute func(context.Context, *cliproxyauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error)
+	}{
+		{
+			name:    "http",
+			execute: NewCodexExecutor(&config.Config{}).Execute,
+		},
+		{
+			name:    "websocket entrypoint",
+			execute: NewCodexWebsocketsExecutor(&config.Config{}).Execute,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+			}))
+			defer server.Close()
+
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+				"base_url": server.URL,
+				"api_key":  "test",
+				cliproxyauth.AttributeCodexDisableImageGeneration: "true",
+			}}
+			_, errExecute := tc.execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "gpt-5.4",
+				Payload: []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":"history"},{"type":"compaction_trigger"}],"tools":[{"type":"image_generation"},{"type":"function","name":"image_gen.imagegen"}],"tool_choice":{"type":"function","name":"image_gen.imagegen"},"parallel_tool_calls":true}`),
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("openai-response"),
+				Alt:          "responses/compact",
+			})
+			if errExecute != nil {
+				t.Fatalf("Execute compact error: %v", errExecute)
+			}
+			if tools := gjson.GetBytes(gotBody, "tools"); !tools.Exists() || len(tools.Array()) != 0 {
+				t.Fatalf("compact tools = %s, want empty after suppression; body=%s", tools.Raw, gotBody)
+			}
+			if gjson.GetBytes(gotBody, "tool_choice").Exists() {
+				t.Fatalf("compact tool_choice was not removed: %s", gotBody)
+			}
+			if gjson.GetBytes(gotBody, "parallel_tool_calls").Exists() {
+				t.Fatalf("compact parallel_tool_calls should be removed with empty tools: %s", gotBody)
+			}
+		})
+	}
+}

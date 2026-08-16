@@ -1305,20 +1305,21 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
-		Name           *string                     `json:"name"`
-		APIKeyEntries  *[]config.NativeAPIKeyEntry `json:"api-key-entries"`
-		APIKey         *string                     `json:"api-key"`
-		Priority       *int                        `json:"priority"`
-		Weight         json.RawMessage             `json:"weight"`
-		Prefix         *string                     `json:"prefix"`
-		BaseURL        *string                     `json:"base-url"`
-		Websockets     *bool                       `json:"websockets"`
-		ProxyURL       *string                     `json:"proxy-url"`
-		AlphaSearch    *bool                       `json:"alpha-search"`
-		Models         *[]config.CodexModel        `json:"models"`
-		Headers        *map[string]string          `json:"headers"`
-		ExcludedModels *[]string                   `json:"excluded-models"`
-		DisableCooling *bool                       `json:"disable-cooling"`
+		Name                   *string                     `json:"name"`
+		APIKeyEntries          *[]config.NativeAPIKeyEntry `json:"api-key-entries"`
+		APIKey                 *string                     `json:"api-key"`
+		Priority               *int                        `json:"priority"`
+		Weight                 json.RawMessage             `json:"weight"`
+		Prefix                 *string                     `json:"prefix"`
+		BaseURL                *string                     `json:"base-url"`
+		Websockets             *bool                       `json:"websockets"`
+		ProxyURL               *string                     `json:"proxy-url"`
+		AlphaSearch            *bool                       `json:"alpha-search"`
+		Models                 *[]config.CodexModel        `json:"models"`
+		Headers                *map[string]string          `json:"headers"`
+		ExcludedModels         *[]string                   `json:"excluded-models"`
+		DisableImageGeneration *bool                       `json:"disable-image-generation"`
+		DisableCooling         *bool                       `json:"disable-cooling"`
 	}
 	var body struct {
 		Index *int           `json:"index"`
@@ -1404,6 +1405,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.DisableImageGeneration != nil {
+		entry.DisableImageGeneration = *body.Value.DisableImageGeneration
 	}
 	if body.Value.DisableCooling != nil {
 		entry.DisableCooling = *body.Value.DisableCooling

@@ -76,7 +76,9 @@ func TestCodexExecutorDirectOpenAIImageGenerationUsesImagesEndpoint(t *testing.T
 		"Originator":            "Codex Desktop",
 	})
 	executor := NewCodexExecutor(&config.Config{})
-	resp, errExecute := executor.Execute(ctx, newCodexOpenAIImageTestAuth(server.URL), cliproxyexecutor.Request{
+	auth := newCodexOpenAIImageTestAuth(server.URL)
+	auth.Attributes[cliproxyauth.AttributeCodexDisableImageGeneration] = "true"
+	resp, errExecute := executor.Execute(ctx, auth, cliproxyexecutor.Request{
 		Model:   "codex/gpt-image-1.5",
 		Payload: []byte(`{"model":"codex/gpt-image-1.5","prompt":"A cute baby sea otter","n":1,"size":"1024x1024","quality":"high","background":"opaque","output_format":"jpeg","output_compression":70,"moderation":"low","extra":{"preserve":true},"stream":false}`),
 	}, codexOpenAIImageTestOptions(codexImagesGenerationsPath, false))
@@ -194,7 +196,9 @@ func TestCodexExecutorDirectOpenAIImageEditUsesImagesEditEndpointForJSON(t *test
 	defer server.Close()
 
 	executor := NewCodexExecutor(&config.Config{})
-	_, errExecute := executor.Execute(context.Background(), newCodexOpenAIImageTestAuth(server.URL), cliproxyexecutor.Request{
+	auth := newCodexOpenAIImageTestAuth(server.URL)
+	auth.Attributes[cliproxyauth.AttributeCodexDisableImageGeneration] = "true"
+	_, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gpt-image-2",
 		Payload: []byte(`{"model":"gpt-image-2","prompt":"Replace the background","images":[{"file_id":"file-abc123"}],"mask":{"file_id":"file-mask123"},"size":"1024x1024","quality":"high","output_format":"png","output_compression":100,"stream":false}`),
 	}, codexOpenAIImageTestOptions(codexImagesEditsPath, false))

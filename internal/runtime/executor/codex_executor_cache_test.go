@@ -392,3 +392,27 @@ func TestCodexExecutorCacheHelper_ClaudeAgentScopeUsesResolvedModelAcrossHTTPAnd
 		t.Fatalf("HTTP/WebSocket prompt keys differ: http=%q websocket=%q", childKey, websocketKey)
 	}
 }
+
+func TestApplyCodexHeadersKeepsSessionIDAlignedWithPromptCacheKey(t *testing.T) {
+	executor := &CodexExecutor{}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"header:Session_id": "custom-session-id",
+	}}
+	req, body, _, err := executor.cacheHelper(
+		context.Background(),
+		sdktranslator.FormatOpenAI,
+		"https://example.com/responses",
+		auth,
+		cliproxyexecutor.Request{Model: "gpt-5.6-sol", Payload: []byte(`{"prompt_cache_key":"cache-session"}`)},
+		[]byte(`{"prompt_cache_key":"cache-session"}`),
+		[]byte(`{"model":"gpt-5.6-sol"}`),
+	)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+	applyCodexHeaders(req, auth, "token", true, executor.cfg)
+	promptCacheKey := gjson.GetBytes(body, "prompt_cache_key").String()
+	if got := req.Header.Get("Session_id"); got != promptCacheKey {
+		t.Fatalf("Session_id = %q, want prompt_cache_key %q", got, promptCacheKey)
+	}
+}

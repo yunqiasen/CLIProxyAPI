@@ -362,6 +362,7 @@ nonstream-keepalive-interval: 0
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     disable-image-generation: false # optional: remove hosted/function ImageGen tools for incompatible relays
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
 #     alpha-search: false # optional: allow this key to serve /v1/alpha/search via base-url + /alpha/search
 #     headers:
@@ -395,6 +396,7 @@ nonstream-keepalive-interval: 0
 #         proxy-url: "http://key-proxy.example.com:8080"
 #     base-url: "https://www.example.com"
 #     websockets: true # Codex-specific shared option
+#     disable-image-generation: true # optional: suppress image_generation and image_gen.imagegen for this relay
 
 # xAI API keys
 # Uses the native xAI executor, including its Responses namespace-tool handling.

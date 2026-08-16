@@ -295,6 +295,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if o.AlphaSearch != n.AlphaSearch {
 				changes = append(changes, fmt.Sprintf("codex[%d].alpha-search: %t -> %t", i, o.AlphaSearch, n.AlphaSearch))
 			}
+			if o.DisableImageGeneration != n.DisableImageGeneration {
+				changes = append(changes, fmt.Sprintf("codex[%d].disable-image-generation: %t -> %t", i, o.DisableImageGeneration, n.DisableImageGeneration))
+			}
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
 				changes = append(changes, fmt.Sprintf("codex[%d].api-key: updated", i))
 			}

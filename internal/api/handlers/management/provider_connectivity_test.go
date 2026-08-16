@@ -224,3 +224,184 @@ func TestProviderConnectivityTestClaudeResolvesConfiguredAliasForPinnedAuth(t *t
 		t.Fatalf("upstream model = %q, want claude-upstream", got)
 	}
 }
+
+func TestProviderConnectivityTestCodexUsesExecutorAndUnsavedImageGenOverride(t *testing.T) {
+	var seenBody []byte
+	var seenHeader http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenHeader = r.Header.Clone()
+		seenBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_connectivity\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+	}))
+	defer server.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	selected := &coreauth.Auth{
+		ID:       "codex:selected",
+		Provider: "codex",
+		Attributes: map[string]string{
+			coreauth.AttributeAPIKey: "selected-key",
+			"base_url":               server.URL,
+			"config_index":           "0",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), selected); errRegister != nil {
+		t.Fatalf("register selected auth: %v", errRegister)
+	}
+
+	cfg := &config.Config{CodexKey: []config.CodexKey{{
+		APIKey:  "selected-key",
+		BaseURL: server.URL,
+		Models:  []config.CodexModel{{Name: "gpt-upstream", Alias: "public-codex"}},
+	}}}
+	manager.SetConfig(cfg)
+	h := &Handler{cfg: cfg, authManager: manager}
+	disableImageGeneration := true
+	response, status, errTest := h.performProviderConnectivityTest(context.Background(), providerConnectivityTestRequest{
+		Provider:               "codex",
+		AuthIndex:              selected.EnsureIndex(),
+		Model:                  "public-codex",
+		DisableImageGeneration: &disableImageGeneration,
+		Header: map[string]string{
+			"Authorization": "Bearer wrong-key",
+		},
+	})
+	if errTest != nil || status != http.StatusOK || response.StatusCode != http.StatusOK {
+		t.Fatalf("response=%#v status=%d err=%v", response, status, errTest)
+	}
+	if got := seenHeader.Get("Authorization"); got != "Bearer selected-key" {
+		t.Fatalf("Authorization = %q, want selected credential", got)
+	}
+	if got := gjson.GetBytes(seenBody, "model").String(); got != "gpt-upstream" {
+		t.Fatalf("upstream model = %q, want gpt-upstream; body=%s", got, seenBody)
+	}
+	if tools := gjson.GetBytes(seenBody, "tools"); !tools.Exists() || len(tools.Array()) != 0 {
+		t.Fatalf("upstream tools = %s, want empty after ImageGen suppression; body=%s", tools.Raw, seenBody)
+	}
+	if gjson.GetBytes(seenBody, "parallel_tool_calls").Exists() {
+		t.Fatalf("parallel_tool_calls should be removed with empty tools: %s", seenBody)
+	}
+	promptCacheKey := gjson.GetBytes(seenBody, "prompt_cache_key").String()
+	if promptCacheKey == "" {
+		t.Fatalf("prompt_cache_key is empty; body=%s", seenBody)
+	}
+	if got := seenHeader.Get("Session_id"); got != promptCacheKey {
+		t.Fatalf("Session_id = %q, want prompt_cache_key %q; headers=%#v body=%s", got, promptCacheKey, seenHeader, seenBody)
+	}
+}
+
+func TestProviderConnectivityTestCodexAllowsHeaderOnlyAuthorization(t *testing.T) {
+	var seenAuthorization string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuthorization = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_header_only\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+	}))
+	defer server.Close()
+
+	baseURL := server.URL
+	h := &Handler{cfg: &config.Config{}}
+	response, status, errTest := h.performProviderConnectivityTest(context.Background(), providerConnectivityTestRequest{
+		Provider: "codex",
+		Model:    "gpt-header-only",
+		BaseURL:  &baseURL,
+		Header: map[string]string{
+			"Authorization": "Bearer header-token",
+		},
+	})
+	if errTest != nil || status != http.StatusOK || response.StatusCode != http.StatusOK {
+		t.Fatalf("response=%#v status=%d err=%v", response, status, errTest)
+	}
+	if seenAuthorization != "Bearer header-token" {
+		t.Fatalf("Authorization = %q, want header-only credential", seenAuthorization)
+	}
+}
+
+func TestCodexConnectivityAuthUnsavedFalseOverridesSavedImageGenSetting(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	selected := &coreauth.Auth{
+		ID:       "codex:saved-disabled-imagegen",
+		Provider: "codex",
+		Attributes: map[string]string{
+			coreauth.AttributeAPIKey: "selected-key",
+			"base_url":               "https://relay.example/v1",
+			"config_index":           "0",
+			coreauth.AttributeCodexDisableImageGeneration: "true",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), selected); errRegister != nil {
+		t.Fatalf("register selected auth: %v", errRegister)
+	}
+
+	h := &Handler{
+		cfg: &config.Config{CodexKey: []config.CodexKey{{
+			APIKey:                 "selected-key",
+			BaseURL:                "https://relay.example/v1",
+			DisableImageGeneration: true,
+		}}},
+		authManager: manager,
+	}
+	disableImageGeneration := false
+	auth, cfg, errAuth := h.codexConnectivityAuth(providerConnectivityTestRequest{
+		AuthIndex:              selected.EnsureIndex(),
+		DisableImageGeneration: &disableImageGeneration,
+	})
+	if errAuth != nil {
+		t.Fatalf("codexConnectivityAuth() error = %v", errAuth)
+	}
+	if _, exists := auth.Attributes[coreauth.AttributeCodexDisableImageGeneration]; exists {
+		t.Fatalf("unsaved false override left disable attribute: %#v", auth.Attributes)
+	}
+	if len(cfg.CodexKey) != 1 || cfg.CodexKey[0].DisableImageGeneration {
+		t.Fatalf("unsaved false override did not update test config: %#v", cfg.CodexKey)
+	}
+}
+
+func TestProviderConnectivityTestCodexExplicitAPIKeyOverridesSavedAuthorizationHeader(t *testing.T) {
+	var seenAuthorization string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuthorization = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_explicit_key\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+	}))
+	defer server.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	selected := &coreauth.Auth{
+		ID:       "codex:saved-header",
+		Provider: "codex",
+		Attributes: map[string]string{
+			coreauth.AttributeAPIKey: "saved-key",
+			"base_url":               server.URL,
+			"header:Authorization":   "Bearer stale-header",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), selected); errRegister != nil {
+		t.Fatalf("register selected auth: %v", errRegister)
+	}
+
+	cfg := &config.Config{CodexKey: []config.CodexKey{{
+		APIKey:  "saved-key",
+		BaseURL: server.URL,
+		Headers: map[string]string{"Authorization": "Bearer stale-config-header"},
+	}}}
+	manager.SetConfig(cfg)
+	h := &Handler{cfg: cfg, authManager: manager}
+	explicitKey := "new-key"
+	response, status, errTest := h.performProviderConnectivityTest(context.Background(), providerConnectivityTestRequest{
+		Provider:  "codex",
+		AuthIndex: selected.EnsureIndex(),
+		Model:     "gpt-explicit-key",
+		APIKey:    &explicitKey,
+		Header: map[string]string{
+			"Authorization": "Bearer stale-form-header",
+		},
+	})
+	if errTest != nil || status != http.StatusOK || response.StatusCode != http.StatusOK {
+		t.Fatalf("response=%#v status=%d err=%v", response, status, errTest)
+	}
+	if seenAuthorization != "Bearer new-key" {
+		t.Fatalf("Authorization = %q, want explicit API key", seenAuthorization)
+	}
+}

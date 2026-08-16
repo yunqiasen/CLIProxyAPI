@@ -165,6 +165,7 @@ codex-api-key:
       - api-key: sk-codex-01
       - api-key: sk-codex-02
     websockets: true               # Codex 共享选项
+    disable-image-generation: true # 对不接受 ImageGen 工具的中转站开启
 
 claude-api-key:
   - name: claude-production
@@ -176,6 +177,7 @@ claude-api-key:
 ```
 
 `name` 是写入结构化请求日志的 Provider 标签。Provider 共享字段包括 `base-url`、`prefix`、`priority`、`proxy-url`、模型、排除模型、请求头、冷却设置和协议专属选项。每个 `api-key-entries` 项只拥有 `api-key`，并可覆盖 `priority` 和 `proxy-url`。省略覆盖值时继承 Provider 配置；显式 `priority: 0` 会覆盖非零默认值；Key 级代理为空时继承 Provider 代理。
+如果 Codex 中转站拒绝 `image_generation` 与 `image_gen.imagegen` 同时出现，在该供应商上设置 `disable-image-generation: true`。管理面板里的 Codex 测试现在也经过 CPA 执行器，并在发往上游前使用同一开关；其他 Codex 供应商和专用图片接口保持原有行为。
 
 旧配置 `- api-key: sk-old` 保持兼容，历史 Auth ID 也保持不变。只要 `api-key-entries` 至少包含一个非空 Key，分组项就优先生效；空项会被忽略；顶层旧 `api-key` 仍保留在配置中，但不参与执行。
 

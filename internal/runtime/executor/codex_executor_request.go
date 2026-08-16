@@ -313,6 +313,7 @@ func applyCodexDirectImageHeaders(r *http.Request, auth *cliproxyauth.Auth, toke
 }
 
 func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config, ginHeaders http.Header) {
+	generatedSessionID := codexSessionHeaderValue(r.Header)
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+token)
 
@@ -359,6 +360,9 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	if generatedSessionID != "" {
+		setHeaderCasePreserved(r.Header, "Session_id", generatedSessionID)
+	}
 	applyCodexCloakingHeaders(r.Header, cfg)
 }
 
@@ -389,6 +393,29 @@ func isCodexFreePlanAuth(auth *cliproxyauth.Auth) bool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(auth.Attributes["plan_type"]), "free")
+}
+
+func codexFunctionToolName(tool gjson.Result) string {
+	name := strings.TrimSpace(tool.Get("name").String())
+	if name == "" {
+		name = strings.TrimSpace(tool.Get("function.name").String())
+	}
+	return strings.ToLower(name)
+}
+
+func isCodexImageGenerationFunctionReference(tool gjson.Result) bool {
+	if !strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), "function") {
+		return false
+	}
+	name := codexFunctionToolName(tool)
+	if name == "image_gen.imagegen" {
+		return true
+	}
+	namespace := strings.TrimSpace(tool.Get("namespace").String())
+	if namespace == "" {
+		namespace = strings.TrimSpace(tool.Get("function.namespace").String())
+	}
+	return strings.EqualFold(namespace, "image_gen") && name == "imagegen"
 }
 
 func isImageGenerationFunctionTool(tool gjson.Result) bool {
@@ -424,7 +451,196 @@ func isCodexResponsesLiteRequest(body []byte, headers http.Header) bool {
 	return value.Type == gjson.True || value.Type == gjson.String && strings.EqualFold(strings.TrimSpace(value.String()), "true")
 }
 
+func codexAuthDisablesImageGeneration(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Attributes == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeCodexDisableImageGeneration]), "true")
+}
+
+func isCodexImageGenerationToolChoice(choice gjson.Result) bool {
+	if !choice.Exists() {
+		return false
+	}
+	if choice.Type == gjson.String {
+		value := strings.ToLower(strings.TrimSpace(choice.String()))
+		return value == "image_generation" || value == "image_gen.imagegen"
+	}
+	if !choice.IsObject() {
+		return false
+	}
+	choiceType := strings.ToLower(strings.TrimSpace(choice.Get("type").String()))
+	name := strings.ToLower(strings.TrimSpace(choice.Get("name").String()))
+	if name == "" {
+		name = strings.ToLower(strings.TrimSpace(choice.Get("function.name").String()))
+	}
+	if choiceType == "image_generation" {
+		return true
+	}
+	if choiceType == "namespace" && name == "image_gen" {
+		return true
+	}
+	if isCodexImageGenerationFunctionReference(choice) {
+		return true
+	}
+	return false
+}
+
+func stripCodexImageGenerationTool(raw []byte) ([]byte, bool) {
+	tool := gjson.ParseBytes(raw)
+	toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
+	if toolType == "image_generation" || isCodexImageGenerationFunctionReference(tool) {
+		return nil, true
+	}
+
+	if toolType != "namespace" && toolType != "additional_tools" && toolType != "allowed_tools" {
+		return raw, false
+	}
+
+	nested := tool.Get("tools")
+	if !nested.IsArray() {
+		return raw, false
+	}
+	filtered := make([][]byte, 0, len(nested.Array()))
+	changed := false
+	imageNamespace := strings.EqualFold(strings.TrimSpace(tool.Get("name").String()), "image_gen")
+	for _, nestedTool := range nested.Array() {
+		if imageNamespace && strings.EqualFold(strings.TrimSpace(nestedTool.Get("type").String()), "function") && codexFunctionToolName(nestedTool) == "imagegen" {
+			changed = true
+			continue
+		}
+		filteredTool, nestedChanged := stripCodexImageGenerationTool([]byte(nestedTool.Raw))
+		changed = changed || nestedChanged
+		if len(filteredTool) > 0 {
+			filtered = append(filtered, filteredTool)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, true
+	}
+	if !changed {
+		return raw, false
+	}
+	updated, errSet := sjson.SetRaw(tool.Raw, "tools", string(helps.JoinRawJSONArray(filtered)))
+	if errSet != nil {
+		return raw, false
+	}
+	return []byte(updated), true
+}
+
+func stripCodexImageGenerationToolsAtPath(body []byte, path string) []byte {
+	tools := gjson.GetBytes(body, path)
+	if !tools.Exists() || !tools.IsArray() {
+		return body
+	}
+	filtered := make([][]byte, 0, len(tools.Array()))
+	changed := false
+	for _, tool := range tools.Array() {
+		filteredTool, toolChanged := stripCodexImageGenerationTool([]byte(tool.Raw))
+		changed = changed || toolChanged
+		if len(filteredTool) > 0 {
+			filtered = append(filtered, filteredTool)
+		}
+	}
+	if !changed {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, path, helps.JoinRawJSONArray(filtered))
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
+
+func codexRootToolContainerState(body []byte) (exists bool, hasTools bool) {
+	for _, path := range []string{"tools", "additional_tools"} {
+		tools := gjson.GetBytes(body, path)
+		if !tools.Exists() || !tools.IsArray() {
+			continue
+		}
+		exists = true
+		if len(tools.Array()) > 0 {
+			hasTools = true
+		}
+	}
+	return exists, hasTools
+}
+
+func codexToolContainerState(body []byte) (exists bool, hasTools bool) {
+	inspect := func(path string) {
+		tools := gjson.GetBytes(body, path)
+		if !tools.Exists() || !tools.IsArray() {
+			return
+		}
+		exists = true
+		if len(tools.Array()) > 0 {
+			hasTools = true
+		}
+	}
+	inspect("tools")
+	inspect("additional_tools")
+	input := gjson.GetBytes(body, "input")
+	if input.IsArray() {
+		for index := range input.Array() {
+			inspect(fmt.Sprintf("input.%d.tools", index))
+			inspect(fmt.Sprintf("input.%d.additional_tools", index))
+		}
+	}
+	return exists, hasTools
+}
+
+func stripCodexImageGenerationTools(body []byte) []byte {
+	hadRootToolContainers, _ := codexRootToolContainerState(body)
+	hadToolContainers, _ := codexToolContainerState(body)
+	body = stripCodexImageGenerationToolsAtPath(body, "tools")
+	body = stripCodexImageGenerationToolsAtPath(body, "additional_tools")
+
+	input := gjson.GetBytes(body, "input")
+	if input.IsArray() {
+		for index := range input.Array() {
+			body = stripCodexImageGenerationToolsAtPath(body, fmt.Sprintf("input.%d.tools", index))
+			body = stripCodexImageGenerationToolsAtPath(body, fmt.Sprintf("input.%d.additional_tools", index))
+		}
+	}
+
+	choice := gjson.GetBytes(body, "tool_choice")
+	if isCodexImageGenerationToolChoice(choice) {
+		if updated, errDelete := sjson.DeleteBytes(body, "tool_choice"); errDelete == nil {
+			body = updated
+		}
+	} else if strings.EqualFold(strings.TrimSpace(choice.Get("type").String()), "allowed_tools") {
+		allowedTools := choice.Get("tools")
+		if allowedTools.IsArray() {
+			filtered := make([][]byte, 0, len(allowedTools.Array()))
+			for _, allowedTool := range allowedTools.Array() {
+				filteredTool, _ := stripCodexImageGenerationTool([]byte(allowedTool.Raw))
+				if len(filteredTool) > 0 {
+					filtered = append(filtered, filteredTool)
+				}
+			}
+			if len(filtered) == 0 {
+				if updated, errDelete := sjson.DeleteBytes(body, "tool_choice"); errDelete == nil {
+					body = updated
+				}
+			} else if updated, errSet := sjson.SetRawBytes(body, "tool_choice.tools", helps.JoinRawJSONArray(filtered)); errSet == nil {
+				body = updated
+			}
+		}
+	}
+	_, hasRootTools := codexRootToolContainerState(body)
+	_, hasTools := codexToolContainerState(body)
+	if (hadRootToolContainers && !hasRootTools) || (!hadRootToolContainers && hadToolContainers && !hasTools) {
+		if updated, errDelete := sjson.DeleteBytes(body, "tool_choice"); errDelete == nil {
+			body = updated
+		}
+	}
+	return normalizeCodexParallelToolCallsForTools(body)
+}
+
 func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth, headers http.Header) []byte {
+	if codexAuthDisablesImageGeneration(auth) {
+		return stripCodexImageGenerationTools(body)
+	}
 	if isCodexResponsesLiteRequest(body, headers) {
 		return body
 	}
@@ -462,8 +678,7 @@ func normalizeCodexParallelToolCallsForTools(body []byte) []byte {
 		return body
 	}
 
-	tools := gjson.GetBytes(body, "tools")
-	hasTools := tools.Exists() && tools.IsArray() && len(tools.Array()) > 0
+	_, hasTools := codexToolContainerState(body)
 	if hasTools {
 		return body
 	}

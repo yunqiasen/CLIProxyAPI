@@ -68,6 +68,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	if headers == nil {
 		headers = http.Header{}
 	}
+	generatedSessionID := codexSessionHeaderValue(headers)
 	if strings.TrimSpace(token) != "" {
 		headers.Set("Authorization", "Bearer "+token)
 	}
@@ -124,6 +125,9 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
+	if generatedSessionID != "" {
+		setCodexSessionHeaderCasePreserved(headers, "session_id", generatedSessionID)
+	}
 	applyCodexCloakingHeaders(headers, cfg)
 
 	return headers

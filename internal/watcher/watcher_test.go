@@ -1833,3 +1833,25 @@ func TestScheduleProcessEventsStopsOnContextDone(t *testing.T) {
 func hexString(data []byte) string {
 	return strings.ToLower(fmt.Sprintf("%x", data))
 }
+
+func TestPrepareAuthUpdatesCodexDisableImageGenerationTrueToFalseRemovesAttribute(t *testing.T) {
+	initialConfig := &config.Config{CodexKey: []config.CodexKey{{
+		Name:                   "relay",
+		APIKey:                 "key",
+		BaseURL:                "https://relay.example/v1",
+		DisableImageGeneration: true,
+	}}}
+	updatedConfig := initialConfig.CloneForRuntime()
+	updatedConfig.CodexKey[0].DisableImageGeneration = false
+
+	initialAuths := snapshotCoreAuths(initialConfig, t.TempDir(), nil)
+	updatedAuths := snapshotCoreAuths(updatedConfig, t.TempDir(), nil)
+	w := &Watcher{currentAuths: authSliceToMap(initialAuths), authQueue: make(chan AuthUpdate, 1)}
+	updates := w.prepareAuthUpdatesLocked(updatedAuths, false)
+	if len(updates) != 1 || updates[0].Action != AuthUpdateActionModify || updates[0].Auth == nil {
+		t.Fatalf("updates = %#v, want one modify", updates)
+	}
+	if _, exists := updates[0].Auth.Attributes[coreauth.AttributeCodexDisableImageGeneration]; exists {
+		t.Fatalf("disable image generation attribute survived true to false reload: %#v", updates[0].Auth.Attributes)
+	}
+}

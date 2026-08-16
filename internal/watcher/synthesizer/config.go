@@ -244,6 +244,9 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 			if provider == "codex" && entry.AlphaSearch {
 				attrs[coreauth.AttributeCodexAlphaSearch] = "true"
 			}
+			if provider == "codex" && entry.DisableImageGeneration {
+				attrs[coreauth.AttributeCodexDisableImageGeneration] = "true"
+			}
 			if hash := diff.ComputeCodexModelsHash(entry.Models); hash != "" {
 				attrs["models_hash"] = hash
 			}

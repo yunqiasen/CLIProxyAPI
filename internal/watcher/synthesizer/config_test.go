@@ -1233,3 +1233,30 @@ func TestConfigSynthesizer_NativeGroupedKeyRejectsForeignPersistedAuthID(t *test
 		t.Fatalf("foreign native auth ID was accepted: %q", auths[0].ID)
 	}
 }
+
+func TestConfigSynthesizer_CodexKeysPropagatesDisableImageGeneration(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{CodexKey: []config.CodexKey{{
+			Name:                   "relay",
+			APIKeyEntries:          []config.NativeAPIKeyEntry{{APIKey: "key-a"}, {APIKey: "key-b"}},
+			BaseURL:                "https://relay.example/v1",
+			DisableImageGeneration: true,
+		}}},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("Synthesize() error = %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("auth count = %d, want 2", len(auths))
+	}
+	for _, auth := range auths {
+		if auth.Attributes["disable_image_generation"] != "true" {
+			t.Fatalf("auth %q disable_image_generation = %q, want true", auth.ID, auth.Attributes["disable_image_generation"])
+		}
+	}
+}

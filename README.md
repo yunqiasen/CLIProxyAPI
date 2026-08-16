@@ -165,6 +165,7 @@ codex-api-key:
       - api-key: sk-codex-01
       - api-key: sk-codex-02
     websockets: true               # shared Codex option
+    disable-image-generation: true # remove hosted/function ImageGen tools for this relay
 
 claude-api-key:
   - name: claude-production
@@ -176,6 +177,7 @@ claude-api-key:
 ```
 
 `name` is the provider label recorded in structured request logs. Shared provider fields include `base-url`, `prefix`, `priority`, `proxy-url`, models, excluded models, headers, cooling settings, and protocol-specific options. Each `api-key-entries` row owns only `api-key`, and optional `priority` and `proxy-url` overrides. An omitted override inherits the provider value; explicit `priority: 0` overrides a non-zero default. An empty per-key proxy inherits the provider proxy.
+For Codex relays that reject `image_generation` together with `image_gen.imagegen`, set `disable-image-generation: true` on that provider. The management-panel Codex test now runs through the CPA executor and applies the same switch before the upstream request; other Codex providers and dedicated image endpoints keep their existing behavior.
 
 Legacy entries such as `- api-key: sk-old` remain compatible and keep their historical Auth IDs. When at least one non-empty grouped key exists, grouped keys take precedence, empty rows are ignored, and the top-level legacy `api-key` is retained in configuration but is not executed.
 

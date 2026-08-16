@@ -462,6 +462,9 @@ type CodexKey struct {
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 
+	// DisableImageGeneration removes hosted and function-style image generation tools for this provider.
+	DisableImageGeneration bool `yaml:"disable-image-generation,omitempty" json:"disable-image-generation,omitempty"`
+
 	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 }

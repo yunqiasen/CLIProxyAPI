@@ -289,6 +289,30 @@ func TestProviderConnectivityTestCodexUsesExecutorAndUnsavedImageGenOverride(t *
 	if got := seenHeader.Get("Session_id"); got != promptCacheKey {
 		t.Fatalf("Session_id = %q, want prompt_cache_key %q; headers=%#v body=%s", got, promptCacheKey, seenHeader, seenBody)
 	}
+	if got := gjson.GetBytes(seenBody, "instructions").String(); got != "You are a test assistant." {
+		t.Fatalf("instructions = %q, want connectivity probe instruction; body=%s", got, seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "stream"); !got.Exists() || !got.Bool() {
+		t.Fatalf("stream = %s, want true; body=%s", got.Raw, seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "store"); !got.Exists() || got.Bool() {
+		t.Fatalf("store = %s, want false; body=%s", got.Raw, seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "max_output_tokens").Int(); got != 256 {
+		t.Fatalf("max_output_tokens = %d, want 256; body=%s", got, seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "include.0").String(); got != "reasoning.encrypted_content" {
+		t.Fatalf("include[0] = %q, want reasoning.encrypted_content; body=%s", got, seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "client_metadata.session_id").String(); got == "" {
+		t.Fatalf("client_metadata.session_id is empty; body=%s", seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "client_metadata.thread_id").String(); got == "" {
+		t.Fatalf("client_metadata.thread_id is empty; body=%s", seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "client_metadata.x-codex-window-id").String(); got == "" {
+		t.Fatalf("client_metadata.x-codex-window-id is empty; body=%s", seenBody)
+	}
 }
 
 func TestProviderConnectivityTestCodexAllowsHeaderOnlyAuthorization(t *testing.T) {

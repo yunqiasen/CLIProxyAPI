@@ -974,6 +974,68 @@ func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) 
 	}
 }
 
+func TestCodexWebsocketsExecuteForwardsClientCompatibilityHeadersToHandshake(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	capturedHeaders := make(chan http.Header, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Fatalf("upgrade websocket: %v", errUpgrade)
+		}
+		defer func() { _ = conn.Close() }()
+		capturedHeaders <- r.Header.Clone()
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Fatalf("read upstream websocket message: %v", errRead)
+		}
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-client-headers","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Fatalf("write completed websocket message: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": server.URL,
+		},
+	}
+	clientHeaders := http.Header{}
+	clientHeaders.Set("X-Codex-Window-Id", "window-client")
+	clientHeaders.Set("Thread-Id", "thread-client")
+	clientHeaders.Set("Session-Id", "session-client")
+	clientHeaders.Set("X-Openai-Internal-Codex-Responses-Lite", "true")
+
+	_, errExecute := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol",
+		Payload: []byte(`{"model":"gpt-5.6-sol","input":"hello"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Headers:      clientHeaders,
+	})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+
+	select {
+	case headers := <-capturedHeaders:
+		for key, want := range map[string]string{
+			"X-Codex-Window-Id":                      "window-client",
+			"Thread-Id":                              "thread-client",
+			"Session_id":                             "session-client",
+			"X-Openai-Internal-Codex-Responses-Lite": "true",
+		} {
+			if got := headers.Get(key); got != want {
+				t.Fatalf("handshake %s = %q, want %q; headers=%#v", key, got, want, headers)
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for websocket handshake")
+	}
+}
+
 func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) {
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, nil, "", nil)
 

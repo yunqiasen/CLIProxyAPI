@@ -129,11 +129,29 @@ func (h *Handler) performCodexConnectivityTest(ctx context.Context, body provide
 	}
 	model := resolveCodexConnectivityModel(cfg, auth, requestedModel)
 
+	probeSessionID := uuid.NewString()
+	probeThreadID := uuid.NewString()
+	probeTurnID := uuid.NewString()
+	probeInstallationID := uuid.NewString()
 	payload, errMarshal := json.Marshal(map[string]any{
-		"instructions":        "",
+		"instructions":        "You are a test assistant.",
 		"model":               model,
+		"include":             []string{"reasoning.encrypted_content"},
+		"reasoning":           map[string]any{"effort": "low", "summary": "auto"},
+		"text":                map[string]any{"verbosity": "low"},
+		"tool_choice":         "auto",
 		"parallel_tool_calls": true,
+		"stream":              true,
 		"store":               false,
+		"max_output_tokens":   256,
+		"prompt_cache_key":    probeSessionID,
+		"client_metadata": map[string]string{
+			"session_id":              probeSessionID,
+			"thread_id":               probeThreadID,
+			"turn_id":                 probeTurnID,
+			"x-codex-installation-id": probeInstallationID,
+			"x-codex-window-id":       probeSessionID + ":0",
+		},
 		"input": []map[string]any{{
 			"type": "message",
 			"role": "user",
@@ -158,23 +176,28 @@ func (h *Handler) performCodexConnectivityTest(ctx context.Context, body provide
 
 	headers := connectivityHeaders(body.Header)
 	executor := runtimeexecutor.NewCodexExecutor(cfg)
-	response, errExecute := executor.Execute(ctx, auth, coreexecutor.Request{
+	stream, errExecute := executor.ExecuteStream(ctx, auth, coreexecutor.Request{
 		Model:   model,
 		Payload: payload,
 		Metadata: map[string]any{
-			coreexecutor.DerivedSessionIDMetadataKey: uuid.NewString(),
+			coreexecutor.DerivedSessionIDMetadataKey: probeSessionID,
 		},
 	}, coreexecutor.Options{
 		OriginalRequest: payload,
 		SourceFormat:    sdktranslator.FormatCodex,
 		ResponseFormat:  sdktranslator.FormatCodex,
 		Headers:         headers,
+		Stream:          true,
 		Metadata: map[string]any{
 			coreexecutor.RequestedModelMetadataKey: requestedModel,
 		},
 	})
 	if errExecute != nil {
 		return providerConnectivityErrorResponse(errExecute), http.StatusOK, nil
+	}
+	response, errCollect := collectProviderConnectivityStream(ctx, stream)
+	if errCollect != nil {
+		return providerConnectivityErrorResponse(errCollect), http.StatusOK, nil
 	}
 	return providerConnectivityResponse(response), http.StatusOK, nil
 }
@@ -187,6 +210,27 @@ func connectivityHeaders(values map[string]string) http.Header {
 		}
 	}
 	return headers
+}
+
+func collectProviderConnectivityStream(ctx context.Context, stream *coreexecutor.StreamResult) (coreexecutor.Response, error) {
+	if stream == nil {
+		return coreexecutor.Response{}, fmt.Errorf("connectivity probe returned no stream")
+	}
+	response := coreexecutor.Response{Headers: stream.Headers}
+	for {
+		select {
+		case <-ctx.Done():
+			return response, ctx.Err()
+		case chunk, ok := <-stream.Chunks:
+			if !ok {
+				return response, nil
+			}
+			if chunk.Err != nil {
+				return response, chunk.Err
+			}
+			response.Payload = append(response.Payload, chunk.Payload...)
+		}
+	}
 }
 
 func providerConnectivityResponse(response coreexecutor.Response) providerConnectivityTestResponse {

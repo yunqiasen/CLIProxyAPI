@@ -242,6 +242,46 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FinalizesOpenMess
 	}
 }
 
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_IgnoresEmptyToolCallsWhileStreamingText(t *testing.T) {
+	t.Parallel()
+
+	in := []string{
+		`data: {"id":"resp_empty_tools","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello","tool_calls":[]},"finish_reason":""}]}`,
+		`data: {"id":"resp_empty_tools","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"content":" world","tool_calls":[]},"finish_reason":""}]}`,
+		`data: {"id":"resp_empty_tools","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"content":"","tool_calls":[]},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}
+
+	request := []byte(`{"model":"gpt-5.4"}`)
+	var param any
+	var textDone gjson.Result
+	var completed gjson.Result
+	textDoneCount := 0
+
+	for _, line := range in {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			switch event {
+			case "response.output_text.done":
+				textDoneCount++
+				textDone = data
+			case "response.completed":
+				completed = data
+			}
+		}
+	}
+
+	if textDoneCount != 1 {
+		t.Fatalf("response.output_text.done count = %d, want 1", textDoneCount)
+	}
+	if got := textDone.Get("text").String(); got != "hello world" {
+		t.Fatalf("output_text.done text = %q, want hello world", got)
+	}
+	if got := completed.Get("response.output.0.content.0.text").String(); got != "hello world" {
+		t.Fatalf("response.completed output text = %q, want hello world", got)
+	}
+}
+
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MultipleToolCallsRemainSeparate(t *testing.T) {
 	in := []string{
 		`data: {"id":"resp_test","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_read","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,

@@ -21,8 +21,7 @@ import (
 )
 
 func TestPrepareCodexMultiAgentV2ToolsAtResponsesBoundary(t *testing.T) {
-	t.Parallel()
-
+	// Gin mode is process-global; this setup must stay serial.
 	gin.SetMode(gin.TestMode)
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexOptimizeMultiAgentV2: true}, nil)
 	handler := NewOpenAIResponsesAPIHandler(base)
@@ -179,8 +178,7 @@ func TestResponsesWebsocketPreparesCodexMultiAgentV2Tools(t *testing.T) {
 }
 
 func TestPrepareCodexMultiAgentV2ToolsAtResponsesBoundarySkipsOtherClients(t *testing.T) {
-	t.Parallel()
-
+	// Gin mode is process-global; this setup must stay serial.
 	gin.SetMode(gin.TestMode)
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexOptimizeMultiAgentV2: true}, nil)
 	handler := NewOpenAIResponsesAPIHandler(base)

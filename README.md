@@ -313,7 +313,8 @@ This repository is maintained as a fork of `router-for-me/CLIProxyAPI`.
 - Merge upstream changes into `main` first, review them, then merge the needed work into `CPA-fork`.
 - Create feature branches from `CPA-fork` unless the change is specifically for upstream sync.
 - If you work from a personal GitHub fork, keep `origin` pointed at your fork and use `upstream` for `router-for-me/CLIProxyAPI`.
-- Daily fork work should be pushed to `origin/CPA-fork`; do not push fork-only changes to upstream.
+- When explicitly requested, push daily fork work to `origin/CPA-fork`; keep fork-only changes out of upstream. Local delivery alone does not include a push.
+- Code delivery for this local fork includes verified tests, updated docs, required review, an automatic local commit, rebuilding/updating the local CPA container, and live checks. Use `docker-compose.local.yml`, preserve runtime mounts, and deploy the committed fork code rather than a stock image. See [Local Fork Delivery](docs/local-fork-delivery.md).
 - The forked management UI is maintained in `yunqiasen/Cli-Proxy-API-Management-Center` on the `CPA-UI-fork` branch. Docker deployments of this fork should use the normal `/management.html` flow; the backend defaults to downloading the latest `management.html` release from that fork.
 
 ## Who is with us?

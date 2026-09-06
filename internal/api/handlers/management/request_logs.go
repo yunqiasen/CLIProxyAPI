@@ -777,7 +777,8 @@ func parseRequestLogFile(candidate requestLogCandidate) (parsedRequestLog, error
 	if errRead != nil {
 		return parsedRequestLog{}, errRead
 	}
-	sections := splitRequestLogSections(string(data))
+	logText := string(data)
+	sections := splitRequestLogSections(logText)
 	info := parseKeyValueSection(firstSection(sections, "REQUEST INFO"))
 	headers := parseKeyValueSection(firstSection(sections, "HEADERS"))
 	requestBody := firstSection(sections, "REQUEST BODY")
@@ -792,8 +793,7 @@ func parseRequestLogFile(candidate requestLogCandidate) (parsedRequestLog, error
 	calledTools := enrichCalledTools(extractCalledTools(response), promptMetadata)
 	upstream := extractUpstreamMetadata(sections["API REQUEST"], sections["API RESPONSE"], apiErrors)
 	output := extractResponseText(response, status)
-	errText := extractErrorPreviewText(apiErrors, response, status)
-	errFullText := extractErrorFullText(apiErrors, response, status)
+	errText, errFullText := requestLogResponseErrors(sections, response, status, logText)
 	if strings.TrimSpace(errFullText) == "" {
 		errFullText = errText
 	}
@@ -1398,12 +1398,7 @@ func extractTextFromResponseBody(body string) string {
 func extractTextFromSSE(text string) string {
 	var parts []string
 	var deltaBuilder strings.Builder
-	for _, line := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "data:") {
-			continue
-		}
-		data := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+	for _, data := range requestLogSSEPayloads(text) {
 		if data == "" || data == "[DONE]" {
 			continue
 		}
@@ -1457,17 +1452,9 @@ func extractErrorFromResponseBody(body string) string {
 	if trimmed == "" {
 		return ""
 	}
-	var parts []string
 	if strings.Contains(trimmed, "\ndata:") || strings.HasPrefix(trimmed, "data:") {
-		for _, line := range strings.Split(trimmed, "\n") {
-			line = strings.TrimSpace(line)
-			if !strings.HasPrefix(line, "data:") {
-				continue
-			}
-			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			if data == "" || data == "[DONE]" {
-				continue
-			}
+		var parts []string
+		for _, data := range requestLogSSEPayloads(trimmed) {
 			if message := errorMessageFromJSON(data); message != "" {
 				parts = append(parts, message)
 			}
@@ -1478,23 +1465,11 @@ func extractErrorFromResponseBody(body string) string {
 }
 
 func errorMessageFromJSON(text string) string {
-	var payload any
-	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+	var object map[string]any
+	if json.Unmarshal([]byte(text), &object) != nil {
 		return ""
 	}
-	object, ok := payload.(map[string]any)
-	if !ok {
-		return ""
-	}
-	if errorObject, ok := object["error"].(map[string]any); ok {
-		if message := stringFromAny(errorObject["message"]); message != "" {
-			return message
-		}
-	}
-	if strings.EqualFold(stringFromAny(object["type"]), "error") {
-		return stringFromAny(object["message"])
-	}
-	return ""
+	return requestLogObjectError(object)
 }
 
 func responseDeltaFromJSON(text string) string {
@@ -1518,17 +1493,15 @@ func responseFinalTextFromJSON(text string) string {
 }
 
 func responseSSEFallbackSummary(text string) string {
+	if message := extractErrorFromResponseBody(text); message != "" {
+		return "请求失败：" + message
+	}
 	var toolNames []string
 	var eventTypes []string
 	hasCompleted := false
 	hasEmptyCompleted := false
 	hasData := false
-	for _, line := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "data:") {
-			continue
-		}
-		data := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+	for _, data := range requestLogSSEPayloads(text) {
 		if data == "" || data == "[DONE]" {
 			continue
 		}
@@ -1579,38 +1552,11 @@ func responseJSONFallbackSummary(value any) string {
 }
 
 func toolNamesFromResponseObject(value any) []string {
-	switch typed := value.(type) {
-	case map[string]any:
-		eventType := strings.ToLower(strings.TrimSpace(stringFromAny(typed["type"])))
-		var names []string
-		if isToolResponseType(eventType) || eventType == "response.output_item.added" || eventType == "response.output_item.done" {
-			if name := stringFromAny(typed["name"]); name != "" {
-				names = append(names, name)
-			}
-			if item, ok := typed["item"].(map[string]any); ok {
-				if name := stringFromAny(item["name"]); name != "" {
-					names = append(names, name)
-				}
-				if itemType := strings.ToLower(strings.TrimSpace(stringFromAny(item["type"]))); isToolResponseType(itemType) {
-					if name := stringFromAny(item["name"]); name != "" {
-						names = append(names, name)
-					}
-				}
-			}
-		}
-		for _, key := range []string{"response", "output", "choices"} {
-			names = append(names, toolNamesFromResponseObject(typed[key])...)
-		}
-		return names
-	case []any:
-		var names []string
-		for _, item := range typed {
-			names = append(names, toolNamesFromResponseObject(item)...)
-		}
-		return names
-	default:
-		return nil
+	var names []string
+	for _, tool := range calledToolsFromObject(value) {
+		names = append(names, tool.Name)
 	}
+	return names
 }
 
 func summarizeValues(values []string) string {
@@ -1632,19 +1578,19 @@ func responseDeltaFromObject(object map[string]any) string {
 	}
 	switch eventType {
 	case "response.output_text.delta":
-		return stringFromAny(object["delta"])
+		return responseDeltaText(object["delta"])
 	case "content_block_delta":
 		if deltaObject, ok := object["delta"].(map[string]any); ok {
 			if strings.EqualFold(stringFromAny(deltaObject["type"]), "text_delta") {
-				return stringFromAny(deltaObject["text"])
+				return responseDeltaText(deltaObject["text"])
 			}
 		}
 	case "message_delta", "message.delta":
 		if deltaObject, ok := object["delta"].(map[string]any); ok {
-			if text := contentText(deltaObject["content"]); text != "" {
+			if text := responseDeltaText(deltaObject["content"]); text != "" {
 				return text
 			}
-			return stringFromAny(deltaObject["text"])
+			return responseDeltaText(deltaObject["text"])
 		}
 	}
 	if choices, ok := object["choices"].([]any); ok {
@@ -1655,11 +1601,11 @@ func responseDeltaFromObject(object map[string]any) string {
 				continue
 			}
 			if deltaObject, ok := choiceObject["delta"].(map[string]any); ok {
-				parts = append(parts, contentText(deltaObject["content"]))
+				parts = append(parts, responseDeltaText(deltaObject["content"]))
 			}
-			parts = append(parts, stringFromAny(choiceObject["text"]))
+			parts = append(parts, responseDeltaText(choiceObject["text"]))
 		}
-		return strings.Join(nonEmptyStrings(parts), "")
+		return strings.Join(parts, "")
 	}
 	return ""
 }
@@ -1833,7 +1779,8 @@ func shouldReadTopLevelContent(object map[string]any) bool {
 
 func isToolResponseType(value string) bool {
 	value = strings.ToLower(strings.TrimSpace(value))
-	return strings.Contains(value, "function_call") ||
+	return builtInResponseToolName(value) != "" ||
+		strings.Contains(value, "function_call") ||
 		strings.Contains(value, "tool_call") ||
 		strings.Contains(value, "tool_result") ||
 		strings.Contains(value, "function_call_output") ||
@@ -2167,12 +2114,7 @@ func extractCalledTools(response string) []requestLogToolInfo {
 	}
 
 	if strings.Contains(body, "\ndata:") || strings.HasPrefix(strings.TrimSpace(body), "data:") {
-		for _, line := range strings.Split(body, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if !strings.HasPrefix(trimmed, "data:") {
-				continue
-			}
-			data := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+		for _, data := range requestLogSSEPayloads(body) {
 			if data == "" || data == "[DONE]" {
 				continue
 			}
@@ -2239,20 +2181,31 @@ func calledToolsFromObject(value any) []requestLogToolInfo {
 	case map[string]any:
 		eventType := strings.ToLower(strings.TrimSpace(stringFromAny(typed["type"])))
 		var tools []requestLogToolInfo
-		if isToolResponseType(eventType) || eventType == "response.output_item.added" || eventType == "response.output_item.done" {
-			if name := stringFromAny(typed["name"]); name != "" {
+		if isToolResponseType(eventType) {
+			name := stringFromAny(typed["name"])
+			if name == "" {
+				name = builtInResponseToolName(eventType)
+			}
+			if name != "" {
 				tools = append(tools, requestLogToolInfo{Name: name, Type: eventType})
 			}
-			if item, ok := typed["item"].(map[string]any); ok {
-				itemType := strings.ToLower(strings.TrimSpace(stringFromAny(item["type"])))
-				if isToolResponseType(itemType) || eventType == "response.output_item.added" || eventType == "response.output_item.done" {
-					if name := stringFromAny(item["name"]); name != "" {
-						tools = append(tools, requestLogToolInfo{Name: name, Type: itemType})
-					}
-				}
+		}
+		if function, ok := typed["function"].(map[string]any); ok && eventType == "function" {
+			if name := stringFromAny(function["name"]); name != "" {
+				tools = append(tools, requestLogToolInfo{Name: name, Type: "function_call"})
 			}
 		}
-		for _, key := range []string{"response", "output", "choices"} {
+		if function, ok := typed["function_call"].(map[string]any); ok {
+			if name := stringFromAny(function["name"]); name != "" {
+				tools = append(tools, requestLogToolInfo{Name: name, Type: "function_call"})
+			}
+		}
+		if function, ok := typed["functionCall"].(map[string]any); ok {
+			if name := stringFromAny(function["name"]); name != "" {
+				tools = append(tools, requestLogToolInfo{Name: name, Type: "function_call"})
+			}
+		}
+		for _, key := range []string{"response", "output", "choices", "item", "message", "delta", "tool_calls", "content", "content_block", "candidates", "parts"} {
 			tools = append(tools, calledToolsFromObject(typed[key])...)
 		}
 		return tools

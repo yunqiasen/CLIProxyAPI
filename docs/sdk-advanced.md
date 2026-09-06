@@ -132,6 +132,8 @@ The embedded server calls this automatically for built‑in providers; for custo
 
 ## Testing Tips
 
+For the CPA fork Responses streaming contract and request-log indexing behavior, see [Responses Local Compatibility](responses-local-compatibility.md).
+
 - Enable request logging: Management API GET/PUT `/v0/management/request-log`
 - Toggle debug logs: Management API GET/PUT `/v0/management/debug`
 - Hot reload changes in `config.yaml` and `auths/` are picked up automatically by the watcher

@@ -150,7 +150,12 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 		logger.ReplaceHooks(previousHooks)
 		logger.SetLevel(previousLevel)
 	}()
-	clientAPI := newTestWebRTCAPI(t)
+	// This in-process bridge test must not negotiate over host VPN or container
+	// interfaces. Use the production loopback API for all four test peers.
+	clientAPI, errAPI := newPionAPIWithOptions(config.CodexLiveMediaRelayConfig{}, false, true)
+	if errAPI != nil {
+		t.Fatalf("create loopback WebRTC API: %v", errAPI)
+	}
 	client, errClient := clientAPI.NewPeerConnection(webrtc.Configuration{})
 	if errClient != nil {
 		t.Fatalf("create client PeerConnection: %v", errClient)
@@ -186,6 +191,9 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	})
 
 	clientOffer := completeOffer(t, client)
+	if !offerCandidatesAreLoopback(t, clientOffer) {
+		t.Fatal("client fixture announced a non-loopback candidate")
+	}
 	relayConfig := config.CodexLiveMediaRelayConfig{
 		Enabled:                 true,
 		MaxSessions:             1,
@@ -195,6 +203,8 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	if errRelay != nil {
 		t.Fatalf("create media relay: %v", errRelay)
 	}
+	relay.downstreamAPI = clientAPI
+	relay.upstreamAPI = clientAPI
 	session, relayOffer, errSession := relay.NewSession(context.Background(), clientOffer, mediaSessionRoute{
 		credential: "Voice credential",
 		authIndex:  "auth-index",
@@ -208,6 +218,9 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 			t.Errorf("close media relay session: %v", errClose)
 		}
 	}()
+	if !offerCandidatesAreLoopback(t, relayOffer) {
+		t.Fatal("relay fixture announced a non-loopback candidate")
+	}
 	reloadedRelay, errRelay := newPionMediaRelayWithLimiter(relayConfig, relay.limiter)
 	if errRelay != nil {
 		t.Fatalf("reload media relay: %v", errRelay)
@@ -216,7 +229,7 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 		t.Fatal("reloaded media relay bypassed the shared session capacity")
 	}
 
-	upstreamAPI := newTestWebRTCAPI(t)
+	upstreamAPI := clientAPI
 	upstream, errUpstream := upstreamAPI.NewPeerConnection(webrtc.Configuration{})
 	if errUpstream != nil {
 		t.Fatalf("create upstream PeerConnection: %v", errUpstream)

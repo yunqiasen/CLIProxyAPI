@@ -15,8 +15,22 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 - `CPA-fork` is the team mainline branch for daily development.
 - Land upstream updates in `main` first, review them, then merge the needed changes into `CPA-fork`.
 - Create feature branches from `CPA-fork` unless the work is specifically for upstream sync.
-- Push daily fork work to `origin/CPA-fork`; do not push fork-only work to upstream.
+- When a push is explicitly requested, push daily fork work to `origin/CPA-fork`; keep fork-only work out of upstream. Local delivery does not imply a push.
 - Keep `README.md` and `README_CN.md` aligned when editing workflow docs.
+
+## Local Fork Delivery (Required)
+- This workspace is the CPA fork, not a stock upstream checkout. For code changes, the default delivery is **tests -> documentation -> required review -> local commit -> rebuild the fork image -> update the local CPA container -> live verification**. A source-only or uncommitted result is not a completed code delivery.
+- Carry out the local commit and container update automatically after the checks pass. Ask again only for a real blocker or a conflicting explicit instruction. A current task explicitly marked read-only, no-commit, or no-restart pauses the corresponding step; the user's latest instruction controls that task.
+- Before committing, inspect the complete diff and stage only this task's code, tests, and documentation. Include deliberately added ignored Markdown files explicitly. Preserve unrelated staged/unstaged files and investigation artifacts.
+- Complete every review required by the active workflow. When dual-model review is required, call both the configured frontend model and Claude; record actual outcomes, not old approval files.
+- Run full tests in an isolated worktree when runtime `logs/` permissions interfere with source-tree scans. Keep runtime files and permissions intact; record any narrower primary-workspace check accurately.
+- Apply the verified change to `CPA-fork` in the primary workspace before its delivery commit. Build from that exact committed source and embed the commit in the binary's build metadata.
+- Verify the Docker endpoint and the existing container's Compose labels first. The current local service is `cli-proxy-api`, project `cliproxyapi`, using `docker-compose.local.yml` and `local/cli-proxy-api-cpa-fork:live`. Prefer these verified values over guesses.
+- Use the local fork Compose file explicitly. The default `docker-compose.yml` targets a stock image with an always-pull policy and is not the local fork update path. Rebuild the fork image and recreate only the CPA service; restarting an old image does not apply source changes.
+- Preserve the existing config, credentials, logs, plugins, management UI mount, proxy environment, network, and restart policy. Keep the prior image available for rollback. Avoid `down -v`, data cleanup, or changes to unrelated containers.
+- Before reporting delivery, verify the running image, `X-CPA-COMMIT` against the delivery commit, service/API availability, and the served management panel. Exercise the changed request path when practical. If runtime verification fails, restore the prior working image and investigate.
+- Local commits and local container updates are the default. Git push, GitHub releases, remote image publication, and VPS/remote deployment require a separate explicit request.
+- The exact build, update, verification, and rollback procedure is in [Local Fork Delivery](docs/local-fork-delivery.md). Keep the English and Chinese README workflow summaries aligned.
 
 ## CPA Fork Customizations
 - Management UI source is maintained separately at `/home/div/1_Project_dir/AI/Cli-Proxy-API-Management-Center` on branch `CPA-UI-fork`.

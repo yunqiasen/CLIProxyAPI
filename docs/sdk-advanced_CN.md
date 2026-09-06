@@ -125,6 +125,8 @@ cliproxy.GlobalModelRegistry().RegisterClient(authID, "myprov", models)
 
 ## 测试建议
 
+CPA fork 的 Responses 流式兼容和请求日志统计规则见 [Responses 本地兼容说明](responses-local-compatibility.md)。
+
 - 启用请求日志：管理 API GET/PUT `/v0/management/request-log`
 - 切换调试日志：管理 API GET/PUT `/v0/management/debug`
 - 热更新：`config.yaml` 与 `auths/` 变化会自动被侦测并应用

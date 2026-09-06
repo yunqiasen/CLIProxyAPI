@@ -50,12 +50,21 @@ ROLLBACK_IMAGE=local/cli-proxy-api-cpa-fork:rollback-$(date -u +%Y%m%dT%H%M%SZ)
 OLD_IMAGE=$(docker inspect -f '{{.Image}}' cli-proxy-api)
 docker image tag "$OLD_IMAGE" "$ROLLBACK_IMAGE"
 
-git archive --format=tar "$COMMIT" | docker build \
+git archive --format=tar "$COMMIT" | docker build --network=host \
+  --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg NO_PROXY \
   --build-arg VERSION="CPA-fork-$SHORT_COMMIT" \
   --build-arg COMMIT="$COMMIT" \
   --build-arg BUILD_DATE="$BUILD_DATE" \
   --tag "$IMAGE" -
 ```
+
+The local host uses an existing loopback HTTP(S) proxy for dependency downloads.
+The build-only host network and predefined proxy arguments above make that proxy
+reachable inside the builder. They inherit the shell values; keep credentials
+out of literal commands and avoid adding proxy values to Dockerfile `ENV` lines.
+A direct `go mod download` timed out on this host; the same module URL returned
+HTTP 200 from the builder with the existing proxy and host networking. These
+build flags do not alter the service runtime configuration.
 
 Use the repository Dockerfile and its CGO-enabled build. Verify the installed
 plugins' ABI and runtime-library requirements before changing the toolchain or

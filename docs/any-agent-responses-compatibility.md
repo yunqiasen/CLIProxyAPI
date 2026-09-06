@@ -1,0 +1,190 @@
+# Any and AgentRouter Responses Compatibility
+
+## Scope and status
+
+This repair targets the configured Any `gpt-6-astra` (`cpa-6a`) and
+AgentRouter `gpt-5.6-sol` (`cpa-5.6s`) routes. Other providers sharing an alias
+are not evidence of AgentRouter compatibility. The executors use protocol
+signals, not hard-coded provider names or hostnames.
+
+The comparison baseline is `6a10ebbed5cf4b6b849f888800d4c7bdeaa25aaf`.
+Tests run in an isolated worktree; route-pinned diagnostics use a separate
+loopback service. Local delivery applies the verified changes to `CPA-fork`,
+builds that exact commit, and updates only the local CPA container. Additional
+provider/model review probes and remote publishing are outside this task.
+
+## Findings
+
+1. The pinned baseline rejected actual AgentRouter-generated encrypted reasoning
+   when continued through Any. In this sample, Any also rejected its own earlier
+   reasoning. Removing only rejected reasoning changed the result to a completed
+   response. Model switching alone is therefore not a sufficient retry trigger.
+2. The Codex executor parsed SSE line by line and missed valid multiline terminal
+   events. A trailing `event:` field must also apply to its current SSE frame.
+   These protocol issues are demonstrated by deterministic fixtures, not claimed
+   as framing behavior captured from either live provider.
+3. Structured `no_capacity` / `too_many_requests` errors were classified as 502
+   instead of 429.
+4. Any's configured upstream WebSocket upgrade returned HTTP 404 in the captured
+   test. Its HTTP Responses route worked. The client WebSocket endpoint worked
+   when only Any's upstream `websockets` option was disabled. Keep AgentRouter's
+   existing HTTP setting; do not disable the client WebSocket endpoint.
+5. Live AgentRouter samples can emit a `keepalive` event and can fail with an
+   explicit overloaded-server error after lifecycle events. One single HTTP
+   upstream attempt also emitted more than one `response.created`. Neither is
+   evidence of an extra CPA request; correlate with numbered upstream attempts.
+
+## Repair contract
+
+### Narrow signature recovery
+
+- Successful ordinary requests retain their reasoning history.
+- Recover only structured `invalid_encrypted_content` or
+  `thinking_signature_invalid` rejection, not matching words in free text.
+- HTTP 400/422 rejection or an initial SSE/WebSocket signature error permits
+  one repaired request using the same selected model, endpoint, and credential.
+- Use `error.param` to target an input index when available. Otherwise remove
+  only encrypted reasoning items. Preserve visible messages, function/custom
+  tool call IDs and results, image parts, and other request parameters.
+- Do not mutate the caller's request. Keep both attempts in raw logs.
+- Opaque compaction, a nonempty remote `previous_response_id` in the recovery
+  payload, and history with no remaining portable items are not automatically
+  rewritten. Existing HTTP full-history reconstruction remains responsible for
+  supported incremental client requests.
+- Explicit external `ExecutionLifecycle` management retains its original
+  attempt/lease semantics: no hidden executor signature retry or delayed first
+  lifecycle event.
+
+### Streaming boundaries
+
+- Read bounded complete SSE frames, including multiline `data:`, CRLF,
+  byte-fragmented transport, trailing event fields, final frames at EOF, and
+  legacy independent JSON data lines without separators.
+- Lifecycle events and `keepalive` remain provisional until output is committed.
+  Bootstrap buffering is bounded by 16 frames or 64 KiB; crossing the bound
+  commits the stream and disables recovery. No new network deadlines are added.
+- Reset provisional translation state on recovery, so rejected response IDs and
+  one-time Claude token estimates do not leak into the successful attempt.
+- Any real output event, including tool arguments, commits the attempt. Subsequent
+  failure stays failure; do not restart generation or splice another response.
+- Genuine EOF, malformed/truncated streams, repeated signature rejection, and
+  upstream overload remain failures. Never synthesize `response.completed` to
+  hide them. Existing tool-only completion handling remains intact.
+- Capture response headers before starting the stream goroutine; the retry may
+  replace its local upstream response without racing the initial return.
+
+## Live verification and limits
+
+The private diagnostic configuration pins one credential per provider. The source
+models actually generated the opaque reasoning used in switch tests. The client
+submitted that reasoning unchanged; CPA performed any recovery.
+
+- Four HTTP cases (AgentRouter -> Any, Any -> AgentRouter, and both same-provider
+  continuations) completed with the synthetic history marker preserved.
+- Raw Any captures show 400 -> 200 using identical endpoint and headers, with
+  only encrypted reasoning removed from the retry body.
+- Fresh client WebSocket requests completed in both directions when both upstream
+  routes used HTTP. Any's native upstream WebSocket remains unverified after the
+  observed 404; do not advertise native WebSocket support for this route.
+- The final same-client-WebSocket sequence completed five turns: Any request,
+  Any incremental continuation, switch to AgentRouter with full history,
+  AgentRouter incremental continuation, and switch back to Any with full history.
+  Each completion retained the marker. An earlier run hit AgentRouter overload;
+  that failure remains recorded.
+- An additional sequence intended to test cross-model `previous_response_id`
+  reuse stopped at AgentRouter with HTTP 402: `Budget pool quota has been
+  exhausted`. That last cross-model-incremental step is **not verified**. Further
+  live probes were stopped; no credential rotation or quota changes were made.
+- After the approved TDD extension, an exhausted HTTP 402 billing budget is
+  exposed as one explicit client-WebSocket error after available credential
+  retries finish. Successful failover remains successful; partial output is
+  preserved without replay. Other transient credential/rate-limit/transport
+  errors retain the prior reconnect policy.
+- The public request-log API now consumes the last turn in the client WebSocket
+  timeline when legacy HTTP request/response sections are absent. It retains the
+  client model, actual terminal status, partial output, error reason, and final
+  provider/credential. Parser revision 4 refreshes retained indexed logs without
+  modifying their original bytes.
+- Exact replay of AgentRouter's logged headers/body completed directly. An earlier
+  generic Python probe returned 401, and a custom-User-Agent comparison returned
+  503. Those non-equivalent/transient samples do not establish a bad credential
+  or a definitive header requirement.
+- Tool/image/compaction preservation and malformed framing are deterministic
+  local fixture coverage, not claims that all live provider features were tested.
+
+Private captures and diagnostics are kept outside the repository; do not commit
+credentials, source ciphertext, or full raw request logs.
+
+## Regression commands
+
+Run from the repository root in an isolated worktree:
+
+```sh
+go test ./... -count=1 -timeout=120s
+go test -race ./internal/runtime/executor \
+  -run 'TestCodex|TestHomeCodex' -count=3 -timeout=120s
+go test -race ./internal/runtime/executor/helps \
+  ./sdk/api/handlers/openai ./sdk/cliproxy/auth -count=1 -timeout=120s
+go build -buildvcs=false -o /tmp/cpa-compat-check ./cmd/server
+node test/provider_usage_match_test.mjs
+git diff --check
+```
+
+The build flag above is for diagnostic worktree builds. Delivery must instead
+embed the exact local commit per the local-fork delivery procedure.
+
+The approved TDD tests use actual HTTP/WebSocket endpoints, real executors and
+credential selection, a local external-upstream fixture, and the public indexed
+request-log endpoint. They do not mock CPA internals or query SQLite directly.
+The initial tests reproduced an unexplained WebSocket 1006 close for HTTP 402,
+and a request-log entry with empty model and status 0. Both are now green.
+
+Public contract tests (also run with `-race -count=3`):
+
+- `TestResponsesWebsocketReportsExhaustedBudget` (one/all credentials exhausted)
+- `TestResponsesHTTPKeepsBudgetFailover`
+- `TestResponsesWebsocketKeepsBudgetFailover`
+- `TestResponsesWebsocketKeepsPartialOutputOnBudgetFailure`
+
+Primary executor regression tests:
+
+- `TestCodexResponsesSSEFrameCompatibility`
+- `TestResponsesSSEReaderTrailingEventField`
+- `TestResponsesSSEReaderByteFragments`
+- `TestCodexCapacityEventMapsTo429`
+- `TestCodexCapacityStreamCommitBoundary`
+- `TestCodexSignatureRecoveryPreservesVisibleHistory`
+- `TestCodexSignatureSSERecoveryCommitBoundary`
+- `TestCodexNonstreamSignatureSSERecovery`
+- `TestCodexSignatureRecoveryRetriesOnlyOnce`
+- `TestCodexSignatureRecoveryPreservesManagedAttemptBoundary`
+- `TestCodexWebsocketSignatureRecovery`
+- `TestCodexWebsocketSignatureRecoveryBoundaries`
+- `TestPortableResponsesSignatureRetryPreservesHistory`
+- `TestResponsesSignatureRecoveryCancellation`
+- Existing Home terminal-stream fresh-dispatch regressions
+
+The broader executor `-race` run exposed an Antigravity test cleanup race in
+`TestAntigravityExecute_NoCreditsWithoutConductorFlag`. The same test reproduced
+with `-race -count=10` on the unchanged baseline. Report this independently;
+do not describe the broad race run as passing or delete the old test. The Codex
+retry header race discovered in this change was fixed and specifically re-tested.
+
+## Local delivery
+
+1. Check the complete task diff against this contract and resolve existing review
+   findings. Preserve actual external review outcomes; failed calls are not approval.
+   Follow the user's latest instruction to proceed with local delivery rather than
+   extending this Any/Agent task with additional review-provider probes.
+2. Apply reviewed code/tests/docs to primary `CPA-fork`, preserving unrelated work,
+   and create the local delivery commit.
+3. Back up the local config. Change only Any's `websockets: true` to `false` for
+   this verified route; preserve its credentials, model, alias, and proxy settings.
+   This is a local capability setting, not a global default or a committed secret.
+4. Build the exact-commit fork image, retain the prior image for rollback, and
+   recreate only the verified local CPA Compose service. Preserve every mount,
+   environment setting, network, and restart policy.
+5. Verify `X-CPA-COMMIT`, API and management panel availability, then exercise
+   switched-history HTTP and client WebSocket continuations with route pinning.
+   If verification regresses, restore the previous image and config together.
+6. No push, published release/image, or remote deployment is included.

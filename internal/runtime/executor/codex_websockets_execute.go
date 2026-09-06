@@ -252,6 +252,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
+	observedOutput := false
+	signatureRepairUsed := opts.ExecutionLifecycle != nil
 	for {
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
@@ -283,6 +285,23 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
 		payload = helps.RestoreCodexMultiAgentV2Response(payload, optimizeMultiAgentV2)
 
+		eventType := gjson.GetBytes(payload, "type").String()
+		if !observedOutput && !signatureRepairUsed && (eventType == "error" || eventType == "response.failed") {
+			if repaired, canRetry := helps.PortableResponsesSignatureRetry(upstreamBody, payload); canRetry {
+				signatureRepairUsed = true
+				if errClear := clearCodexReasoningReplayOnWebsocketError(ctx, replayScope, payload); errClear != nil {
+					return resp, errClear
+				}
+				retryBody := buildCodexWebsocketRequestBody(repaired)
+				retryLog := wsReqLog
+				retryLog.Body = retryBody
+				helps.RecordAPIWebsocketRequest(ctx, e.cfg, retryLog)
+				if errRetry := writeCodexWebsocketMessage(sess, conn, retryBody); errRetry != nil {
+					return resp, errRetry
+				}
+				continue
+			}
+		}
 		if wsErr, ok := parseCodexWebsocketError(payload); ok {
 			if sess != nil {
 				e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
@@ -305,7 +324,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}
 
 		payload = normalizeCodexWebsocketCompletion(payload)
-		eventType := gjson.GetBytes(payload, "type").String()
+		eventType = gjson.GetBytes(payload, "type").String()
+		if !helps.ResponsesLifecycleEvent(eventType) {
+			observedOutput = true
+		}
 		switch eventType {
 		case "response.output_item.done":
 			collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)

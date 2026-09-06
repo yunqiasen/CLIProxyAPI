@@ -2424,10 +2424,10 @@ func TestResponsesUpstreamErrorBodyDrivesExposure(t *testing.T) {
 			body:   `{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"too long"}}`,
 			want:   true,
 		},
-		// Credential, quota and transport failures stay silent: the client just
-		// reconnects, and a fresh socket already implies a full context resend.
+		// Transient credential, rate-limit and transport failures stay silent.
+		// Exhausted billing budgets are exposed instead of a bare disconnect.
 		{name: "unauthorized", status: http.StatusUnauthorized, body: "invalid token"},
-		{name: "payment required", status: http.StatusPaymentRequired, body: "insufficient credits"},
+		{name: "payment required", status: http.StatusPaymentRequired, body: "insufficient credits", want: true},
 		{name: "forbidden", status: http.StatusForbidden, body: "forbidden"},
 		{name: "too many requests", status: http.StatusTooManyRequests, body: "usage limit reached"},
 		{name: "request timeout", status: http.StatusRequestTimeout, body: "timeout"},

@@ -42,6 +42,10 @@ the HTTP handler, request-log middleware, and SQLite indexing to verify:
 3. A quota error after output preserves that output, ends with a failure, and
    does not replay the request through another key.
 
+After available credential retries, HTTP 402 billing failures are sent as one
+explicit WebSocket error before closing; they are not converted to a bare
+transport disconnect. Other transient-error reconnect rules remain unchanged.
+
 When WebSocket data and error channels close together, forwarding checks for the
 pending upstream error before synthesizing an EOF error. This preserves the
 existing 401/429 pinned-credential replay decision and transport-close handling.
@@ -58,10 +62,13 @@ existing 401/429 pinned-credential replay decision and transport-close handling.
   use unnumbered sections only for an unambiguous single-attempt log.
 - Keep request totals attributed to the final provider/AuthID. Earlier failed
   attempts remain available in the original raw log.
+- When a WebSocket log has no legacy HTTP request/response sections, index its
+  last client turn from `WEBSOCKET TIMELINE`, including inherited client model,
+  final operation status, partial text, and the final credential's outcome.
 - Preserve spaces and newlines while joining text deltas. Named/custom tools
   and built-in tool-only turns are classified as tool calls, not empty replies;
   tool arguments and internal tool text are excluded from assistant text.
-- Parser revision advances from **2 to 3**. The next request-log sync re-parses
+- Parser revision advances to **4**, including client WebSocket timeline parsing. The next request-log sync re-parses
   retained raw files with the new rules and refreshes their indexed statistics.
   Original raw log bytes are preserved.
 
@@ -96,9 +103,11 @@ audio, bidirectional data, capacity release, and logging remain intact.
 
 ## Scope
 
-Upstream quota, request validation, and encrypted-history requirements remain
-upstream outcomes. This patch preserves conversation history and tool-call/result
-relationships. Historical reasoning-content compatibility is a separate task.
+Upstream quota and genuine generation failures remain upstream outcomes.
+Conversation history and tool-call/result relationships are preserved. The
+[Any and AgentRouter compatibility repair](any-agent-responses-compatibility.md)
+adds bounded, explicit-signature recovery and executor-level SSE framing support;
+its verification and local-delivery gates are documented separately.
 
 Local verification results and review status are recorded in the
 [implementation plan](superpowers/plans/2026-09-05-responses-local-compatibility.md).

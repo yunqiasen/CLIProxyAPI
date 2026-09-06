@@ -170,7 +170,7 @@ func codexTerminalFailureStatus(body []byte) int {
 		return http.StatusForbidden
 	case errorType == "not_found_error", errorCode == "not_found", errorCode == "model_not_found":
 		return http.StatusNotFound
-	case errorType == "rate_limit_error", errorCode == "rate_limit_exceeded":
+	case errorType == "rate_limit_error", errorType == "too_many_requests", errorCode == "rate_limit_exceeded", errorCode == "no_capacity":
 		return http.StatusTooManyRequests
 	default:
 		return http.StatusBadGateway

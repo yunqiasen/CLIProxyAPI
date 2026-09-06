@@ -783,6 +783,18 @@ func parseRequestLogFile(candidate requestLogCandidate) (parsedRequestLog, error
 	headers := parseKeyValueSection(firstSection(sections, "HEADERS"))
 	requestBody := firstSection(sections, "REQUEST BODY")
 	response := firstSection(sections, "RESPONSE")
+	websocketResponse := false
+	if timeline := firstSection(sections, "WEBSOCKET TIMELINE"); timeline != "" {
+		wsRequest, wsResponse := requestLogWebsocketExchange(timeline)
+		if requestBody == "" {
+			requestBody = wsRequest
+		}
+		if response == "" && wsResponse != "" {
+			response = wsResponse
+			websocketResponse = true
+		}
+	}
+
 	apiErrors := sections["API ERROR RESPONSE"]
 
 	status := parseResponseStatus(response)
@@ -793,6 +805,10 @@ func parseRequestLogFile(candidate requestLogCandidate) (parsedRequestLog, error
 	calledTools := enrichCalledTools(extractCalledTools(response), promptMetadata)
 	upstream := extractUpstreamMetadata(sections["API REQUEST"], sections["API RESPONSE"], apiErrors)
 	output := extractResponseText(response, status)
+	if websocketResponse {
+		output = cleanDisplayText(extractTextFromResponseBody(responseBody(response)))
+	}
+
 	errText, errFullText := requestLogResponseErrors(sections, response, status, logText)
 	if strings.TrimSpace(errFullText) == "" {
 		errFullText = errText

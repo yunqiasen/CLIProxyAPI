@@ -19,7 +19,7 @@ import (
 
 const (
 	requestLogDBFilename              = "request_logs.db"
-	requestLogParserRevision          = 3
+	requestLogParserRevision          = 4
 	requestLogFilenameIDSchemaVersion = 1
 )
 

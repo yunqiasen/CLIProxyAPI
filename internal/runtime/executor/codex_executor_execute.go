@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -88,7 +89,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+	requestLog := helps.UpstreamRequestLog{
 		URL:          url,
 		Method:       http.MethodPost,
 		Headers:      httpReq.Header.Clone(),
@@ -99,10 +100,21 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		ProviderName: helps.RequestLogProviderName(auth),
 		AuthType:     authType,
 		AuthValue:    authValue,
-	})
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, requestLog)
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := httpClient.Do(httpReq)
+	signatureRepairUsed := opts.ExecutionLifecycle != nil
+	recordSignatureRetry := helps.ResponsesSignatureRetryRecorder(ctx, e.cfg, requestLog, func(status int, rejection []byte) error {
+		signatureRepairUsed = true
+		return clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, status, rejection)
+	})
+	var httpResp *http.Response
+	if opts.ExecutionLifecycle != nil {
+		httpResp, err = httpClient.Do(httpReq)
+	} else {
+		httpResp, err = helps.DoWithResponsesSignatureRecovery(httpClient, httpReq, recordSignatureRetry)
+	}
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -128,19 +140,62 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	upstreamData := applyCodexIdentityConfuseResponsePayload(data, identityState)
 	helps.AppendAPIResponseChunk(ctx, e.cfg, upstreamData)
 
-	lines := bytes.Split(upstreamData, []byte("\n"))
+	reader := helps.NewResponsesSSEReader(bytes.NewReader(upstreamData), 52_428_800)
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
-	for _, line := range lines {
-		if !bytes.HasPrefix(line, dataTag) {
+	observedOutput := false
+	for {
+		frame, frameErr := reader.Next()
+		if frameErr != nil {
+			if frameErr != io.EOF && errRead == nil {
+				errRead = frameErr
+			}
+			break
+		}
+		if len(frame.Data) == 0 {
 			continue
 		}
-
-		eventData := bytes.TrimSpace(line[5:])
+		eventData := bytes.TrimSpace(frame.Data)
+		if bytes.Equal(eventData, []byte("[DONE]")) {
+			continue
+		}
+		if !json.Valid(eventData) {
+			break
+		}
+		if gjson.GetBytes(eventData, "type").String() == "" && frame.Event != "" {
+			eventData, _ = sjson.SetBytes(eventData, "type", frame.Event)
+		}
 		eventData = helps.RestoreCodexMultiAgentV2Response(eventData, optimizeMultiAgentV2)
 		eventType := gjson.GetBytes(eventData, "type").String()
 
 		if streamErr, terminalBody, ok := codexTerminalFailureErr(eventData); ok {
+			if !observedOutput && !signatureRepairUsed {
+				if repaired, canRetry := helps.PortableResponsesSignatureRetry(upstreamBody, terminalBody); canRetry {
+					retry := helps.CloneResponsesRetryRequest(httpReq, repaired)
+					closeHTTPResponseBody(httpResp, "codex executor: close rejected response body")
+					if errRecord := recordSignatureRetry(nil, terminalBody, retry, repaired); errRecord != nil {
+						return resp, errRecord
+					}
+					next, errRetry := httpClient.Do(retry)
+					if errRetry != nil {
+						return resp, errRetry
+					}
+					httpResp = next
+					helps.RecordAPIResponseMetadata(ctx, e.cfg, next.StatusCode, next.Header.Clone())
+					data, errRead = io.ReadAll(next.Body)
+					upstreamData = applyCodexIdentityConfuseResponsePayload(data, identityState)
+					helps.AppendAPIResponseChunk(ctx, e.cfg, upstreamData)
+					if next.StatusCode < 200 || next.StatusCode >= 300 {
+						if errRead != nil {
+							return resp, errRead
+						}
+						return resp, newCodexStatusErr(next.StatusCode, upstreamData)
+					}
+					reader = helps.NewResponsesSSEReader(bytes.NewReader(upstreamData), 52_428_800)
+					continue
+				}
+			}
+
 			if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 				return resp, errClearReplay
 			}
@@ -148,6 +203,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			return resp, err
 		}
 
+		if !helps.ResponsesLifecycleEvent(eventType) {
+			observedOutput = true
+		}
 		if eventType == "response.output_item.done" {
 			itemResult := gjson.GetBytes(eventData, "item")
 			if !itemResult.Exists() || itemResult.Type != gjson.JSON {

@@ -1,9 +1,9 @@
 package executor
 
 import (
-	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -92,7 +92,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+	requestLog := helps.UpstreamRequestLog{
 		URL:          url,
 		Method:       http.MethodPost,
 		Headers:      httpReq.Header.Clone(),
@@ -103,11 +103,22 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		ProviderName: helps.RequestLogProviderName(auth),
 		AuthType:     authType,
 		AuthValue:    authValue,
-	})
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, requestLog)
 
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := httpClient.Do(httpReq)
+	signatureRepairUsed := opts.ExecutionLifecycle != nil
+	recordSignatureRetry := helps.ResponsesSignatureRetryRecorder(ctx, e.cfg, requestLog, func(status int, rejection []byte) error {
+		signatureRepairUsed = true
+		return clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, status, rejection)
+	})
+	var httpResp *http.Response
+	if opts.ExecutionLifecycle != nil {
+		httpResp, err = httpClient.Do(httpReq)
+	} else {
+		httpResp, err = helps.DoWithResponsesSignatureRecovery(httpClient, httpReq, recordSignatureRetry)
+	}
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
@@ -131,6 +142,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		err = newCodexStatusErr(httpResp.StatusCode, data)
 		return nil, err
 	}
+	responseHeaders := httpResp.Header.Clone()
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -139,24 +151,85 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
 		}()
-		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 52_428_800) // 50MB
+		reader := helps.NewResponsesSSEReader(httpResp.Body, 52_428_800)
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
-		for scanner.Scan() {
-			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
-			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			translatedLine := bytes.Clone(line)
+		var readErr error
+		var bootstrap helps.ResponsesStreamBootstrap
+		for {
+			frame, errFrame := reader.Next()
+			if errFrame != nil {
+				readErr = errFrame
+				break
+			}
+			helps.AppendAPIResponseChunk(ctx, e.cfg, frame.Raw)
+			translatedLine := bytes.Clone(frame.Raw)
 			terminalSuccess := false
+			eventType := ""
 
-			if bytes.HasPrefix(line, dataTag) {
-				data := bytes.TrimSpace(line[5:])
+			if len(frame.Data) > 0 {
+				data := applyCodexIdentityConfuseResponsePayload(bytes.TrimSpace(frame.Data), identityState)
+				if bytes.Equal(data, []byte("[DONE]")) {
+					continue
+				}
+				if !json.Valid(data) {
+					break
+				}
+				var compact bytes.Buffer
+				_ = json.Compact(&compact, data)
+				data = compact.Bytes()
+				if gjson.GetBytes(data, "type").String() == "" && frame.Event != "" {
+					data, _ = sjson.SetBytes(data, "type", frame.Event)
+				}
 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
-				translatedLine = append([]byte("data: "), data...)
-				eventType := gjson.GetBytes(data, "type").String()
+				translatedLine = append(append([]byte("data: "), data...), '\n', '\n')
+				eventType = gjson.GetBytes(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErr(data); ok {
+					if !bootstrap.Committed() && !signatureRepairUsed {
+						if repaired, canRetry := helps.PortableResponsesSignatureRetry(upstreamBody, terminalBody); canRetry {
+							retry := helps.CloneResponsesRetryRequest(httpReq, repaired)
+							closeHTTPResponseBody(httpResp, "codex executor: close rejected response body")
+							errRetry := recordSignatureRetry(nil, terminalBody, retry, repaired)
+							var next *http.Response
+							if errRetry == nil {
+								next, errRetry = httpClient.Do(retry)
+							}
+							if errRetry != nil {
+								helps.RecordAPIResponseError(ctx, e.cfg, errRetry)
+								reporter.PublishFailure(ctx, errRetry)
+								select {
+								case out <- cliproxyexecutor.StreamChunk{Err: errRetry}:
+								case <-ctx.Done():
+								}
+								return
+							}
+							httpResp = next
+							helps.RecordAPIResponseMetadata(ctx, e.cfg, next.StatusCode, next.Header.Clone())
+							if next.StatusCode >= 200 && next.StatusCode < 300 {
+								reader = helps.NewResponsesSSEReader(next.Body, 52_428_800)
+								bootstrap.Reset()
+								param = nil
+								claudeInputTokens = helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
+								continue
+							}
+							rejected, errRead := io.ReadAll(next.Body)
+							helps.AppendAPIResponseChunk(ctx, e.cfg, rejected)
+							if errRead != nil {
+								helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+								reporter.PublishFailure(ctx, errRead)
+								select {
+								case out <- cliproxyexecutor.StreamChunk{Err: errRead}:
+								case <-ctx.Done():
+								}
+								return
+							}
+							streamErr = newCodexStatusErr(next.StatusCode, rejected)
+							terminalBody = rejected
+						}
+					}
+
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 						reporter.PublishFailure(ctx, errClearReplay)
@@ -187,12 +260,17 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					if eventType == "response.completed" {
 						cacheCodexReasoningReplayFromCompleted(replayScope, data)
 					}
-					translatedLine = append([]byte("data: "), data...)
+					translatedLine = append(append([]byte("data: "), data...), '\n', '\n')
 				}
 			}
 
 			translatedLine = applyCodexIdentityExposeResponsePayload(translatedLine, identityState)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
+			bootstrapEvent := eventType
+			if opts.ExecutionLifecycle != nil {
+				bootstrapEvent = "managed_execution"
+			}
+			chunks = bootstrap.Push(bootstrapEvent, chunks)
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -204,7 +282,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				return
 			}
 		}
-		if errScan := scanner.Err(); errScan != nil {
+		if errScan := readErr; errScan != nil && errScan != io.EOF {
 			if ctx.Err() != nil {
 				return
 			}
@@ -218,5 +296,5 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		case <-ctx.Done():
 		}
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+	return &cliproxyexecutor.StreamResult{Headers: responseHeaders, Chunks: out}, nil
 }

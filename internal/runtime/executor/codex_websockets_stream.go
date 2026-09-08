@@ -427,7 +427,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				bootstrapEvent = "managed_execution"
 			}
 			if cliproxyexecutor.DownstreamWebsocket(ctx) {
-				for _, buffered := range bootstrap.Push(bootstrapEvent, [][]byte{clientPayload}) {
+				for _, buffered := range bootstrap.Push(bootstrapEvent, payload, [][]byte{clientPayload}) {
 					if !send(cliproxyexecutor.StreamChunk{Payload: buffered}) {
 						terminateReason = "context_done"
 						terminateErr = ctx.Err()
@@ -448,7 +448,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			clientPayload = applyCodexIdentityExposeResponsePayload(payload, identityState)
 			line := encodeCodexWebsocketAsSSE(clientPayload)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, clientBody, line, &param, claudeInputTokens)
-			chunks = bootstrap.Push(bootstrapEvent, chunks)
+			chunks = bootstrap.Push(bootstrapEvent, payload, chunks)
 			for i := range chunks {
 				if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
 					terminateReason = "context_done"

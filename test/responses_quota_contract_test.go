@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -85,17 +86,34 @@ type responsesQuotaFixture struct {
 	model  string
 }
 
-func newResponsesQuotaFixture(t *testing.T, upstreamHandler http.Handler, keys []string) *responsesQuotaFixture {
+func newResponsesQuotaFixture(t *testing.T, upstreamHandler http.Handler, keys []string, configure ...func(*config.Config)) *responsesQuotaFixture {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	upstream := httptest.NewServer(upstreamHandler)
 	t.Cleanup(upstream.Close)
 	cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}, RequestLogRetentionDays: 7}
+	for _, apply := range configure {
+		apply(cfg)
+	}
+	if len(cfg.CodexKey) == 0 {
+		cfg.CodexKey = []config.CodexKey{{}}
+	}
+	entry := &cfg.CodexKey[0]
+	entry.Name, entry.BaseURL = "FixtureRelay", upstream.URL
+	for _, key := range keys {
+		entry.APIKeyEntries = append(entry.APIKeyEntries, config.NativeAPIKeyEntry{APIKey: "fixture-" + key})
+	}
+	auths, err := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{
+		Config: cfg, Now: time.Now(), IDGenerator: synthesizer.NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
 	manager.RegisterExecutor(executor.NewCodexExecutor(cfg))
 	model := t.Name() + "-model"
-	for _, key := range keys {
-		auth := &coreauth.Auth{ID: t.Name() + "-" + key, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "fixture-" + key, "base_url": upstream.URL, "provider_name": "FixtureRelay"}}
+	for i, auth := range auths {
+		auth.ID = t.Name() + "-" + keys[i]
 		if _, err := manager.Register(context.Background(), auth); err != nil {
 			t.Fatal(err)
 		}

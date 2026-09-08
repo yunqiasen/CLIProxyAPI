@@ -325,7 +325,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 		payload = normalizeCodexWebsocketCompletion(payload)
 		eventType = gjson.GetBytes(payload, "type").String()
-		if !helps.ResponsesLifecycleEvent(eventType) {
+		if !helps.ResponsesProvisionalEvent(eventType, payload) {
 			observedOutput = true
 		}
 		switch eventType {

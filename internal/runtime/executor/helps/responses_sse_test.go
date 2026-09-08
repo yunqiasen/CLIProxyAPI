@@ -49,16 +49,16 @@ func TestResponsesSSEReader(t *testing.T) {
 
 func TestResponsesBootstrapBoundAndCommit(t *testing.T) {
 	var b ResponsesStreamBootstrap
-	if got := b.Push("response.created", [][]byte{[]byte("created")}); len(got) != 0 || b.Committed() {
+	if got := b.Push("response.created", nil, [][]byte{[]byte("created")}); len(got) != 0 || b.Committed() {
 		t.Fatal("handshake committed immediately")
 	}
-	got := b.Push("response.output_item.added", [][]byte{[]byte("item")})
+	got := b.Push("response.output_item.added", nil, [][]byte{[]byte("item")})
 	if len(got) != 2 || !b.Committed() {
 		t.Fatal("first output did not flush handshake")
 	}
 	b.Reset()
 	for i := 0; i < 16; i++ {
-		b.Push("", [][]byte{[]byte(": ping\n\n")})
+		b.Push("", nil, [][]byte{[]byte(": ping\n\n")})
 	}
 	if !b.Committed() {
 		t.Fatal("heartbeat-only prefix remained unbounded")

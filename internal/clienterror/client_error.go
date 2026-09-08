@@ -15,6 +15,9 @@ import (
 // aborts the request before the proxy finishes (context.Canceled).
 const StatusClientClosedRequest = 499
 
+// CodeUpstreamResponseTimeout identifies an opted-in first-output wait failure.
+const CodeUpstreamResponseTimeout = "upstream_response_timeout"
+
 var requestFaultCodes = map[string]struct{}{
 	"cyber_policy":                {},
 	"context_length_exceeded":     {},

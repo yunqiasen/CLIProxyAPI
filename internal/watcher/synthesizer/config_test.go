@@ -1260,3 +1260,37 @@ func TestConfigSynthesizer_CodexKeysPropagatesDisableImageGeneration(t *testing.
 		}
 	}
 }
+
+func TestConfigSynthesizer_FirstOutputTimeoutIsProviderScoped(t *testing.T) {
+	cfg := &config.Config{
+		CodexKey: []config.CodexKey{
+			{Name: "OptedIn", BaseURL: "https://relay.example", ResponsesFirstOutputTimeoutSeconds: 120, APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: "first"}, {APIKey: "second"}}},
+			{Name: "Unconfigured", BaseURL: "https://other.example", APIKey: "third"},
+			{Name: "Disabled", BaseURL: "https://other.example", APIKey: "fourth", ResponsesFirstOutputTimeoutSeconds: -1},
+		},
+		XAIKey: []config.XAIKey{{Name: "OtherProtocol", BaseURL: "https://xai.example", APIKey: "fifth", ResponsesFirstOutputTimeoutSeconds: 120}},
+	}
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{Config: cfg, Now: time.Now(), IDGenerator: NewStableIDGenerator()})
+	if err != nil || len(auths) != 5 {
+		t.Fatalf("synthesize credentials: count=%d err=%v", len(auths), err)
+	}
+	for _, auth := range auths {
+		want := ""
+		if auth.Attributes["provider_name"] == "OptedIn" {
+			want = "120"
+		}
+		if got := auth.Attributes[coreauth.AttributeResponsesFirstOutputTimeoutSeconds]; got != want {
+			t.Fatalf("timeout leaked across provider scope: provider=%s name=%s want=%q got=%q", auth.Provider, auth.Attributes["provider_name"], want, got)
+		}
+	}
+	cfg.CodexKey[0].ResponsesFirstOutputTimeoutSeconds = 0
+	auths, err = NewConfigSynthesizer().Synthesize(&SynthesisContext{Config: cfg, Now: time.Now(), IDGenerator: NewStableIDGenerator()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, auth := range auths {
+		if auth.Attributes[coreauth.AttributeResponsesFirstOutputTimeoutSeconds] != "" {
+			t.Fatal("disabling the setting left a stale timeout on a credential")
+		}
+	}
+}

@@ -292,6 +292,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if o.Websockets != n.Websockets {
 				changes = append(changes, fmt.Sprintf("codex[%d].websockets: %t -> %t", i, o.Websockets, n.Websockets))
 			}
+			if o.ResponsesFirstOutputTimeoutSeconds != n.ResponsesFirstOutputTimeoutSeconds {
+				changes = append(changes, fmt.Sprintf("codex[%d].responses-first-output-timeout-seconds: %d -> %d", i, o.ResponsesFirstOutputTimeoutSeconds, n.ResponsesFirstOutputTimeoutSeconds))
+			}
 			if o.AlphaSearch != n.AlphaSearch {
 				changes = append(changes, fmt.Sprintf("codex[%d].alpha-search: %t -> %t", i, o.AlphaSearch, n.AlphaSearch))
 			}

@@ -365,6 +365,11 @@ nonstream-keepalive-interval: 0
 #     disable-image-generation: false # optional: remove hosted/function ImageGen tools for incompatible relays
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
 #     alpha-search: false # optional: allow this key to serve /v1/alpha/search via base-url + /alpha/search
+#     # Optional HTTP Responses wait before the first real reasoning/text/tool event.
+#     # 0 disables it; opt in only for relays that stall before output (e.g. 120).
+#     # Includes missing headers and empty scaffolding, not an active response deadline.
+#     # Native upstream WebSocket and /responses/compact keep their existing behavior.
+#     responses-first-output-timeout-seconds: 0
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override

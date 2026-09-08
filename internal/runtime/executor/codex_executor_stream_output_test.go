@@ -209,7 +209,7 @@ func TestCodexExecutorExecuteMissingCompletionIsRequestScoped(t *testing.T) {
 	assertRequestScopedTestError(t, err)
 }
 
-func TestCodexExecutorExecuteStreamMissingCompletionIsRequestScoped(t *testing.T) {
+func TestCodexExecutorExecuteStreamMissingCompletionBeforeOutputIsRetryable(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.5\"}}\n\n"))
@@ -242,10 +242,10 @@ func TestCodexExecutorExecuteStreamMissingCompletionIsRequestScoped(t *testing.T
 	if streamErr == nil {
 		t.Fatal("expected missing-completion stream error, got nil")
 	}
-	if got := statusCodeFromTestError(t, streamErr); got != http.StatusRequestTimeout {
-		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusRequestTimeout, streamErr)
+	if got := statusCodeFromTestError(t, streamErr); got != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusBadGateway, streamErr)
 	}
-	assertRequestScopedTestError(t, streamErr)
+	assertNotRequestScopedTestError(t, streamErr)
 }
 
 func TestCodexExecutorExecuteStreamExplicitTerminalFailureIsNotSuccessful(t *testing.T) {
@@ -338,18 +338,25 @@ func TestCodexAutoExecutorHTTPFallbackForwardsSequentialCutoffReasoningSummaryDe
 	}
 }
 
-func TestCodexExecutorTransportFailureBeforeTerminalIsRequestScoped(t *testing.T) {
+func TestCodexExecutorTransportFailureRespectsOutputCommitBoundary(t *testing.T) {
 	tests := []struct {
-		name   string
-		stream bool
+		name    string
+		stream  bool
+		partial bool
+		managed bool
 	}{
 		{name: "non-streaming"},
-		{name: "streaming", stream: true},
+		{name: "streaming before output", stream: true},
+		{name: "streaming after output", stream: true, partial: true},
+		{name: "managed streaming", stream: true, managed: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			created := []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.5\"}}\n\n")
+			if tc.partial {
+				created = append(created, []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")...)
+			}
 			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 				return &http.Response{
 					StatusCode: http.StatusOK,
@@ -366,6 +373,10 @@ func TestCodexExecutorTransportFailureBeforeTerminalIsRequestScoped(t *testing.T
 			}}
 			req := cliproxyexecutor.Request{Model: "gpt-5.5", Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`)}
 			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: tc.stream}
+
+			if tc.managed {
+				opts.ExecutionLifecycle = newTerminalFailureLifecycle()
+			}
 
 			var terminalErr error
 			if tc.stream {
@@ -384,10 +395,19 @@ func TestCodexExecutorTransportFailureBeforeTerminalIsRequestScoped(t *testing.T
 			if terminalErr == nil {
 				t.Fatal("expected transport failure before terminal event")
 			}
-			if got := statusCodeFromTestError(t, terminalErr); got != http.StatusRequestTimeout {
-				t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusRequestTimeout, terminalErr)
+			wantStatus := http.StatusRequestTimeout
+			recoverable := tc.stream && !tc.partial && !tc.managed
+			if recoverable {
+				wantStatus = http.StatusBadGateway
 			}
-			assertRequestScopedTestError(t, terminalErr)
+			if got := statusCodeFromTestError(t, terminalErr); got != wantStatus {
+				t.Fatalf("status code = %d, want %d; err=%v", got, wantStatus, terminalErr)
+			}
+			if recoverable {
+				assertNotRequestScopedTestError(t, terminalErr)
+			} else {
+				assertRequestScopedTestError(t, terminalErr)
+			}
 		})
 	}
 }

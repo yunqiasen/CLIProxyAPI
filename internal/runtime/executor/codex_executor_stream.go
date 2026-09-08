@@ -113,6 +113,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		signatureRepairUsed = true
 		return clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, status, rejection)
 	})
+	attemptCtx, firstOutput := helps.StartResponsesFirstOutputWatch(ctx, auth)
+	httpReq = httpReq.WithContext(attemptCtx)
+	// The stream goroutine owns the watch only after the response is accepted.
+	watchHandedOff := false
+	defer func() {
+		if !watchHandedOff {
+			firstOutput.Close()
+		}
+	}()
 	var httpResp *http.Response
 	if opts.ExecutionLifecycle != nil {
 		httpResp, err = httpClient.Do(httpReq)
@@ -120,6 +129,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		httpResp, err = helps.DoWithResponsesSignatureRecovery(httpClient, httpReq, recordSignatureRetry)
 	}
 	if err != nil {
+		err = firstOutput.Failure(err)
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
@@ -129,7 +139,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
-		if readErr != nil {
+		if readErr = firstOutput.Failure(readErr); readErr != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 			return nil, readErr
 		}
@@ -144,8 +154,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	responseHeaders := httpResp.Header.Clone()
 	out := make(chan cliproxyexecutor.StreamChunk)
+	watchHandedOff = true
 	go func() {
 		defer close(out)
+		defer firstOutput.Close()
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("codex executor: close response body error: %v", errClose)
@@ -196,7 +208,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 							if errRetry == nil {
 								next, errRetry = httpClient.Do(retry)
 							}
-							if errRetry != nil {
+							if errRetry = firstOutput.Failure(errRetry); errRetry != nil {
+								closeHTTPResponseBody(next, "codex executor: close timed-out retry response")
 								helps.RecordAPIResponseError(ctx, e.cfg, errRetry)
 								reporter.PublishFailure(ctx, errRetry)
 								select {
@@ -216,7 +229,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 							}
 							rejected, errRead := io.ReadAll(next.Body)
 							helps.AppendAPIResponseChunk(ctx, e.cfg, rejected)
-							if errRead != nil {
+							if errRead = firstOutput.Failure(errRead); errRead != nil {
 								helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 								reporter.PublishFailure(ctx, errRead)
 								select {
@@ -247,6 +260,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 					return
 				}
+				if errFirstOutput := firstOutput.Observe(eventType, data); errFirstOutput != nil {
+					readErr = errFirstOutput
+					break
+				}
 				switch eventType {
 				case "response.output_item.done":
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
@@ -270,7 +287,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			if opts.ExecutionLifecycle != nil {
 				bootstrapEvent = "managed_execution"
 			}
-			chunks = bootstrap.Push(bootstrapEvent, chunks)
+			chunks = bootstrap.Push(bootstrapEvent, frame.Data, chunks)
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -288,7 +305,21 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 		}
+		if errFirstOutput := firstOutput.Failure(nil); errFirstOutput != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errFirstOutput)
+			reporter.PublishFailure(ctx, errFirstOutput)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errFirstOutput}:
+			case <-ctx.Done():
+			}
+			return
+		}
 		streamErr := newCodexIncompleteStreamError()
+		if !bootstrap.Committed() && opts.ExecutionLifecycle == nil {
+			// A relay EOF before output is an upstream fault, not invalid client input.
+			// Let the existing bounded credential policy try the next available key.
+			streamErr.beforeOutput = true
+		}
 		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 		reporter.PublishFailure(ctx, streamErr)
 		select {

@@ -208,8 +208,8 @@ func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 // shouldExposeResponsesUpstreamError reports whether a terminal upstream error
 // must reach the downstream client.
 //
-// Expose request-shape failures and exhausted billing budgets after the available
-// credential retries finish. Reconnecting cannot replenish an exhausted budget.
+// Expose request-shape failures, exhausted billing budgets, and opted-in first-output
+// timeouts after credential retries finish. Preserve the explicit local timeout reason.
 // Transient credential, rate-limit and transport failures retain reconnect behavior;
 // a fresh connection implies a full context resend.
 func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
@@ -217,7 +217,9 @@ func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 		return false
 	}
 	status := responsesWebsocketErrorStatus(errMsg)
-	return status == http.StatusPaymentRequired || clienterror.IsRequestFault(status, errMsg.Error)
+	firstOutputTimeout := status == http.StatusGatewayTimeout && errMsg.Error != nil &&
+		gjson.Get(errMsg.Error.Error(), "error.code").String() == clienterror.CodeUpstreamResponseTimeout
+	return firstOutputTimeout || status == http.StatusPaymentRequired || clienterror.IsRequestFault(status, errMsg.Error)
 }
 
 func writeResponsesWebsocketTerminalError(

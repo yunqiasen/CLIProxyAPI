@@ -109,6 +109,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		signatureRepairUsed = true
 		return clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, status, rejection)
 	})
+	attemptCtx, firstOutput := helps.StartResponsesFirstOutputWatch(ctx, auth)
+	defer firstOutput.Close()
+	httpReq = httpReq.WithContext(attemptCtx)
 	var httpResp *http.Response
 	if opts.ExecutionLifecycle != nil {
 		httpResp, err = httpClient.Do(httpReq)
@@ -116,6 +119,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		httpResp, err = helps.DoWithResponsesSignatureRecovery(httpClient, httpReq, recordSignatureRetry)
 	}
 	if err != nil {
+		err = firstOutput.Failure(err)
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
@@ -126,7 +130,11 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, readErr := io.ReadAll(httpResp.Body)
+		if readErr = firstOutput.Failure(readErr); readErr != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
+			return resp, readErr
+		}
 		b = applyCodexIdentityConfuseResponsePayload(b, identityState)
 		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, b); errClearReplay != nil {
 			return resp, errClearReplay
@@ -136,11 +144,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		err = newCodexStatusErr(httpResp.StatusCode, b)
 		return resp, err
 	}
-	data, errRead := io.ReadAll(httpResp.Body)
-	upstreamData := applyCodexIdentityConfuseResponsePayload(data, identityState)
-	helps.AppendAPIResponseChunk(ctx, e.cfg, upstreamData)
-
-	reader := helps.NewResponsesSSEReader(bytes.NewReader(upstreamData), 52_428_800)
+	// Read frames as they arrive, even for a non-streaming client. Reading the whole
+	// body first would turn the first-output watch into a full-generation deadline.
+	var errRead error
+	reader := helps.NewResponsesSSEReader(httpResp.Body, 52_428_800)
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
 	observedOutput := false
@@ -152,10 +159,11 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			}
 			break
 		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, applyCodexIdentityConfuseResponsePayload(frame.Raw, identityState))
 		if len(frame.Data) == 0 {
 			continue
 		}
-		eventData := bytes.TrimSpace(frame.Data)
+		eventData := applyCodexIdentityConfuseResponsePayload(bytes.TrimSpace(frame.Data), identityState)
 		if bytes.Equal(eventData, []byte("[DONE]")) {
 			continue
 		}
@@ -178,20 +186,20 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 					}
 					next, errRetry := httpClient.Do(retry)
 					if errRetry != nil {
-						return resp, errRetry
+						return resp, firstOutput.Failure(errRetry)
 					}
 					httpResp = next
 					helps.RecordAPIResponseMetadata(ctx, e.cfg, next.StatusCode, next.Header.Clone())
-					data, errRead = io.ReadAll(next.Body)
-					upstreamData = applyCodexIdentityConfuseResponsePayload(data, identityState)
-					helps.AppendAPIResponseChunk(ctx, e.cfg, upstreamData)
 					if next.StatusCode < 200 || next.StatusCode >= 300 {
-						if errRead != nil {
-							return resp, errRead
+						data, readErr := io.ReadAll(next.Body)
+						upstreamData := applyCodexIdentityConfuseResponsePayload(data, identityState)
+						helps.AppendAPIResponseChunk(ctx, e.cfg, upstreamData)
+						if readErr = firstOutput.Failure(readErr); readErr != nil {
+							return resp, readErr
 						}
 						return resp, newCodexStatusErr(next.StatusCode, upstreamData)
 					}
-					reader = helps.NewResponsesSSEReader(bytes.NewReader(upstreamData), 52_428_800)
+					reader = helps.NewResponsesSSEReader(next.Body, 52_428_800)
 					continue
 				}
 			}
@@ -203,7 +211,11 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			return resp, err
 		}
 
-		if !helps.ResponsesLifecycleEvent(eventType) {
+		if errFirstOutput := firstOutput.Observe(eventType, eventData); errFirstOutput != nil {
+			errRead = errFirstOutput
+			break
+		}
+		if !helps.ResponsesProvisionalEvent(eventType, eventData) {
 			observedOutput = true
 		}
 		if eventType == "response.output_item.done" {
@@ -239,6 +251,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, originalPayload, body, clientCompletedData, &param)
 		resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 		return resp, nil
+	}
+	if errFirstOutput := firstOutput.Failure(nil); errFirstOutput != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errFirstOutput)
+		return resp, errFirstOutput
 	}
 	if errRead != nil {
 		if errCtx := ctx.Err(); errCtx != nil {

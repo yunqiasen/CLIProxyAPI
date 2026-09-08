@@ -1305,21 +1305,22 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
-		Name                   *string                     `json:"name"`
-		APIKeyEntries          *[]config.NativeAPIKeyEntry `json:"api-key-entries"`
-		APIKey                 *string                     `json:"api-key"`
-		Priority               *int                        `json:"priority"`
-		Weight                 json.RawMessage             `json:"weight"`
-		Prefix                 *string                     `json:"prefix"`
-		BaseURL                *string                     `json:"base-url"`
-		Websockets             *bool                       `json:"websockets"`
-		ProxyURL               *string                     `json:"proxy-url"`
-		AlphaSearch            *bool                       `json:"alpha-search"`
-		Models                 *[]config.CodexModel        `json:"models"`
-		Headers                *map[string]string          `json:"headers"`
-		ExcludedModels         *[]string                   `json:"excluded-models"`
-		DisableImageGeneration *bool                       `json:"disable-image-generation"`
-		DisableCooling         *bool                       `json:"disable-cooling"`
+		Name                               *string                     `json:"name"`
+		APIKeyEntries                      *[]config.NativeAPIKeyEntry `json:"api-key-entries"`
+		APIKey                             *string                     `json:"api-key"`
+		Priority                           *int                        `json:"priority"`
+		Weight                             json.RawMessage             `json:"weight"`
+		Prefix                             *string                     `json:"prefix"`
+		BaseURL                            *string                     `json:"base-url"`
+		ResponsesFirstOutputTimeoutSeconds *int                        `json:"responses-first-output-timeout-seconds"`
+		Websockets                         *bool                       `json:"websockets"`
+		ProxyURL                           *string                     `json:"proxy-url"`
+		AlphaSearch                        *bool                       `json:"alpha-search"`
+		Models                             *[]config.CodexModel        `json:"models"`
+		Headers                            *map[string]string          `json:"headers"`
+		ExcludedModels                     *[]string                   `json:"excluded-models"`
+		DisableImageGeneration             *bool                       `json:"disable-image-generation"`
+		DisableCooling                     *bool                       `json:"disable-cooling"`
 	}
 	var body struct {
 		Index *int           `json:"index"`
@@ -1387,6 +1388,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 			return
 		}
 		entry.BaseURL = trimmed
+	}
+	if body.Value.ResponsesFirstOutputTimeoutSeconds != nil {
+		entry.ResponsesFirstOutputTimeoutSeconds = *body.Value.ResponsesFirstOutputTimeoutSeconds
 	}
 	if body.Value.Websockets != nil {
 		entry.Websockets = *body.Value.Websockets

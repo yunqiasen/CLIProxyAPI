@@ -41,6 +41,7 @@ func TestCodexWebsocketSignatureRecovery(t *testing.T) {
 					attempt := calls.Add(1)
 					if attempt == 1 {
 						_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp_rejected"}}`))
+						_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","summary":[],"content":[],"encrypted_content":"gAAAA-fixture-state"}}`))
 						_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status":400,"error":{"code":"invalid_encrypted_content","type":"invalid_request_error","message":"foreign reasoning"}}`))
 						continue
 					}

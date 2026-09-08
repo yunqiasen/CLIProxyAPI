@@ -652,3 +652,12 @@ func TestTrimStrings(t *testing.T) {
 		t.Fatalf("unexpected trimmed strings: %v", out)
 	}
 }
+
+func TestBuildConfigChangeDetails_CodexFirstOutputTimeout(t *testing.T) {
+	oldCfg := &config.Config{CodexKey: []config.CodexKey{{APIKey: "fixture", BaseURL: "https://codex.example"}}}
+	newCfg := &config.Config{CodexKey: []config.CodexKey{{APIKey: "fixture", BaseURL: "https://codex.example", ResponsesFirstOutputTimeoutSeconds: 120}}}
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	if len(changes) != 1 || changes[0] != "codex[0].responses-first-output-timeout-seconds: 0 -> 120" {
+		t.Fatalf("first-output wait update missing from reload details: %v", changes)
+	}
+}

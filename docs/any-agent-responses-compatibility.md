@@ -7,11 +7,15 @@ AgentRouter `gpt-5.6-sol` (`cpa-5.6s`) routes. Other providers sharing an alias
 are not evidence of AgentRouter compatibility. The executors use protocol
 signals, not hard-coded provider names or hostnames.
 
-The comparison baseline is `6a10ebbed5cf4b6b849f888800d4c7bdeaa25aaf`.
+The earlier signature/framing repair used baseline
+`6a10ebbed5cf4b6b849f888800d4c7bdeaa25aaf`. The September 8 stall-recovery diff
+uses fixed baseline `cbf101e4840ec562c1fec6048bcbe9cc9e940ffc`.
 Tests run in an isolated worktree; route-pinned diagnostics use a separate
-loopback service. Local delivery applies the verified changes to `CPA-fork`,
-builds that exact commit, and updates only the local CPA container. Additional
-provider/model review probes and remote publishing are outside this task.
+loopback service. Local delivery applies the reviewed changes to `CPA-fork`,
+commits them locally, and verifies automatic code hot reload with the exact
+`X-CPA-COMMIT` and unchanged container ID. Normal source edits do not recreate
+the container. Additional provider/model probes and remote publication are
+outside this task.
 
 ## Findings
 
@@ -60,20 +64,94 @@ provider/model review probes and remote publishing are outside this task.
 - Read bounded complete SSE frames, including multiline `data:`, CRLF,
   byte-fragmented transport, trailing event fields, final frames at EOF, and
   legacy independent JSON data lines without separators.
-- Lifecycle events and `keepalive` remain provisional until output is committed.
+- Lifecycle events, `keepalive`, and empty `reasoning` item announcements remain
+  provisional until output commits. Opaque `encrypted_content` on an otherwise
+  empty announcement is retained but does not count as actual reasoning output.
   Bootstrap buffering is bounded by 16 frames or 64 KiB; crossing the bound
-  commits the stream and disables recovery. No new network deadlines are added.
+  commits the stream and disables recovery. This memory bound must not disable
+  an opted-in first-output watch when only lifecycle/heartbeat frames arrived.
 - Reset provisional translation state on recovery, so rejected response IDs and
   one-time Claude token estimates do not leak into the successful attempt.
 - Any real output event, including tool arguments, commits the attempt. Subsequent
   failure stays failure; do not restart generation or splice another response.
+- EOF/malformed termination before HTTP streaming output commits is a retryable
+  upstream 502, not a request-scoped 408. The existing credential policy may try
+  a healthy key. Output already committed and externally managed attempts keep
+  their existing ownership/replay boundary. Exhaustion remains failure.
 - Genuine EOF, malformed/truncated streams, repeated signature rejection, and
-  upstream overload remain failures. Never synthesize `response.completed` to
-  hide them. Existing tool-only completion handling remains intact.
+  upstream overload never become a fabricated `response.completed`. Existing
+  tool-only completion handling remains intact.
 - Capture response headers before starting the stream goroutine; the retry may
   replace its local upstream response without racing the initial return.
 
-## Live verification and limits
+## September 8: stalled AgentRouter requests
+
+### Evidence and limits
+
+- In the fixed 10:51:49–11:32:45 sample, `cpa-5.6s` used AgentRouter
+  `gpt-5.6-sol`: 24 requests, 5 completions, 18 explicit overloaded/server errors,
+  and 1 stream-read error. These are sample counts, not provider-wide rates.
+- Both CPA's upstream-side raw logs and downstream packet captures contain
+  `response.failed`. Many failures followed real reasoning/native search work;
+  there was no successful completion for CPA to restore. Visible history and
+  tool relationships were preserved, not transformed into an empty request.
+- A separate last request (`400d4439`, 11:46:59) connected but never received
+  response headers. The preceding client tool had already exited successfully.
+  CPA's stream heartbeat starts too late to bound this wait. Caller cancellation
+  did propagate; the missing control was the upstream first-output wait.
+- Later direct comparison probes returned exhausted-budget 402 or inactive-group
+  403. These are distinct from the earlier overloaded errors and prevented a
+  successful search-on/off comparison. Do not remove native search or ordinary
+  history without evidence, or claim that local recovery fixes provider capacity.
+- AgentRouter and the separate local Agent2API provider are different routes.
+  This repair does not change Agent2API or add other providers as backup aliases.
+
+### Opt-in first-output watch
+
+Set `responses-first-output-timeout-seconds: 120` **inside the existing Any and
+AgentRouter `codex-api-key` entries only**. Preserve their keys, model mappings,
+headers, proxies and other options. Omission/0 disables the watch; no provider
+name or hostname is hard-coded. Configuration load, management GET/PUT/PATCH,
+credential synthesis, and reload diagnostics retain the per-group setting.
+
+- Starts on one selected credential's HTTP Responses attempt, including its
+  existing optional one-shot signature repair. Covers waiting for response
+  headers as well as a prefix of lifecycle/empty reasoning events.
+- Uses a child cancellation context, not a deadline on the entire client request.
+  The original request remains live so normal credential recovery can proceed.
+- On the first real reasoning, text, completed output item, or function/native
+  tool event, stop the timer. A long generation or later pause is not bounded by
+  this setting. Empty scaffolding/heartbeats do not restart the timer.
+- Frame acceptance and expiry are synchronized: an expired attempt does not emit
+  late output, and accepted real output is not subsequently timed out/replayed.
+- A silent attempt returns HTTP 504 with code `upstream_response_timeout`; the
+  existing credential/round/bootstrap retry limits remain in charge. This is a
+  per-attempt bound, not a total request-duration guarantee: a larger credential
+  pool and additional configured retry rounds can increase total waiting time.
+- After available retries finish, HTTP and client WebSocket callers receive the
+  explicit error, not fake completion or an unexplained WebSocket 1006 close.
+  Other transient WebSocket failures keep the existing reconnect policy.
+- Caller cancellation takes precedence and stops the selected upstream promptly;
+  it is not reclassified as a timeout or used to start another credential.
+- Non-streaming clients are handled incrementally on the upstream SSE side, so
+  the watch stops when real work starts rather than timing the whole response.
+- The setting applies to the Codex **HTTP upstream** Responses path (both HTTP
+  and WebSocket clients). Native upstream WebSocket liveness and
+  `/responses/compact` retain their existing behavior. Both local Any and
+  AgentRouter routes were verified to use HTTP upstream transport.
+
+### Regression coverage
+
+Public HTTP/WebSocket fixtures use real request handlers, executors, credential
+selection, configuration synthesis, and the indexed request-log API. Coverage
+includes missing headers, lifecycle/opaque reasoning then silence, successful
+second-key recovery, exhausted keys, heartbeat-buffer overflow, caller cancel,
+long reasoning/text/tool/native-search output, no replay after output, and final
+credential/error attribution. Test waits use 1 second; the intended local setting
+is 120 seconds.
+Private packet captures, credentials and source history remain outside Git.
+
+## Earlier signature/framing live verification and limits
 
 The private diagnostic configuration pins one credential per provider. The source
 models actually generated the opaque reasoning used in switch tests. The client
@@ -120,7 +198,8 @@ credentials, source ciphertext, or full raw request logs.
 Run from the repository root in an isolated worktree:
 
 ```sh
-go test ./... -count=1 -timeout=120s
+go test ./... -count=1 -timeout=180s
+go test -race ./test -run 'TestResponses' -count=3 -timeout=180s
 go test -race ./internal/runtime/executor \
   -run 'TestCodex|TestHomeCodex' -count=3 -timeout=120s
 go test -race ./internal/runtime/executor/helps \
@@ -140,6 +219,15 @@ The initial tests reproduced an unexplained WebSocket 1006 close for HTTP 402,
 and a request-log entry with empty model and status 0. Both are now green.
 
 Public contract tests (also run with `-race -count=3`):
+
+- `TestResponsesFirstOutputTimeout*` (headers, scaffolding, active work, HTTP/WS,
+  bounded exhaustion, cancellation, opt-in scope and heartbeat bounds)
+- `TestResponsesFailoverAfterEmptyReasoningScaffold`
+- `TestResponsesRecoversPrematureEOFBeforeOutput`
+- `TestResponsesDoesNotReplayAfterRealOutput`
+- `TestResponsesWebsocketRecoversBeforeOutput`
+- `TestResponsesPreservesReasoningScaffoldOnSuccess`
+- `TestResponsesExhaustedEOFRemainsFailure`
 
 - `TestResponsesWebsocketReportsExhaustedBudget` (one/all credentials exhausted)
 - `TestResponsesHTTPKeepsBudgetFailover`

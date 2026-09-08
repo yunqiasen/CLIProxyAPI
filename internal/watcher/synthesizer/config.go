@@ -241,6 +241,9 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 			if entry.Websockets {
 				attrs["websockets"] = "true"
 			}
+			if provider == "codex" && entry.ResponsesFirstOutputTimeoutSeconds > 0 {
+				attrs[coreauth.AttributeResponsesFirstOutputTimeoutSeconds] = strconv.Itoa(entry.ResponsesFirstOutputTimeoutSeconds)
+			}
 			if provider == "codex" && entry.AlphaSearch {
 				attrs[coreauth.AttributeCodexAlphaSearch] = "true"
 			}

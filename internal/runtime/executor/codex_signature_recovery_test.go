@@ -162,7 +162,7 @@ func TestCodexSignatureRecoveryPreservesManagedAttemptBoundary(t *testing.T) {
 }
 
 func TestCodexNonstreamSignatureSSERecovery(t *testing.T) {
-	for _, mode := range []string{"handshake_only", "partial_output", "repeated_rejection"} {
+	for _, mode := range []string{"handshake_only", "reasoning_scaffold", "partial_output", "repeated_rejection"} {
 		t.Run(mode, func(t *testing.T) {
 			attempts := 0
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -171,6 +171,9 @@ func TestCodexNonstreamSignatureSSERecovery(t *testing.T) {
 				if attempts == 1 || mode == "repeated_rejection" {
 					_, _ = io.WriteString(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_rejected\"}}\n\n")
 					_, _ = io.WriteString(w, "event: keepalive\ndata: {\"type\":\"keepalive\"}\n\n")
+					if mode == "reasoning_scaffold" {
+						_, _ = io.WriteString(w, `data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","summary":[],"content":[],"encrypted_content":"gAAAA-fixture-state"}}`+"\n\n")
+					}
 					if mode == "partial_output" {
 						_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")
 					}
@@ -190,7 +193,7 @@ func TestCodexNonstreamSignatureSSERecovery(t *testing.T) {
 			if attempts != want {
 				t.Fatalf("attempts=%d want=%d", attempts, want)
 			}
-			if mode == "handshake_only" {
+			if mode == "handshake_only" || mode == "reasoning_scaffold" {
 				if err != nil || !strings.Contains(string(r.Payload), "resp_ok") {
 					t.Fatalf("recovery failed: %v", err)
 				}

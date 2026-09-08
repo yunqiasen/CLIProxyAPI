@@ -16,6 +16,7 @@ const codexIncompleteStreamMessage = "stream error: stream disconnected before c
 
 type codexIncompleteStreamError struct {
 	statusErr
+	beforeOutput bool
 }
 
 func newCodexIncompleteStreamError() codexIncompleteStreamError {
@@ -25,8 +26,15 @@ func newCodexIncompleteStreamError() codexIncompleteStreamError {
 	}}
 }
 
-func (codexIncompleteStreamError) IsRequestScoped() bool {
-	return true
+func (e codexIncompleteStreamError) StatusCode() int {
+	if e.beforeOutput {
+		return http.StatusBadGateway
+	}
+	return e.statusErr.StatusCode()
+}
+
+func (e codexIncompleteStreamError) IsRequestScoped() bool {
+	return !e.beforeOutput
 }
 
 // Streamed Codex responses may emit response.output_item.done events while leaving

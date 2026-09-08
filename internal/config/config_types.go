@@ -447,6 +447,10 @@ type CodexKey struct {
 	// Websockets enables the Responses API websocket transport for this credential.
 	Websockets bool `yaml:"websockets,omitempty" json:"websockets,omitempty"`
 
+	// ResponsesFirstOutputTimeoutSeconds bounds an HTTP Responses attempt until real output.
+	// Zero disables the bound. Reasoning/text/tool output stops it; this is not a stream deadline.
+	ResponsesFirstOutputTimeoutSeconds int `yaml:"responses-first-output-timeout-seconds,omitempty" json:"responses-first-output-timeout-seconds,omitempty"`
+
 	// AlphaSearch allows this Codex API key to serve the Alpha Search endpoint.
 	AlphaSearch bool `yaml:"alpha-search,omitempty" json:"alpha-search,omitempty"`
 

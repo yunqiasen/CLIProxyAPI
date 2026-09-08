@@ -1,0 +1,22 @@
+# Overlay the existing machine-local Compose file; keep all runtime settings.
+services:
+  cli-proxy-api:
+    image: local/cli-proxy-api-cpa-fork:hot-reload
+    build:
+      context: .
+      dockerfile: Dockerfile.hot-reload
+    init: true
+    stop_grace_period: 45s
+    volumes:
+      - .:/workspace:ro
+      - cpa-hot-go-mod:/go/pkg/mod
+      - cpa-hot-go-build:/root/.cache/go-build
+    environment:
+      CPA_SOURCE_DIR: /workspace
+      CPA_RUNTIME_DIR: /CLIProxyAPI
+      CPA_BUILD_DIR: /tmp/cpa-hot-reload
+      CPA_HOT_RELOAD: "1"
+
+volumes:
+  cpa-hot-go-mod:
+  cpa-hot-go-build:

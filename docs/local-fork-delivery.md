@@ -1,115 +1,119 @@
 # Local Fork Delivery
 
-Code changes in this workspace are delivered through tests, documentation, review,
-a local commit, a rebuilt local CPA fork image, and live verification. Local
-commit and local container update are automatic parts of code delivery unless
-the current task explicitly pauses them. Remote publishing is a separate action.
+Every completed code-change task includes tests, relevant documentation, required
+review, a scoped **local Git commit**, and verification of the running CPA. Execute
+these steps automatically, without another user reminder. Do not auto-push.
 
-## Identify the existing service
+## Local code hot reload
 
-The verified local checkout uses:
+The local development service uses:
 
-- Branch: `CPA-fork`.
-- Docker endpoint: `unix:///var/run/docker.sock`.
-- Compose project/service: `cliproxyapi` / `cli-proxy-api`.
-- Compose file: `docker-compose.local.yml`.
-- Image: `local/cli-proxy-api-cpa-fork:live`.
-- Host networking and bind mounts for `config.yaml`, `auths/`, `logs/`, and `static/`.
+- Branch/workspace: `CPA-fork`, `/home/div/1_Project_dir/AI/CLIProxyAPI`.
+- Docker endpoint: verify the current context; normally `unix:///var/run/docker.sock`.
+- Compose project/service/container: `cliproxyapi` / `cli-proxy-api`.
+- Base configuration: machine-local `docker-compose.local.yml`.
+- Development overlay: tracked `docker-compose.hot-reload.yml`.
+- Development image: `local/cli-proxy-api-cpa-fork:hot-reload`.
+- Read-only source mount: primary checkout at `/workspace`.
+- Existing config/auth/log/static mounts, proxy environment, host network and
+  restart policy are inherited unchanged. Two named volumes retain Go caches.
 
-Recheck the Docker context and container labels before each update. Preserve its
-mounts, plugin files, network, proxy environment, and restart policy. The local
-Compose override is machine-specific; retain it rather than replacing it with
-the stock `docker-compose.yml`, whose image/pull policy is different.
+The development image contains the Go toolchain and a small Python supervisor.
+No extra model/provider calls or third-party watcher are needed. The supervisor
+fingerprints Go files and embedded JSON/text/template assets under `cmd`,
+`internal`, and `sdk`, plus `go.mod`, `go.sum`, the build script and Git HEAD.
+It deliberately does not scan runtime logs, credentials, `.git` objects or the
+management bundle. Config/auth updates retain CPA's existing hot loader; updating
+mounted `static/management.html` only needs a browser refresh.
 
-## Verify and commit
+After a stable source change, compilation runs while the previous CPA process
+continues serving. A successful build is published atomically, then the supervisor
+signals the old process and starts the new one. Compilation failure leaves the
+old process and binary intact. A save during compilation triggers a fresh build
+before process replacement. The container ID stays unchanged.
 
-1. Inspect the full task diff, including new files. Preserve unrelated work.
-2. Run focused tests, the full suite, relevant race checks, and the server build.
-   Use an isolated source worktree for full tests when the runtime checkout has
-   root-owned log files; record that distinction without changing runtime data.
-3. Update corresponding docs. Complete reviews required by the active workflow,
-   including both the configured frontend model and Claude when specified.
-4. Stage only the intended source, tests, and docs, and create the local commit.
-   New docs covered by `docs/*` need explicit staging. Leave credentials,
-   runtime configuration, logs, binaries, and unrelated investigation files out.
+This is **automatic compile-and-process-restart**, not in-process code patching.
+The process switch can briefly interrupt active streams. Initial migration to this
+runtime requires a one-time container recreation. Toolchain, supervisor, image,
+OS dependency, Compose or plugin ABI changes also require a controlled rebuild;
+normal Go source edits do not. Keep plugin builds compatible with the toolchain.
 
-A local commit is not a request to push, publish a release/image, or deploy a VPS.
+## One-time setup or runtime-image update
 
-## Build the exact committed fork
+Inspect the current container first and privately save its image, Compose labels,
+mounts and environment. Preserve the machine-local base Compose file; never replace
+it with the stock upstream file. Save the prior image under a rollback tag.
 
-Keep the running image available for rollback, and build from a Git archive so
-untracked credentials and runtime files stay outside the Docker build context:
+Build from a Git archive so runtime credentials and untracked files stay outside
+the build context. The existing host proxy is inherited only as build arguments:
 
 ```sh
-cd /home/div/1_Project_dir/AI/CLIProxyAPI
 COMMIT=$(git rev-parse HEAD)
-SHORT_COMMIT=$(git rev-parse --short=12 HEAD)
-BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-IMAGE=local/cli-proxy-api-cpa-fork:live
-ROLLBACK_IMAGE=local/cli-proxy-api-cpa-fork:rollback-$(date -u +%Y%m%dT%H%M%SZ)
 OLD_IMAGE=$(docker inspect -f '{{.Image}}' cli-proxy-api)
-docker image tag "$OLD_IMAGE" "$ROLLBACK_IMAGE"
-
-git archive --format=tar "$COMMIT" | docker build --network=host \
+docker image tag "$OLD_IMAGE" "local/cli-proxy-api-cpa-fork:rollback-$(date -u +%Y%m%dT%H%M%SZ)"
+git archive "$COMMIT" | docker build --network=host \
   --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg NO_PROXY \
-  --build-arg VERSION="CPA-fork-$SHORT_COMMIT" \
-  --build-arg COMMIT="$COMMIT" \
-  --build-arg BUILD_DATE="$BUILD_DATE" \
-  --tag "$IMAGE" -
+  -f Dockerfile.hot-reload -t local/cli-proxy-api-cpa-fork:hot-reload -
+docker compose -p cliproxyapi -f docker-compose.local.yml \
+  -f docker-compose.hot-reload.yml up -d --no-deps --no-build --pull never cli-proxy-api
 ```
 
-The local host uses an existing loopback HTTP(S) proxy for dependency downloads.
-The build-only host network and predefined proxy arguments above make that proxy
-reachable inside the builder. They inherit the shell values; keep credentials
-out of literal commands and avoid adding proxy values to Dockerfile `ENV` lines.
-A direct `go mod download` timed out on this host; the same module URL returned
-HTTP 200 from the builder with the existing proxy and host networking. These
-build flags do not alter the service runtime configuration.
+The first source compilation may take longer while the caches are cold. Wait for
+`[hot-reload] process replaced` and successful API checks, not just Docker's
+`running` state. The first image setup should be verified on a separate local
+container before replacing the existing service.
 
-Use the repository Dockerfile and its CGO-enabled build. Verify the installed
-plugins' ABI and runtime-library requirements before changing the toolchain or
-base image. Build failure leaves the running container unchanged. Confirm the
-new image exists before recreating it.
+The supervisor exits on an unexpected CPA process exit so the inherited container
+restart policy can act. A runtime startup regression still needs investigation and
+rollback; compilation success alone does not certify delivery.
 
-## Update and verify
+## Every code-change task
 
-Use the verified local Compose project and override. `--no-build` uses the image
-built from the exact commit above; `--pull never` preserves that local image:
+1. Inspect the task diff and preserve unrelated work. Run focused tests, the full
+   suite and appropriate race checks/build verification. Use an isolated worktree
+   for full tests when runtime log permissions interfere; do not change log data.
+2. Update corresponding docs and finish the active workflow's required review.
+3. Apply the verified files to primary `CPA-fork`. Stage only this task's changes
+   (use explicit staging for ignored Markdown), and **commit automatically**.
+   The watcher does not run `git add`, `git commit` or `git push`.
+4. Wait for automatic recompilation. Git HEAD itself is watched: a commit updates
+   build metadata even if the source already hot-reloaded before that commit.
+5. Verify `X-CPA-COMMIT` equals the exact local commit, the authenticated API and
+   management endpoint respond, the served panel matches the mounted bundle, and
+   the changed path works. Confirm the container ID has not changed during normal
+   source reload. Retain useful logs outside Git without exposing credentials.
+
+Source-dirty builds carry `<commit>-dirty` metadata. They are development feedback,
+not completed delivery. A failed build is logged once per source state; fix/save
+source or create the intended commit to trigger another attempt. Roll back code
+with a deliberate local revert when appropriate, not by discarding unrelated work.
+
+Test the watcher/build public process contract without Docker:
 
 ```sh
-docker compose -p cliproxyapi -f docker-compose.local.yml \
-  up -d --no-deps --no-build --pull never cli-proxy-api
+python3 -m unittest discover -s test -p local_hot_reload_test.py -v
 ```
 
-Recreation briefly interrupts active requests. Keep all data mounts and the prior
-image; stop only the CPA service during its replacement.
+This compiles a real small Go HTTP service, changes its source, observes the new
+response and child PID, verifies a broken build keeps the old process available,
+then commits and checks clean revision metadata without restarting the supervisor.
 
-Verify all of the following before reporting delivery:
+## Runtime rollback
 
-- The container is running without a restart loop and uses the newly built image.
-- The authenticated local management response includes `X-CPA-COMMIT` equal to
-  the committed revision and the expected fork version/build date.
-- The local API answers and an authenticated `/v1/models` request succeeds.
-- `/management.html` is reachable and matches the intended fork UI bundle.
-- A small request through the changed protocol completes correctly; inspect the
-  final SSE event as well as HTTP status, and check the indexed log outcome.
-- Existing mounts, network, environment, credential files, and plugin loading
-  remain consistent. Normal runtime logging/credential refresh may continue.
+For a previous development runtime image, retag the saved image as
+`local/cli-proxy-api-cpa-fork:hot-reload` and recreate the same service with both
+Compose files. For rollback from initial hot-reload setup to the earlier immutable
+runtime, restore the saved image tag expected by the unchanged base Compose file
+and recreate using **only** `docker-compose.local.yml`.
 
-Read locally stored credentials only for these checks; keep them out of command
-output, shell history, Git, and reports. Avoid printing full configuration or raw
-request-log contents when a status, hash, count, or revision header is enough.
+Preserve config, credentials, raw logs, static assets and caches. Do not use
+`down -v`, clear volumes or replace unrelated services. Recheck API, panel and
+version after rollback.
 
-## Roll back a failed runtime update
+## Production releases
 
-Retag the recorded old image as the same local `live` image, recreate only the
-same service with the same Compose command, and repeat availability checks:
-
-```sh
-docker image tag "$ROLLBACK_IMAGE" "$IMAGE"
-docker compose -p cliproxyapi -f docker-compose.local.yml \
-  up -d --no-deps --no-build --pull never cli-proxy-api
-```
-
-Keep the delivery commit and evidence for investigation. Database volumes, raw
-logs, configuration, and credentials stay in place during either direction.
+The original `Dockerfile` is unchanged: production images contain the compiled
+server, not the development watcher/toolchain. Build immutable images from the
+exact release commit with `VERSION`, `COMMIT`, and `BUILD_DATE` build arguments;
+updates then require service recreation. Local hot reload does not authorize
+Git push, GitHub releases, remote image publication or VPS deployment.

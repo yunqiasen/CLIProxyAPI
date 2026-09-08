@@ -314,7 +314,7 @@ POST /v1/audio/transcriptions
 - 新功能分支默认从 `CPA-fork` 切出，除非这次工作就是同步上游。
 - 如果使用个人 GitHub fork，建议把 `origin` 指向自己的 fork，把 `upstream` 指向 `router-for-me/CLIProxyAPI`。
 - 用户明确要求推送时，日常二开内容推送到 `origin/CPA-fork`，fork 专用改动保留在二开仓库；本地交付不包含自动 push。
-- 本地二开代码的交付流程是：测试通过、更新文档、完成必要审查、自动本地提交、重建并更新本地 CPA 容器、验证实际运行。使用 `docker-compose.local.yml`，保留运行数据挂载，运行本次提交的二开代码。详见[本地二开交付流程](docs/local-fork-delivery.md)。
+- 每次本地代码修改完成后，必须执行测试、更新文档、完成必要审查、自动 Git 提交并验证运行结果，无需用户再次提醒。本地使用 `docker-compose.local.yml` 加 `docker-compose.hot-reload.yml`：修改源码或提交后自动编译，在同一容器内替换 CPA 进程；编译失败保留旧进程。日常改代码无需重建镜像或重启容器，运行环境、工具链或监听器变更时才重建。生产发布仍使用固定镜像。详见[本地二开交付流程](docs/local-fork-delivery.md)。
 - 二开的管理 UI 维护在 `yunqiasen/Cli-Proxy-API-Management-Center` 的 `CPA-UI-fork` 分支。其他服务器用 Docker 部署本 fork 时仍按正常 `/management.html` 使用；后端默认会从这个 UI fork 的 release 下载最新 `management.html`。
 
 ## 谁与我们在一起？

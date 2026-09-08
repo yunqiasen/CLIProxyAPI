@@ -1,0 +1,15 @@
+# Local development only. Production releases continue to use Dockerfile.
+FROM golang:1.26-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 build-essential git ca-certificates tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/cpa-dependencies
+COPY go.mod go.sum ./
+RUN go mod download
+
+WORKDIR /CLIProxyAPI
+ENV TZ=Asia/Shanghai
+EXPOSE 8317
+CMD ["python3", "/workspace/scripts/local_hot_reload.py", "--config", "/CLIProxyAPI/config.yaml"]

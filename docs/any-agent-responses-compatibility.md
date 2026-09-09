@@ -4,8 +4,9 @@
 
 This repair targets the configured Any `gpt-6-astra` (`cpa-6a`) and
 AgentRouter `gpt-5.6-sol` (`cpa-5.6s`) routes. Other providers sharing an alias
-are not evidence of AgentRouter compatibility. The executors use protocol
-signals, not hard-coded provider names or hostnames.
+are not evidence of AgentRouter compatibility. The signature/framing and
+first-output repairs use protocol signals. The September 9 channel-allocation exception below is deliberately scoped to the
+verified AnyRouter endpoint; it is not a general credential-cooldown change.
 
 The earlier signature/framing repair used baseline
 `6a10ebbed5cf4b6b849f888800d4c7bdeaa25aaf`. The September 8 stall-recovery diff
@@ -16,6 +17,47 @@ commits them locally, and verifies automatic code hot reload with the exact
 `X-CPA-COMMIT` and unchanged container ID. Normal source edits do not recreate
 the container. Additional provider/model probes and remote publication are
 outside this task.
+
+## September 9: Any channel allocation must not cool shared credentials
+
+A direct differential probe on `anyrouter.top` held the API key, model and input
+constant. An existing `prompt_cache_key` completed while a different session key
+failed. Subsequent Mac captures explicitly report `get_channel_failed` and model
+capacity exhaustion. CPA treated these HTTP 500 responses as credential failures,
+cooled every attempted key, and then returned `auth_unavailable` even to another
+session that the same upstream credentials could still serve.
+
+The HTTP Responses executor now marks a valid JSON `error.code=get_channel_failed`
+response for `gpt-6-astra` with status 500 or 503 from exactly `anyrouter.top` as
+credential-fallback eligible, before output. It preserves the original error, allows bounded credential
+rotation, and does not change shared credential availability. Failed attempts still
+count as failures. Credential ordering, configured retry limits and post-output
+replay rules are unchanged. No session IDs are shared or rewritten for recovery.
+Other hosts, authentication/payment/quota failures, empty or malformed errors and
+ordinary 5xx responses keep their existing handling. This exception applies to
+normal streaming/non-streaming HTTP Responses requests, not image or compact APIs.
+
+This repairs CPA's amplification of the upstream failure; it does not create Any
+capacity or guarantee that a new session will succeed. When all attempted channels
+return this error, the caller receives the original channel error rather than a
+new false credential-unavailable state. Existing unrelated cooldowns retain their
+normal recovery deadlines.
+
+Reproduction: `TestAnyRouterChannelCapacityDoesNotBlockOtherSessions` uses real
+config synthesis, manager selection, the Codex executor and an HTTP proxy fixture.
+Before the fix both streaming and non-streaming cases fail with `auth_unavailable`
+on the healthy second session. After the fix both sessions remain independent;
+all-failed requests attempt each credential once, and a stream that has already
+emitted text is not replayed. `TestResponsesChannelCapacityErrorScope` verifies
+provider/status boundaries, malformed input and preservation of the underlying
+status/retry hint.
+
+```sh
+go test ./test ./internal/runtime/executor/helps \
+  -run 'TestAnyRouterChannelCapacity|TestResponsesChannelCapacityErrorScope' -count=1
+go test -race ./test ./internal/runtime/executor/helps \
+  -run 'TestAnyRouterChannelCapacity|TestResponsesChannelCapacityErrorScope' -count=1
+```
 
 ## Findings
 
@@ -269,9 +311,9 @@ retry header race discovered in this change was fixed and specifically re-tested
 3. Back up the local config. Change only Any's `websockets: true` to `false` for
    this verified route; preserve its credentials, model, alias, and proxy settings.
    This is a local capability setting, not a global default or a committed secret.
-4. Build the exact-commit fork image, retain the prior image for rollback, and
-   recreate only the verified local CPA Compose service. Preserve every mount,
-   environment setting, network, and restart policy.
+4. Wait for the existing development supervisor to compile the exact local commit
+   and replace the CPA process. Ordinary source delivery keeps the container ID,
+   mounts, environment, network and restart policy unchanged.
 5. Verify `X-CPA-COMMIT`, API and management panel availability, then exercise
    switched-history HTTP and client WebSocket continuations with route pinning.
    If verification regresses, restore the previous image and config together.

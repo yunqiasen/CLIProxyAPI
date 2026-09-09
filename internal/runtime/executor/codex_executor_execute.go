@@ -141,7 +141,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = newCodexStatusErr(httpResp.StatusCode, b)
+		err = helps.ResponsesChannelCapacityError(baseURL, baseModel, httpResp.StatusCode, b, newCodexStatusErr(httpResp.StatusCode, b))
 		return resp, err
 	}
 	// Read frames as they arrive, even for a non-streaming client. Reading the whole
@@ -197,7 +197,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 						if readErr = firstOutput.Failure(readErr); readErr != nil {
 							return resp, readErr
 						}
-						return resp, newCodexStatusErr(next.StatusCode, upstreamData)
+						return resp, helps.ResponsesChannelCapacityError(baseURL, baseModel, next.StatusCode, upstreamData, newCodexStatusErr(next.StatusCode, upstreamData))
 					}
 					reader = helps.NewResponsesSSEReader(next.Body, 52_428_800)
 					continue

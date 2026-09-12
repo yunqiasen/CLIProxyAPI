@@ -37,7 +37,11 @@ func TestAnyRouterChannelCapacityDoesNotBlockOtherSessions(t *testing.T) {
 					w.WriteHeader(400)
 					return
 				}
-				session, _ := body["prompt_cache_key"].(string)
+				fixtureSession := ""
+				if metadata, ok := body["metadata"].(map[string]any); ok {
+					fixtureSession, _ = metadata["fixture_session"].(string)
+				}
+				session := fixtureSession
 				mu.Lock()
 				calls[session]++
 				if session == "capacity-limited-session" {
@@ -85,7 +89,7 @@ func TestAnyRouterChannelCapacityDoesNotBlockOtherSessions(t *testing.T) {
 				}
 			}
 			execute := func(session string) (string, error) {
-				body := []byte(fmt.Sprintf(`{"model":"cpa-6a","input":[{"role":"user","content":[{"type":"input_text","text":"Reply OK."}]}],"store":false,"stream":%t,"prompt_cache_key":%q}`, stream, session))
+				body := []byte(fmt.Sprintf(`{"model":"cpa-6a","input":[{"role":"user","content":[{"type":"input_text","text":"Reply OK."}]}],"store":false,"stream":%t,"prompt_cache_key":%q,"metadata":{"fixture_session":%q}}`, stream, session, session))
 				req := cliproxyexecutor.Request{Model: "cpa-6a", Payload: body}
 				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: body, Stream: stream}
 				if !stream {
@@ -162,6 +166,180 @@ func TestAnyRouterChannelCapacityDoesNotBlockOtherSessions(t *testing.T) {
 			}
 			if calls["capacity-stream-session"] != 2 || calls["healthy-after-stream-capacity"] != 1 {
 				t.Fatalf("SSE capacity calls=%v", calls)
+			}
+		})
+	}
+}
+
+func TestCodexProviderSwitchUsesProviderScopedIdentity(t *testing.T) {
+	for _, stream := range []bool{true, false} {
+		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+			type observedRequest struct {
+				promptCacheKey string
+				sessionHeader  string
+				metadata       map[string]any
+			}
+
+			var mu sync.Mutex
+			observed := map[string]observedRequest{}
+			newUpstream := func(provider string) *httptest.Server {
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					key, _ := body["prompt_cache_key"].(string)
+					metadata, _ := body["client_metadata"].(map[string]any)
+					request := observedRequest{
+						promptCacheKey: key,
+						sessionHeader:  r.Header.Get("Session_id"),
+						metadata:       metadata,
+					}
+					mu.Lock()
+					if provider == "agent" {
+						observed[provider] = request
+					} else {
+						observed[provider] = request
+					}
+					agentKey := observed["agent"].promptCacheKey
+					mu.Unlock()
+
+					if provider == "any" && (key == "switch-session" || key == agentKey) {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusInternalServerError)
+						fmt.Fprint(w, `{"error":{"code":"get_channel_failed","message":"model at capacity"}}`)
+						return
+					}
+
+					response := map[string]any{
+						"type": "response.completed",
+						"response": map[string]any{
+							"id":               "resp_" + provider,
+							"object":           "response",
+							"status":           "completed",
+							"prompt_cache_key": key,
+							"client_metadata":  metadata,
+							"output": []map[string]any{{
+								"type": "message",
+								"role": "assistant",
+								"content": []map[string]any{{
+									"type": "output_text",
+									"text": "OK_" + provider,
+								}},
+							}},
+						},
+					}
+					payload, err := json.Marshal(response)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					w.Header().Set("Content-Type", "text/event-stream")
+					fmt.Fprintf(w, "data: %s\n\n", payload)
+				}))
+			}
+			agentUpstream := newUpstream("agent")
+			defer agentUpstream.Close()
+			anyUpstream := newUpstream("any")
+			defer anyUpstream.Close()
+
+			cfg := &config.Config{CodexKey: []config.CodexKey{
+				{
+					Name:     "Any",
+					BaseURL:  "http://anyrouter.top/v1",
+					ProxyURL: anyUpstream.URL,
+					Models:   []config.CodexModel{{Name: "gpt-6-astra", Alias: "cpa-6a"}},
+					APIKeyEntries: []config.NativeAPIKeyEntry{{
+						APIKey: "fixture-any-key",
+					}},
+				},
+				{
+					Name:     "AgentRouter",
+					BaseURL:  "http://agentrouter.org/v1",
+					ProxyURL: agentUpstream.URL,
+					Models:   []config.CodexModel{{Name: "gpt-5.6-sol", Alias: "cpa-5.6s"}},
+					APIKeyEntries: []config.NativeAPIKeyEntry{{
+						APIKey: "fixture-agent-key",
+					}},
+				},
+			}}
+			auths, err := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{
+				Config: cfg, Now: time.Now(), IDGenerator: synthesizer.NewStableIDGenerator(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
+			manager.SetConfig(cfg)
+			manager.SetRetryConfig(0, 0, 30)
+			manager.RegisterExecutor(runtimeexecutor.NewCodexExecutor(cfg))
+			for _, auth := range auths {
+				modelID := "cpa-6a"
+				if strings.EqualFold(auth.Label, "AgentRouter") {
+					modelID = "cpa-5.6s"
+				}
+				registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: modelID}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+				if _, err = manager.Register(context.Background(), auth); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			execute := func(model string) string {
+				body := []byte(fmt.Sprintf(`{"model":%q,"input":[{"role":"user","content":[{"type":"input_text","text":"Reply OK."}]}],"store":false,"stream":%t,"prompt_cache_key":"switch-session","client_metadata":{"x-codex-installation-id":"install-switch","session_id":"switch-session","thread_id":"thread-switch","turn_id":"turn-switch","x-codex-window-id":"switch-session:10","x-codex-turn-metadata":"{\"prompt_cache_key\":\"switch-session\",\"turn_id\":\"turn-switch\",\"window_id\":\"switch-session:10\"}"}}`, model, stream))
+				request := cliproxyexecutor.Request{Model: model, Payload: body}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: body, Stream: stream}
+				if stream {
+					result, executeErr := manager.ExecuteStream(context.Background(), []string{"codex"}, request, opts)
+					if executeErr != nil {
+						t.Fatalf("%s stream execute error: %v", model, executeErr)
+					}
+					var output strings.Builder
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Fatalf("%s stream chunk error: %v", model, chunk.Err)
+						}
+						output.Write(chunk.Payload)
+					}
+					return output.String()
+				}
+				response, executeErr := manager.Execute(context.Background(), []string{"codex"}, request, opts)
+				if executeErr != nil {
+					t.Fatalf("%s execute error: %v", model, executeErr)
+				}
+				return string(response.Payload)
+			}
+
+			agentOutput := execute("cpa-5.6s")
+			anyOutput := execute("cpa-6a")
+			if !strings.Contains(agentOutput, "OK_agent") || !strings.Contains(anyOutput, "OK_any") {
+				t.Fatalf("provider outputs: agent=%q any=%q", agentOutput, anyOutput)
+			}
+			mu.Lock()
+			agentRequest := observed["agent"]
+			anyRequest := observed["any"]
+			mu.Unlock()
+			if agentRequest.promptCacheKey == "" || anyRequest.promptCacheKey == "" {
+				t.Fatalf("missing provider prompt cache keys: agent=%#v any=%#v", agentRequest, anyRequest)
+			}
+			if agentRequest.promptCacheKey == "switch-session" || anyRequest.promptCacheKey == "switch-session" {
+				t.Fatalf("raw client session leaked upstream: agent=%q any=%q", agentRequest.promptCacheKey, anyRequest.promptCacheKey)
+			}
+			if agentRequest.promptCacheKey == anyRequest.promptCacheKey {
+				t.Fatalf("provider identities are shared: %q", agentRequest.promptCacheKey)
+			}
+			if agentRequest.sessionHeader != agentRequest.promptCacheKey || anyRequest.sessionHeader != anyRequest.promptCacheKey {
+				t.Fatalf("Session_id mismatch: agent=%q/%q any=%q/%q", agentRequest.sessionHeader, agentRequest.promptCacheKey, anyRequest.sessionHeader, anyRequest.promptCacheKey)
+			}
+			for provider, output := range map[string]string{"agent": agentOutput, "any": anyOutput} {
+				if !strings.Contains(output, "switch-session") || !strings.Contains(output, "install-switch") || !strings.Contains(output, "switch-session:10") {
+					t.Fatalf("%s response did not restore client identifiers: %q", provider, output)
+				}
+				if strings.Contains(output, observed[provider].promptCacheKey) {
+					t.Fatalf("%s response still exposes provider identity %q: %q", provider, observed[provider].promptCacheKey, output)
+				}
 			}
 		})
 	}

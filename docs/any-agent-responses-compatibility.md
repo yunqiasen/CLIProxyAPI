@@ -36,12 +36,12 @@ HTTP non-streaming, HTTP streaming, and Codex WebSocket terminal paths all use t
 classification. It preserves the original error, allows bounded credential rotation,
 and does not change shared credential availability. Failed attempts still count as
 failures. Credential ordering, configured retry limits and post-output replay rules
-are unchanged. No session IDs are shared or rewritten for recovery.
+are unchanged. The recovery path itself does not share or rewrite session IDs. For the exact `anyrouter.top` and `agentrouter.org` Codex HTTP Responses hosts, upstream identity is automatically namespaced by the selected credential while the original client identifiers are restored on the downstream response.
 Other hosts, authentication/payment/quota failures, empty or malformed errors and
 ordinary 5xx responses keep their existing handling. This exception applies to
 normal streaming/non-streaming HTTP Responses requests, not image or compact APIs.
 
-This repairs CPA's amplification of the upstream failure; it does not create Any
+This repairs CPA's amplification of the upstream failure and the cross-provider session pinning observed in the live capture; it does not create Any
 capacity or guarantee that a new session will succeed. When all attempted channels
 return this error, the caller receives the original channel error rather than a
 new false credential-unavailable state. Existing unrelated cooldowns retain their
@@ -64,6 +64,20 @@ go test ./test ./internal/runtime/executor/helps \
 go test -race ./test ./internal/runtime/executor/helps \
   -run 'TestAnyRouterChannelCapacity|TestResponsesChannelCapacityErrorScope' -count=1
 ```
+
+## September 12: switched Codex sessions must be provider-scoped
+
+The live differential capture used the same Any Key and the same `gpt-6-astra`
+request shape. The raw client session key returned `500 get_channel_failed` from
+channel `273250->411041`. Replacing only the upstream session identity with the
+deterministic per-credential identity returned `200` from a different channel
+(`720231->567973`); a fresh client session also returned `200`. This proves the
+failure was session-to-channel pinning, not an exhausted set of Any Keys.
+
+The repair automatically applies the existing identity mapping to the exact
+`anyrouter.top` and `agentrouter.org` Codex hosts, while keeping downstream
+identifiers unchanged. `TestCodexProviderSwitchUsesProviderScopedIdentity`
+covers both streaming and non-streaming Responses requests.
 
 ## Findings
 

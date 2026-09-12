@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -285,6 +286,100 @@ func TestCodexIdentityConfuseKeepsClientBodySeparateFromUpstreamBody(t *testing.
 	}
 	if gotKey := gjson.GetBytes(clientBody, "prompt_cache_key").String(); gotKey != "cache-1" {
 		t.Fatalf("client prompt_cache_key = %q, want cache-1", gotKey)
+	}
+}
+
+func TestCodexIdentityConfuseAutoEnablesAnyAndAgentRouter(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		baseURL string
+		want    bool
+	}{
+		{name: "any", baseURL: "https://anyrouter.top/v1", want: true},
+		{name: "agent", baseURL: "https://agentrouter.org/v1", want: true},
+		{name: "other", baseURL: "https://relay.example/v1", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{Routing: config.RoutingConfig{Strategy: "fill-first"}}
+			auth := &cliproxyauth.Auth{
+				ID:       "auth-" + tc.name,
+				Provider: "codex",
+				Attributes: map[string]string{
+					"base_url": tc.baseURL,
+				},
+			}
+			clientBody := []byte(`{"model":"gpt-6-astra","prompt_cache_key":"switch-session"}`)
+
+			upstreamBody, state := applyCodexIdentityConfuseBody(cfg, auth, clientBody, clientBody, true)
+			if got := state.enabled; got != tc.want {
+				t.Fatalf("identity enabled = %v, want %v", got, tc.want)
+			}
+			if tc.want {
+				if got := gjson.GetBytes(upstreamBody, "prompt_cache_key").String(); got == "switch-session" {
+					t.Fatalf("provider session identity was not isolated: %q", got)
+				}
+				return
+			}
+			if got := gjson.GetBytes(upstreamBody, "prompt_cache_key").String(); got != "switch-session" {
+				t.Fatalf("unrelated provider session identity changed: %q", got)
+			}
+		})
+	}
+}
+
+func TestCodexResponsesIdentityIsolationScope(t *testing.T) {
+	cases := []struct {
+		name string
+		from sdktranslator.Format
+		url  string
+		want bool
+	}{
+		{name: "responses", from: sdktranslator.FormatOpenAIResponse, url: "https://anyrouter.top/v1/responses", want: true},
+		{name: "compact", from: sdktranslator.FormatOpenAIResponse, url: "https://anyrouter.top/v1/responses/compact", want: false},
+		{name: "image", from: sdktranslator.Format("openai-image"), url: "https://anyrouter.top/v1/responses", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexResponsesIdentityIsolationEligible(tc.from, tc.url); got != tc.want {
+				t.Fatalf("eligible = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexIdentityConfuseUsesGeneratedPromptCacheKeyAndRestoresMetadata(t *testing.T) {
+	cfg := &config.Config{Routing: config.RoutingConfig{Strategy: "round-robin"}}
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-generated",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"base_url": "https://anyrouter.top/v1",
+		},
+	}
+	clientBody := []byte(`{"model":"gpt-6-astra","client_metadata":{"x-codex-installation-id":"install-1","session_id":"session-1","thread_id":"thread-1","turn_id":"turn-1","x-codex-window-id":"session-1:10","x-codex-turn-metadata":"{\"turn_id\":\"turn-1\",\"window_id\":\"session-1:10\"}"}}`)
+	rawBody := []byte(`{"model":"gpt-6-astra","prompt_cache_key":"generated-session","client_metadata":{"x-codex-installation-id":"install-1","session_id":"session-1","thread_id":"thread-1","turn_id":"turn-1","x-codex-window-id":"session-1:10","x-codex-turn-metadata":"{\"turn_id\":\"turn-1\",\"window_id\":\"session-1:10\"}"}}`)
+
+	upstreamBody, state := applyCodexIdentityConfuseBody(cfg, auth, clientBody, rawBody, true)
+	generatedKey := gjson.GetBytes(upstreamBody, "prompt_cache_key").String()
+	if generatedKey == "" || generatedKey == "generated-session" {
+		t.Fatalf("generated prompt_cache_key = %q", generatedKey)
+	}
+	if got := gjson.GetBytes(upstreamBody, "client_metadata.x-codex-installation-id").String(); got == "install-1" || got == "" {
+		t.Fatalf("installation id was not isolated: %q", got)
+	}
+	if got := gjson.GetBytes(upstreamBody, "client_metadata.x-codex-window-id").String(); got == "session-1:10" || got == "" {
+		t.Fatalf("window id was not isolated: %q", got)
+	}
+
+	response := []byte(`{"type":"response.completed","prompt_cache_key":"` + generatedKey + `","client_metadata":{"x-codex-installation-id":"` + gjson.GetBytes(upstreamBody, "client_metadata.x-codex-installation-id").String() + `","session_id":"` + gjson.GetBytes(upstreamBody, "client_metadata.session_id").String() + `","thread_id":"` + gjson.GetBytes(upstreamBody, "client_metadata.thread_id").String() + `","turn_id":"` + gjson.GetBytes(upstreamBody, "client_metadata.turn_id").String() + `","x-codex-window-id":"` + gjson.GetBytes(upstreamBody, "client_metadata.x-codex-window-id").String() + `"}}`)
+	restored := applyCodexIdentityExposeResponsePayload(response, state)
+	for _, want := range []string{"generated-session", "install-1", "session-1", "thread-1", "turn-1", "session-1:10"} {
+		if !bytes.Contains(restored, []byte(want)) {
+			t.Fatalf("restored response missing %q: %s", want, restored)
+		}
+	}
+	if bytes.Contains(restored, []byte(generatedKey)) {
+		t.Fatalf("restored response still exposes generated key: %s", restored)
 	}
 }
 

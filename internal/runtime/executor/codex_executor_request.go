@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -87,7 +88,7 @@ type codexIdentityConfuseState struct {
 	authID                 string
 	originalPromptCacheKey string
 	promptCacheKey         string
-	turnIDs                []codexIdentityReplacement
+	identityReplacements   []codexIdentityReplacement
 }
 
 type codexIdentityReplacement struct {
@@ -140,7 +141,8 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	}
 	rawJSON = helps.SanitizeCodexInputItemIDs(rawJSON)
 	var identityState codexIdentityConfuseState
-	rawJSON, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, rawJSON)
+	autoProviderIdentity := codexResponsesIdentityIsolationEligible(from, url)
+	rawJSON, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, rawJSON, autoProviderIdentity)
 	if identityState.promptCacheKey != "" {
 		cache.ID = identityState.promptCacheKey
 	}
@@ -154,26 +156,49 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	return httpReq, rawJSON, identityState, nil
 }
 
-func applyCodexIdentityConfuseBody(cfg *config.Config, auth *cliproxyauth.Auth, userPayload []byte, rawJSON []byte) ([]byte, codexIdentityConfuseState) {
-	if !codexIdentityConfuseEnabled(cfg) || auth == nil || strings.TrimSpace(auth.ID) == "" || len(rawJSON) == 0 {
+func applyCodexIdentityConfuseBody(cfg *config.Config, auth *cliproxyauth.Auth, userPayload []byte, rawJSON []byte, autoProviderIdentity ...bool) ([]byte, codexIdentityConfuseState) {
+	autoProviderScoped := len(autoProviderIdentity) > 0 && autoProviderIdentity[0]
+	if !codexIdentityConfuseEnabled(cfg, auth, autoProviderScoped) || auth == nil || strings.TrimSpace(auth.ID) == "" || len(rawJSON) == 0 {
 		return rawJSON, codexIdentityConfuseState{}
 	}
 
 	state := codexIdentityConfuseState{enabled: true, authID: strings.TrimSpace(auth.ID)}
-	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(userPayload, "prompt_cache_key").String()); promptCacheKey != "" {
+	promptCacheKey := strings.TrimSpace(gjson.GetBytes(userPayload, "prompt_cache_key").String())
+	if promptCacheKey == "" {
+		promptCacheKey = strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt_cache_key").String())
+	}
+	if promptCacheKey != "" {
 		state.originalPromptCacheKey = promptCacheKey
 		state.promptCacheKey = codexIdentityConfuseUUID(auth.ID, "prompt-cache", promptCacheKey)
 		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", state.promptCacheKey)
 	}
-	if installationID := strings.TrimSpace(gjson.GetBytes(userPayload, "client_metadata.x-codex-installation-id").String()); installationID != "" {
-		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-installation-id", codexIdentityConfuseUUID(auth.ID, "installation", installationID))
+	installationID := strings.TrimSpace(gjson.GetBytes(userPayload, "client_metadata.x-codex-installation-id").String())
+	if installationID == "" {
+		installationID = strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-installation-id").String())
+	}
+	if installationID != "" {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-installation-id", state.confuseIdentityKind("installation", installationID))
+	}
+	for _, field := range []struct {
+		path string
+		kind string
+	}{
+		{path: "client_metadata.session_id", kind: "session"},
+		{path: "client_metadata.thread_id", kind: "thread"},
+	} {
+		if value := strings.TrimSpace(gjson.GetBytes(rawJSON, field.path).String()); value != "" {
+			rawJSON, _ = sjson.SetBytes(rawJSON, field.path, state.confuseIdentityKind(field.kind, value))
+		}
+	}
+	if turnID := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.turn_id").String()); turnID != "" {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.turn_id", state.confuseTurnID(turnID))
 	}
 	if turnMetadata := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-turn-metadata").String()); turnMetadata != "" {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-turn-metadata", applyCodexTurnMetadataIdentityConfuse(turnMetadata, &state))
 	}
 	if state.promptCacheKey != "" {
 		if windowID := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-window-id").String()); windowID != "" {
-			rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-window-id", state.promptCacheKey+":0")
+			rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-window-id", state.confuseWindowID(windowID))
 		}
 	}
 
@@ -201,7 +226,13 @@ func applyCodexIdentityConfuseHeaders(headers http.Header, state *codexIdentityC
 	}
 	headers.Set("X-Client-Request-Id", state.promptCacheKey)
 	headers.Set("Thread-Id", state.promptCacheKey)
-	headers.Set("X-Codex-Window-Id", state.promptCacheKey+":0")
+	windowID := headerValueCaseInsensitive(headers, "X-Codex-Window-Id")
+	if windowID == "" {
+		windowID = state.promptCacheKey + ":0"
+	} else {
+		windowID = state.confuseWindowID(windowID)
+	}
+	headers.Set("X-Codex-Window-Id", windowID)
 }
 
 func applyCodexTurnMetadataIdentityConfuse(rawTurnMetadata string, state *codexIdentityConfuseState) string {
@@ -217,41 +248,62 @@ func applyCodexTurnMetadataIdentityConfuse(rawTurnMetadata string, state *codexI
 	if turnID := strings.TrimSpace(gjson.Get(rawTurnMetadata, "turn_id").String()); turnID != "" {
 		updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, "turn_id", state.confuseTurnID(turnID))
 	}
-	if state.promptCacheKey != "" && gjson.Get(rawTurnMetadata, "window_id").Exists() {
-		updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, "window_id", state.promptCacheKey+":0")
+	if windowID := strings.TrimSpace(gjson.Get(rawTurnMetadata, "window_id").String()); windowID != "" {
+		updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, "window_id", state.confuseWindowID(windowID))
 	}
 	return updatedTurnMetadata
 }
 
 func applyCodexIdentityConfuseResponsePayload(payload []byte, state codexIdentityConfuseState) []byte {
-	payload = replaceCodexIdentityResponsePayload(payload, state.originalPromptCacheKey, state.promptCacheKey)
-	for _, turnID := range state.turnIDs {
-		payload = replaceCodexIdentityResponsePayload(payload, turnID.original, turnID.confused)
+	for _, replacement := range state.identityReplacements {
+		payload = replaceCodexIdentityResponsePayload(payload, replacement.original, replacement.confused)
 	}
-	return payload
+	return replaceCodexIdentityResponsePayload(payload, state.originalPromptCacheKey, state.promptCacheKey)
 }
 
 func applyCodexIdentityExposeResponsePayload(payload []byte, state codexIdentityConfuseState) []byte {
-	payload = replaceCodexIdentityResponsePayload(payload, state.promptCacheKey, state.originalPromptCacheKey)
-	for _, turnID := range state.turnIDs {
-		payload = replaceCodexIdentityResponsePayload(payload, turnID.confused, turnID.original)
+	for i := len(state.identityReplacements) - 1; i >= 0; i-- {
+		replacement := state.identityReplacements[i]
+		payload = replaceCodexIdentityResponsePayload(payload, replacement.confused, replacement.original)
 	}
-	return payload
+	return replaceCodexIdentityResponsePayload(payload, state.promptCacheKey, state.originalPromptCacheKey)
 }
 
-func (state *codexIdentityConfuseState) confuseTurnID(turnID string) string {
-	turnID = strings.TrimSpace(turnID)
-	if state == nil || !state.enabled || strings.TrimSpace(state.authID) == "" || turnID == "" {
-		return turnID
+func (state *codexIdentityConfuseState) confuseIdentityKind(kind string, value string) string {
+	value = strings.TrimSpace(value)
+	if state == nil || !state.enabled || strings.TrimSpace(state.authID) == "" || value == "" {
+		return value
 	}
-	for _, replacement := range state.turnIDs {
-		if replacement.original == turnID || replacement.confused == turnID {
+	if state.originalPromptCacheKey != "" && value == state.originalPromptCacheKey && state.promptCacheKey != "" {
+		return state.promptCacheKey
+	}
+	for _, replacement := range state.identityReplacements {
+		if replacement.original == value || replacement.confused == value {
 			return replacement.confused
 		}
 	}
-	confusedTurnID := codexIdentityConfuseUUID(state.authID, "turn", turnID)
-	state.turnIDs = append(state.turnIDs, codexIdentityReplacement{original: turnID, confused: confusedTurnID})
-	return confusedTurnID
+	confused := codexIdentityConfuseUUID(state.authID, kind, value)
+	state.identityReplacements = append(state.identityReplacements, codexIdentityReplacement{original: value, confused: confused})
+	return confused
+}
+
+func (state *codexIdentityConfuseState) confuseTurnID(turnID string) string {
+	return state.confuseIdentityKind("turn", turnID)
+}
+
+func (state *codexIdentityConfuseState) confuseWindowID(windowID string) string {
+	windowID = strings.TrimSpace(windowID)
+	if state == nil || !state.enabled || windowID == "" || state.promptCacheKey == "" {
+		return windowID
+	}
+	for _, replacement := range state.identityReplacements {
+		if replacement.original == windowID || replacement.confused == windowID {
+			return replacement.confused
+		}
+	}
+	confused := state.promptCacheKey + ":0"
+	state.identityReplacements = append(state.identityReplacements, codexIdentityReplacement{original: windowID, confused: confused})
+	return confused
 }
 
 func replaceCodexIdentityResponsePayload(payload []byte, from string, to string) []byte {
@@ -263,12 +315,46 @@ func replaceCodexIdentityResponsePayload(payload []byte, from string, to string)
 	return bytes.ReplaceAll(payload, []byte(from), []byte(to))
 }
 
-func codexIdentityConfuseEnabled(cfg *config.Config) bool {
+func codexIdentityConfuseEnabled(cfg *config.Config, auth *cliproxyauth.Auth, autoProviderScoped bool) bool {
+	if autoProviderScoped && codexIdentityIsolationRequiredForResponsesHost(auth) {
+		return true
+	}
 	if cfg == nil || !cfg.Codex.IdentityConfuse {
 		return false
 	}
 	strategy := strings.ToLower(strings.TrimSpace(cfg.Routing.Strategy))
 	return cfg.Routing.SessionAffinity || strategy == "fill-first" || strategy == "fillfirst" || strategy == "ff"
+}
+
+func codexIdentityIsolationRequiredForResponsesHost(auth *cliproxyauth.Auth) bool {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || auth.Attributes == nil {
+		return false
+	}
+	baseURL := strings.TrimSpace(auth.Attributes["base_url"])
+	if baseURL == "" {
+		return false
+	}
+	endpoint, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	switch strings.TrimSuffix(strings.ToLower(endpoint.Hostname()), ".") {
+	case "anyrouter.top", "agentrouter.org":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexResponsesIdentityIsolationEligible(from sdktranslator.Format, rawURL string) bool {
+	if sourceFormatEqual(from, sdktranslator.FromString(codexOpenAIImageSourceFormat)) {
+		return false
+	}
+	endpoint, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return strings.HasSuffix(strings.TrimSuffix(endpoint.Path, "/"), "/responses")
 }
 
 func codexIdentityConfuseUUID(authID string, kind string, value string) string {

@@ -29,6 +29,7 @@ func TestAnyRouterChannelCapacityDoesNotBlockOtherSessions(t *testing.T) {
 			var mu sync.Mutex
 			calls := map[string]int{}
 			capacityKeys := []string{}
+			streamCapacityKeys := []string{}
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var body map[string]any
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -42,6 +43,9 @@ func TestAnyRouterChannelCapacityDoesNotBlockOtherSessions(t *testing.T) {
 				if session == "capacity-limited-session" {
 					capacityKeys = append(capacityKeys, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 				}
+				if session == "capacity-stream-session" {
+					streamCapacityKeys = append(streamCapacityKeys, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+				}
 				mu.Unlock()
 				if session == "committed-session" {
 					w.Header().Set("Content-Type", "text/event-stream")
@@ -53,6 +57,11 @@ func TestAnyRouterChannelCapacityDoesNotBlockOtherSessions(t *testing.T) {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(500)
 					fmt.Fprint(w, `{"error":{"message":"The model has reached its capacity limit","type":"new_api_error","code":"get_channel_failed"}}`)
+					return
+				}
+				if session == "capacity-stream-session" {
+					w.Header().Set("Content-Type", "text/event-stream")
+					fmt.Fprint(w, "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"get_channel_failed\",\"message\":\"model at capacity\"}}}\n\n")
 					return
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
@@ -116,6 +125,24 @@ func TestAnyRouterChannelCapacityDoesNotBlockOtherSessions(t *testing.T) {
 					t.Fatalf("a different session sharing these keys should still work: error=%v output=%s", err, output)
 				}
 			}
+			_, err = execute("capacity-stream-session")
+			if err == nil || !strings.Contains(err.Error(), "get_channel_failed") {
+				t.Fatalf("stream capacity request: got %v, want original upstream channel error", err)
+			}
+			var streamStatus cliproxyexecutor.StatusError
+			if !errors.As(err, &streamStatus) || streamStatus.StatusCode() != 502 {
+				t.Fatalf("stream capacity status = %v, want 502 after SSE failure", err)
+			}
+			mu.Lock()
+			streamKeys := append([]string(nil), streamCapacityKeys...)
+			mu.Unlock()
+			if len(streamKeys) != 2 || streamKeys[0] == streamKeys[1] {
+				t.Fatalf("expected SSE capacity to try each credential once: %v", streamKeys)
+			}
+			output, err := execute("healthy-after-stream-capacity")
+			if err != nil || !strings.Contains(output, "OK") {
+				t.Fatalf("SSE capacity failure cooled shared credentials: error=%v output=%s", err, output)
+			}
 			if stream {
 				output, err := execute("committed-session")
 				if err == nil || !strings.Contains(output, "visible output") {
@@ -132,6 +159,9 @@ func TestAnyRouterChannelCapacityDoesNotBlockOtherSessions(t *testing.T) {
 			}
 			if calls["healthy-session"] != 2 {
 				t.Fatalf("healthy session calls=%v", calls)
+			}
+			if calls["capacity-stream-session"] != 2 || calls["healthy-after-stream-capacity"] != 1 {
+				t.Fatalf("SSE capacity calls=%v", calls)
 			}
 		})
 	}

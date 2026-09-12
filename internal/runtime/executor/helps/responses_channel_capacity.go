@@ -13,7 +13,7 @@ import (
 // Call only before downstream output is committed; normal credential rotation
 // and request retry limits remain owned by the auth manager.
 func ResponsesChannelCapacityError(baseURL, model string, status int, body []byte, cause error) error {
-	if cause == nil || model != "gpt-6-astra" || (status != http.StatusInternalServerError && status != http.StatusServiceUnavailable) {
+	if cause == nil || model != "gpt-6-astra" || (status != http.StatusInternalServerError && status != http.StatusBadGateway && status != http.StatusServiceUnavailable) {
 		return cause
 	}
 	endpoint, err := url.Parse(baseURL)

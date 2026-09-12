@@ -243,7 +243,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						}
 					}
 
-					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
+					terminalStatus := streamErr.StatusCode()
+					terminalErr := helps.ResponsesChannelCapacityError(baseURL, baseModel, terminalStatus, terminalBody, streamErr)
+					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, terminalStatus, terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 						reporter.PublishFailure(ctx, errClearReplay)
 						select {
@@ -252,10 +254,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						}
 						return
 					}
-					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
-					reporter.PublishFailure(ctx, streamErr)
+					helps.RecordAPIResponseError(ctx, e.cfg, terminalErr)
+					reporter.PublishFailure(ctx, terminalErr)
 					select {
-					case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+					case out <- cliproxyexecutor.StreamChunk{Err: terminalErr}:
 					case <-ctx.Done():
 					}
 					return

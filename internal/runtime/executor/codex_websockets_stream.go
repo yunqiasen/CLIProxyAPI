@@ -388,21 +388,23 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 			if streamErr, terminalBody, ok := codexTerminalFailureErr(payload); ok {
 				terminateReason = "upstream_error"
-				terminateErr = streamErr
+				terminalStatus := streamErr.StatusCode()
+				terminalErr := helps.ResponsesChannelCapacityError(baseURL, baseModel, terminalStatus, terminalBody, streamErr)
+				terminateErr = terminalErr
 				if sess != nil {
 					unlockStreamSession()
-					e.invalidateUpstreamConn(sess, conn, "terminal_failure", streamErr)
+					e.invalidateUpstreamConn(sess, conn, "terminal_failure", terminalErr)
 				}
-				if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
+				if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, terminalStatus, terminalBody); errClearReplay != nil {
 					terminateErr = errClearReplay
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "replay_clear_error", errClearReplay)
 					reporter.PublishFailure(ctx, errClearReplay)
 					_ = send(cliproxyexecutor.StreamChunk{Err: errClearReplay})
 					return
 				}
-				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", streamErr)
-				reporter.PublishFailure(ctx, streamErr)
-				_ = send(cliproxyexecutor.StreamChunk{Err: streamErr})
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", terminalErr)
+				reporter.PublishFailure(ctx, terminalErr)
+				_ = send(cliproxyexecutor.StreamChunk{Err: terminalErr})
 				return
 			}
 

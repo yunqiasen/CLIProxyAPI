@@ -313,14 +313,16 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			return resp, wsErr
 		}
 		if streamErr, terminalBody, ok := codexTerminalFailureErr(payload); ok {
+			terminalStatus := streamErr.StatusCode()
+			terminalErr := helps.ResponsesChannelCapacityError(baseURL, baseModel, terminalStatus, terminalBody, streamErr)
 			if sess != nil {
 				unlockSession()
-				e.invalidateUpstreamConn(sess, conn, "terminal_failure", streamErr)
+				e.invalidateUpstreamConn(sess, conn, "terminal_failure", terminalErr)
 			}
-			if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
+			if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, terminalStatus, terminalBody); errClearReplay != nil {
 				return resp, errClearReplay
 			}
-			return resp, streamErr
+			return resp, terminalErr
 		}
 
 		payload = normalizeCodexWebsocketCompletion(payload)

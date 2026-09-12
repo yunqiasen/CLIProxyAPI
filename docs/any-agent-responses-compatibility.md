@@ -28,11 +28,15 @@ cooled every attempted key, and then returned `auth_unavailable` even to another
 session that the same upstream credentials could still serve.
 
 The HTTP Responses executor now marks a valid JSON `error.code=get_channel_failed`
-response for `gpt-6-astra` with status 500 or 503 from exactly `anyrouter.top` as
-credential-fallback eligible, before output. It preserves the original error, allows bounded credential
-rotation, and does not change shared credential availability. Failed attempts still
-count as failures. Credential ordering, configured retry limits and post-output
-replay rules are unchanged. No session IDs are shared or rewritten for recovery.
+response for `gpt-6-astra` with status 500, 502, or 503 from exactly `anyrouter.top` as
+credential-fallback eligible, before output. This includes the SSE
+`response.failed` form: the upstream event is normalized to the same original error
+body and its default 502 status is classified by the same narrow exception. The
+HTTP non-streaming, HTTP streaming, and Codex WebSocket terminal paths all use this
+classification. It preserves the original error, allows bounded credential rotation,
+and does not change shared credential availability. Failed attempts still count as
+failures. Credential ordering, configured retry limits and post-output replay rules
+are unchanged. No session IDs are shared or rewritten for recovery.
 Other hosts, authentication/payment/quota failures, empty or malformed errors and
 ordinary 5xx responses keep their existing handling. This exception applies to
 normal streaming/non-streaming HTTP Responses requests, not image or compact APIs.
@@ -41,7 +45,9 @@ This repairs CPA's amplification of the upstream failure; it does not create Any
 capacity or guarantee that a new session will succeed. When all attempted channels
 return this error, the caller receives the original channel error rather than a
 new false credential-unavailable state. Existing unrelated cooldowns retain their
-normal recovery deadlines.
+normal recovery deadlines. A terminal SSE capacity event after no downstream output
+is therefore retried across the bounded credential set; a capacity event after real
+output remains a terminal failure and is never replayed.
 
 Reproduction: `TestAnyRouterChannelCapacityDoesNotBlockOtherSessions` uses real
 config synthesis, manager selection, the Codex executor and an HTTP proxy fixture.

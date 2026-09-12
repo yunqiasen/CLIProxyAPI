@@ -23,6 +23,7 @@ func TestResponsesChannelCapacityErrorScope(t *testing.T) {
 		fallback        bool
 	}{
 		{"any_http_500", "https://anyrouter.top/v1", body, 500, true},
+		{"any_http_502", "https://anyrouter.top/v1", body, 502, true},
 		{"any_http_503", "https://ANYROUTER.TOP/v1", body, 503, true},
 		{"other_provider", "https://agentrouter.org/v1", body, 500, false},
 		{"host_suffix", "https://anyrouter.top.example.org/v1", body, 500, false},

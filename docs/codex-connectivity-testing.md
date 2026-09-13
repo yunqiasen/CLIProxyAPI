@@ -14,7 +14,7 @@ response object. The outer HTTP 200 alone is not proof of a successful generatio
   non-completed response status remain failures, including with HTTP 200.
   Standalone JSON event envelopes use the same completion/error checks as SSE.
 - Accept an SSE result only after a `response.completed` event with an object
-  response. If a status is present, it must be `completed`; an error must be absent.
+  response. The status must be `completed`; an error must be absent.
 - Lifecycle events, partial text and `[DONE]` alone do not establish completion.
 - An explicit `error`, `response.failed`, `response.incomplete`, or
   `response.cancelled` event wins over a completed event. Malformed event data also
@@ -25,10 +25,37 @@ response object. The outer HTTP 200 alone is not proof of a successful generatio
   the existing localized request-failure message instead of dumping the transcript.
 - Keep each selected key's state and grouped success/failure counts independent.
 
-This interpretation is scoped to Codex connectivity tests. It does not alter
-provider configuration, selected credentials, model aliases, request headers,
-executor retry/timeout behavior, production Responses forwarding, or raw logs.
-A green management probe does not establish that all production streams are stable.
+## September 13: production request parity
+
+The probe and normal `/v1/responses` traffic share `NewCodexAutoExecutor`,
+Responses source translation, native provider credential synthesis, configured
+alias/prefix/reasoning-suffix resolution, model capability metadata, and payload
+rules (including source/alias/header gates). HTTP and supported WebSocket execution
+therefore receive the same compatibility repairs automatically.
+
+The management input accepts `codex_config`, the serialized native provider draft.
+It overlays a cloned saved provider; explicit legacy per-field overrides still win.
+A draft never supplies credentials: only the selected `auth_index`/`api_key` does.
+The editor reuses its save builder and managed-field list, including explicit
+clears and opaque provider/model options. It strips the key pool from the draft.
+The backend synthesizes exactly one temporary auth without registering it in the
+live manager or resetting cooldowns. Header-only probes use the same synthesis.
+
+Normal provider-row probes use the first key only; key-row probes use that key.
+The edit sheet's explicit **all keys** button remains available and bounded to four
+concurrent requests. Group-level testing uses one key per provider, not every key.
+A failed selected key never causes a probe of a sibling key. Live investigation
+must pin one key per affected site rather than scanning paid pools.
+
+The Codex browser request has no independent 30-second whole-response deadline.
+The executor's provider-configured first-output watch still applies (zero disables
+it), and real output stops that watch. Other provider probe timing is unchanged.
+Closing/canceling the HTTP request retains normal caller cancellation.
+
+A green probe confirms that one request completed for the selected provider/key
+and draft, not that arbitrary old conversation history or every upstream request
+will succeed. Regressions separately exercise old history, signature recovery,
+output commit boundaries and the same production/management upstream fixture.
 
 ## Regression and local delivery
 
@@ -36,7 +63,7 @@ In `Cli-Proxy-API-Management-Center`, run:
 
 ```sh
 bun install --frozen-lockfile
-bun test tests/codexProviderProbe.test.ts tests/codexProviderProbeResponses.test.ts
+bun test tests/codexProviderProbe.test.ts tests/codexProviderProbeResponses.test.ts tests/codexProviderParity.test.ts
 bun run test
 bun run lint
 bun run type-check
@@ -59,7 +86,21 @@ and run `node test/provider_usage_match_test.mjs`. Verify the built page's selec
 key test, not just the backend's HTTP status. Follow the existing local delivery
 procedure: scoped commits, the mounted panel update, exact runtime commit metadata,
 matching served-file hash, and an unchanged container ID. No container recreation
-or remote publication is required for this panel repair.
+is required for this panel repair. Remote publication and VPS updates follow
+an explicit deployment request independently of the local hot-reload checks.
 
 Read `X-CPA-COMMIT` from an authenticated management response, such as
 `GET /v0/management/config`. Public model endpoints do not expose this header.
+
+## Review boundaries (September 13)
+
+- Image-source exclusion is covered for both WebSocket executor modes as well as
+  HTTP. A regression failed on the missing WebSocket guard before the repair.
+- Saved header-only credentials and runtime custom headers survive when no draft
+  overrides them. Explicit draft/header clears and selected-key priority remain.
+- Codex completion checks stay strict. The legacy xAI raw transport explicitly
+  retains its previous statusless-response handling and existing timeout.
+- The UI chooses the public model name/prefix, like an API client; only the backend
+  resolves that route to the upstream model and attaches model capabilities.
+- Required endpoint arguments prevent future signature-recovery callers from
+  silently omitting the host-scoped Agent error classification.

@@ -3,7 +3,9 @@
 ## Scope and status
 
 This repair targets the configured Any `gpt-6-astra` (`cpa-6a`) and
-AgentRouter `gpt-5.6-sol` (`cpa-5.6s`) routes. Other providers sharing an alias
+AgentRouter `gpt-5.6-sol` (`cpa-5.6s`) routes, plus the September 13
+AgentRouter `gpt-6-astra` signature rejection. The user-removed AgentRouter
+`cpa-6a` mapping is not restored by this repair. Other providers sharing an alias
 are not evidence of AgentRouter compatibility. The signature/framing and
 first-output repairs use protocol signals. The September 9 channel-allocation exception below is deliberately scoped to the
 verified AnyRouter endpoint; it is not a general credential-cooldown change.
@@ -15,8 +17,58 @@ Tests run in an isolated worktree; route-pinned diagnostics use a separate
 loopback service. Local delivery applies the reviewed changes to `CPA-fork`,
 commits them locally, and verifies automatic code hot reload with the exact
 `X-CPA-COMMIT` and unchanged container ID. Normal source edits do not recreate
-the container. Additional provider/model probes and remote publication are
-outside this task.
+the container. Live checks pin one existing key per affected site. Remote publication follows
+the separately requested fork delivery workflow.
+
+## September 13: historical input and accurate cooldown diagnostics
+
+Captured Any `gpt-6-astra` requests fail with `array_above_max_length` even when
+`reasoning.content` contains just one `reasoning_text`. Separately, one completed
+historical `web_search_call` reproduces `invalid_responses_request`. This is not an
+input-token limit. A replay retaining all 165 input items but representing searches
+as assistant history completed; merely removing reasoning did not fix search history.
+
+At the shared outgoing preparation boundary, only the exact `anyrouter.top`
+Responses endpoint and `gpt-6-astra` model receive the verified normalization:
+
+- Keep completed search records as an assistant `output_text` with a data-only
+  history label and the full original record JSON, preserving queries and sources.
+- Move `reasoning_text` into `summary_text`, retaining existing summary and other
+  fields, and clear `content` to `[]`. Unknown shapes stay unchanged.
+- Preserve ordinary messages, images, tool calls/results and caller-owned bytes.
+  The normalization is idempotent; compact/remote-incremental histories are excluded.
+- HTTP and WebSocket share the helper. Direct image source requests are excluded.
+
+AgentRouter can return `invalid_request_error` with null `code`, empty `param`,
+and the exact encrypted-item decrypt-failure message. Recognition is restricted to
+`agentrouter.org`, a Responses endpoint, this exact envelope, and a referenced
+opaque reasoning item actually present in the outgoing request. It feeds the same
+one-shot pre-output signature recovery as structured signature errors; unrelated
+text is not a recovery signal. Readable reasoning summary/content is preserved
+while rejected opaque state and orphan IDs are removed. Repeated rejection and
+errors after real text/reasoning/tool output stay failures; no fabricated completion.
+
+The historical 07:56 Agent response contained nine budget-pool 402 failures and one
+account-quota 403. A later check observed recovery, so this capture is not evidence
+that the provider remains out of credit. Existing 30-minute cooldown behavior is
+retained, including normal expiry and explicit targeted reset. When all matching
+credentials are in known payment/auth/account cooldown, CPA returns HTTP 503 with
+`error.code=upstream_credentials_cooling_down`, the requested model, remaining
+seconds, and grouped sanitized cause codes/status/counts plus `Retry-After`.
+It exposes no keys, auth IDs, or raw upstream text. Healthy siblings continue to
+serve; empty/disabled/unknown candidate sets and 429 quota handling retain their
+existing semantics. Standard, weighted, mixed and custom-selector paths share this
+error builder. The original upstream failure is still retained in request logs.
+
+Management probes use production request synthesis/translation and the saved/draft
+model capabilities; see [Codex connectivity testing](codex-connectivity-testing.md).
+The regression suite uses local proxy fixtures, not paid provider sweeps:
+
+```sh
+go test ./internal/runtime/executor ./internal/runtime/executor/helps \
+  ./internal/api/handlers/management ./sdk/cliproxy/auth ./sdk/api/handlers \
+  -run 'History|Agent.*Signature|ProviderConnectivity|PaymentCooldown|CredentialCooldown' -count=1
+```
 
 ## September 9: Any channel allocation must not cool shared credentials
 
@@ -105,8 +157,8 @@ covers both streaming and non-streaming Responses requests.
 ### Narrow signature recovery
 
 - Successful ordinary requests retain their reasoning history.
-- Recover only structured `invalid_encrypted_content` or
-  `thinking_signature_invalid` rejection, not matching words in free text.
+- Recover structured `invalid_encrypted_content` / `thinking_signature_invalid`,
+  or the narrowly verified AgentRouter envelope above; arbitrary words do not trigger recovery.
 - HTTP 400/422 rejection or an initial SSE/WebSocket signature error permits
   one repaired request using the same selected model, endpoint, and credential.
 - Use `error.param` to target an input index when available. Otherwise remove
@@ -328,13 +380,16 @@ retry header race discovered in this change was fixed and specifically re-tested
    extending this Any/Agent task with additional review-provider probes.
 2. Apply reviewed code/tests/docs to primary `CPA-fork`, preserving unrelated work,
    and create the local delivery commit.
-3. Back up the local config. Change only Any's `websockets: true` to `false` for
-   this verified route; preserve its credentials, model, alias, and proxy settings.
-   This is a local capability setting, not a global default or a committed secret.
+3. Preserve the current local configuration, credentials, model mappings, proxy
+   settings and cooldowns. The earlier Any HTTP capability adjustment is already
+   deployed; do not reapply it or restore the user-removed Agent `cpa-6a` mapping.
 4. Wait for the existing development supervisor to compile the exact local commit
    and replace the CPA process. Ordinary source delivery keeps the container ID,
    mounts, environment, network and restart policy unchanged.
 5. Verify `X-CPA-COMMIT`, API and management panel availability, then exercise
    switched-history HTTP and client WebSocket continuations with route pinning.
    If verification regresses, restore the previous image and config together.
-6. No push, published release/image, or remote deployment is included.
+6. Follow the explicit fork publication request: push the reviewed UI/backend
+   mainlines, verify the management release asset and versioned image, then read
+   the VPS maintenance instructions before its scoped update. Record any remote
+   access issue separately; local completion does not prove remote deployment.

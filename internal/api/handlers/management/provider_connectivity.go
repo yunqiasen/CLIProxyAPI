@@ -8,12 +8,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	apiHandlers "github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -28,6 +30,7 @@ type providerConnectivityClaudeCloak struct {
 }
 
 type providerConnectivityTestRequest struct {
+	CodexConfig             json.RawMessage                  `json:"codex_config"`
 	Provider                string                           `json:"provider"`
 	AuthIndex               string                           `json:"auth_index"`
 	Model                   string                           `json:"model"`
@@ -175,21 +178,23 @@ func (h *Handler) performCodexConnectivityTest(ctx context.Context, body provide
 	}
 
 	headers := connectivityHeaders(body.Header)
-	executor := runtimeexecutor.NewCodexExecutor(cfg)
-	stream, errExecute := executor.ExecuteStream(ctx, auth, coreexecutor.Request{
+	executor := runtimeexecutor.NewCodexAutoExecutor(cfg)
+	request := coreauth.WithConfiguredAPIKeyModelInfo(cfg, auth, coreexecutor.Request{
 		Model:   model,
 		Payload: payload,
 		Metadata: map[string]any{
 			coreexecutor.DerivedSessionIDMetadataKey: probeSessionID,
 		},
-	}, coreexecutor.Options{
+	}, requestedModel)
+	stream, errExecute := executor.ExecuteStream(ctx, auth, request, coreexecutor.Options{
 		OriginalRequest: payload,
-		SourceFormat:    sdktranslator.FormatCodex,
-		ResponseFormat:  sdktranslator.FormatCodex,
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
 		Headers:         headers,
 		Stream:          true,
 		Metadata: map[string]any{
 			coreexecutor.RequestedModelMetadataKey: requestedModel,
+			coreexecutor.RequestPathMetadataKey:    "/v1/responses",
 		},
 	})
 	if errExecute != nil {
@@ -376,84 +381,90 @@ func (h *Handler) codexConnectivityAuth(body providerConnectivityTestRequest) (*
 	}
 
 	testKey := codexConfigForConnectivity(cfg, auth)
-	if body.APIKey != nil {
-		removeConnectivityCredentialHeaderAttrs(auth.Attributes)
-		apiKey := strings.TrimSpace(*body.APIKey)
-		if apiKey == "" {
-			delete(auth.Attributes, coreauth.AttributeAPIKey)
-		} else {
-			auth.Attributes[coreauth.AttributeAPIKey] = apiKey
+	// Runtime-only header credentials remain valid when no draft replaces them.
+	for name, value := range auth.Attributes {
+		if strings.HasPrefix(strings.ToLower(name), "header:") {
+			name = strings.TrimSpace(name[len("header:"):])
+			if name != "" {
+				if testKey.Headers == nil {
+					testKey.Headers = make(map[string]string)
+				}
+				testKey.Headers[name] = value
+			}
 		}
+	}
+	// Runtime values include selected-entry proxy overrides; draft fields win next.
+	testKey.APIKey = strings.TrimSpace(auth.Attributes[coreauth.AttributeAPIKey])
+	testKey.BaseURL = strings.TrimSpace(auth.Attributes["base_url"])
+	testKey.ProxyURL = auth.ProxyURL
+	if len(body.CodexConfig) > 0 {
+		// Decode over a field map so object fields replace, rather than merge maps.
+		saved, _ := json.Marshal(testKey)
+		var fields, draft map[string]json.RawMessage
+		_ = json.Unmarshal(saved, &fields)
+		if err := json.Unmarshal(body.CodexConfig, &draft); err != nil || draft == nil {
+			return nil, nil, fmt.Errorf("invalid codex_config object")
+		}
+		for key, value := range draft {
+			fields[key] = value
+		}
+		merged, _ := json.Marshal(fields)
+		testKey = config.CodexKey{}
+		if err := json.Unmarshal(merged, &testKey); err != nil {
+			return nil, nil, fmt.Errorf("invalid codex_config: %w", err)
+		}
+	}
+	// A provider draft never selects credentials; the selected row alone owns them.
+	testKey.APIKey = strings.TrimSpace(auth.Attributes[coreauth.AttributeAPIKey])
+	testKey.APIKeyEntries = nil
+	if body.APIKey != nil {
+		testKey.APIKey = strings.TrimSpace(*body.APIKey)
 	}
 	if body.BaseURL != nil {
-		baseURL := strings.TrimSpace(*body.BaseURL)
-		if baseURL == "" {
-			delete(auth.Attributes, "base_url")
-		} else {
-			auth.Attributes["base_url"] = baseURL
-		}
+		testKey.BaseURL = strings.TrimSpace(*body.BaseURL)
 	}
 	if body.ProxyURL != nil {
-		auth.ProxyURL = strings.TrimSpace(*body.ProxyURL)
+		testKey.ProxyURL = strings.TrimSpace(*body.ProxyURL)
 	}
 	if body.Header != nil {
-		removeConnectivityHeaderAttrs(auth.Attributes)
-		hasAPIKey := strings.TrimSpace(auth.Attributes[coreauth.AttributeAPIKey]) != ""
-		for key, value := range body.Header {
-			key = strings.TrimSpace(key)
-			value = strings.TrimSpace(value)
-			if key == "" || value == "" {
-				continue
-			}
-			if isConnectivityCredentialHeader(key) {
-				if !hasAPIKey && strings.EqualFold(key, "Authorization") && isUsableConnectivityAuthorization(value) {
-					auth.Attributes["header:"+key] = value
-				}
-				continue
-			}
-			auth.Attributes["header:"+key] = value
-		}
-	}
-	if strings.TrimSpace(auth.Attributes[coreauth.AttributeAPIKey]) == "" && connectivityAuthorizationFromAttrs(auth.Attributes) == "" {
-		return nil, nil, fmt.Errorf("api key required")
+		testKey.Headers = body.Header
 	}
 	if body.DisableImageGeneration != nil {
 		testKey.DisableImageGeneration = *body.DisableImageGeneration
-		if *body.DisableImageGeneration {
-			auth.Attributes[coreauth.AttributeCodexDisableImageGeneration] = "true"
-		} else {
-			delete(auth.Attributes, coreauth.AttributeCodexDisableImageGeneration)
+	}
+	headers := cloneConnectivityHeaders(testKey.Headers)
+	if headers == nil {
+		headers = make(map[string]string)
+	}
+	if testKey.APIKey == "" {
+		for key, value := range testKey.Headers {
+			if strings.EqualFold(strings.TrimSpace(key), "Authorization") && isUsableConnectivityAuthorization(value) {
+				headers["Authorization"] = strings.TrimSpace(value)
+			}
+		}
+		if headers["Authorization"] == "" {
+			return nil, nil, fmt.Errorf("api key required")
 		}
 	}
-
-	testKey.APIKey = strings.TrimSpace(auth.Attributes[coreauth.AttributeAPIKey])
-	testKey.APIKeyEntries = nil
-	testKey.BaseURL = strings.TrimSpace(auth.Attributes["base_url"])
-	testKey.ProxyURL = auth.ProxyURL
-	if body.Header != nil {
-		testKey.Headers = cloneConnectivityHeaders(body.Header)
-	}
+	testKey.Headers = headers
 	cfg.CodexKey = []config.CodexKey{testKey}
-	return auth, cfg, nil
+	synthesisConfig := &config.Config{CodexKey: cfg.CodexKey}
+	if err := synthesisConfig.ValidateCredentialWeights(); err != nil {
+		return nil, nil, fmt.Errorf("invalid probe config: %w", err)
+	}
+	generated := synthesizer.SynthesizeCodexAuth(&synthesizer.SynthesisContext{
+		Config: cfg, Now: time.Now(), IDGenerator: synthesizer.NewStableIDGenerator(),
+	}, testKey, config.EffectiveNativeAPIKey{
+		APIKey: testKey.APIKey, ProxyURL: testKey.ProxyURL, Priority: testKey.Priority, Index: -1,
+	}, 0)
+	if !strings.HasPrefix(auth.ID, "management:") && body.APIKey == nil {
+		generated.ID = auth.ID
+	}
+	return generated, cfg, nil
 }
 
 func resolveCodexConnectivityModel(cfg *config.Config, auth *coreauth.Auth, requestedModel string) string {
-	requestedModel = strings.TrimSpace(requestedModel)
-	entry := codexConfigForConnectivity(cfg, auth)
-	for i := range entry.Models {
-		alias := strings.TrimSpace(entry.Models[i].Alias)
-		name := strings.TrimSpace(entry.Models[i].Name)
-		if alias != "" && strings.EqualFold(alias, requestedModel) {
-			if name != "" {
-				return name
-			}
-			return alias
-		}
-		if name != "" && strings.EqualFold(name, requestedModel) {
-			return name
-		}
-	}
-	return requestedModel
+	return coreauth.ResolveConfiguredAPIKeyModel(cfg, auth, requestedModel)
 }
 
 func codexConfigForConnectivity(cfg *config.Config, auth *coreauth.Auth) config.CodexKey {
@@ -513,17 +524,6 @@ func removeConnectivityHeaderAttrs(attrs map[string]string) {
 	}
 }
 
-func removeConnectivityCredentialHeaderAttrs(attrs map[string]string) {
-	for key := range attrs {
-		if !strings.HasPrefix(strings.ToLower(key), "header:") {
-			continue
-		}
-		if isConnectivityCredentialHeader(key[len("header:"):]) {
-			delete(attrs, key)
-		}
-	}
-}
-
 func isConnectivityCredentialHeader(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
 	case "authorization", "x-api-key":
@@ -536,18 +536,6 @@ func isConnectivityCredentialHeader(key string) bool {
 func isUsableConnectivityAuthorization(value string) bool {
 	value = strings.TrimSpace(value)
 	return value != "" && !strings.Contains(value, "$TOKEN$")
-}
-
-func connectivityAuthorizationFromAttrs(attrs map[string]string) string {
-	for key, value := range attrs {
-		if !strings.EqualFold(strings.TrimSpace(key), "header:Authorization") {
-			continue
-		}
-		if isUsableConnectivityAuthorization(value) {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
 }
 
 func cloneConnectivityHeaders(headers map[string]string) map[string]string {

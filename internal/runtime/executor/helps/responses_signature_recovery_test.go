@@ -14,16 +14,16 @@ import (
 func TestPortableResponsesSignatureRetry(t *testing.T) {
 	rejection := []byte(`{"error":{"code":"invalid_encrypted_content","param":"input[1].encrypted_content"}}`)
 	body := []byte(`{"input":[{"type":"reasoning","encrypted_content":"keep"},{"type":"reasoning","id":"drop","encrypted_content":"foreign"},{"type":"message","role":"user","content":[{"type":"input_image","image_url":"fixture"}]}]}`)
-	got, ok := PortableResponsesSignatureRetry(body, rejection)
+	got, ok := PortableResponsesSignatureRetry(body, rejection, "https://fixture.invalid/responses")
 	if !ok || len(gjson.GetBytes(got, "input").Array()) != 2 || gjson.GetBytes(got, "input.0.encrypted_content").String() != "keep" || gjson.GetBytes(got, "input.1.content.0.type").String() != "input_image" {
 		t.Fatal("targeted repair changed unrelated history")
 	}
 	for _, raw := range []string{`{"input":[{"type":"compaction","encrypted_content":"opaque"}]}`, `{"previous_response_id":"remote","input":[{"type":"reasoning","encrypted_content":"opaque"}]}`, `{"input":[{"type":"reasoning","encrypted_content":"opaque"}]}`} {
-		if _, ok := PortableResponsesSignatureRetry([]byte(raw), []byte(`{"error":{"code":"invalid_encrypted_content"}}`)); ok {
+		if _, ok := PortableResponsesSignatureRetry([]byte(raw), []byte(`{"error":{"code":"invalid_encrypted_content"}}`), "https://fixture.invalid/responses"); ok {
 			t.Fatal("recovery erased the only context or replayed an incremental request")
 		}
 	}
-	if _, ok := PortableResponsesSignatureRetry(body, []byte(`{"error":{"message":"a tool mentioned invalid_encrypted_content"}}`)); ok {
+	if _, ok := PortableResponsesSignatureRetry(body, []byte(`{"error":{"message":"a tool mentioned invalid_encrypted_content"}}`), "https://fixture.invalid/responses"); ok {
 		t.Fatal("free text falsely triggered recovery")
 	}
 }
@@ -31,7 +31,7 @@ func TestPortableResponsesSignatureRetry(t *testing.T) {
 func TestPortableResponsesSignatureRetryPreservesHistory(t *testing.T) {
 	body := []byte(`{"model":"fixture","input":[{"type":"reasoning","encrypted_content":"foreign"},{"type":"message","role":"user","content":[{"type":"input_text","text":"marker"},{"type":"input_image","image_url":"data:image/png;base64,fixture"}]},{"type":"custom_tool_call","call_id":"call_fixture","name":"fixture","input":"input"},{"type":"custom_tool_call_output","call_id":"call_fixture","output":"output"}],"reasoning":{"effort":"high"}}`)
 	original := string(body)
-	repaired, ok := PortableResponsesSignatureRetry(body, []byte(`{"response":{"error":{"code":"thinking_signature_invalid"}}}`))
+	repaired, ok := PortableResponsesSignatureRetry(body, []byte(`{"response":{"error":{"code":"thinking_signature_invalid"}}}`), "https://fixture.invalid/responses")
 	if !ok {
 		t.Fatal("explicit nested signature failure not repaired")
 	}
@@ -50,12 +50,12 @@ func TestPortableResponsesSignatureRetryPreservesHistory(t *testing.T) {
 	}
 	for _, suffix := range []string{`{"type":"compaction","encrypted_content":"compact"}`, `{"type":"compaction_summary","encrypted_content":"compact"}`} {
 		raw := []byte(`{"input":[{"type":"reasoning","encrypted_content":"opaque"},{"type":"message","role":"user","content":"marker"},` + suffix + `]}`)
-		if _, ok := PortableResponsesSignatureRetry(raw, []byte(`{"error":{"code":"invalid_encrypted_content"}}`)); ok {
+		if _, ok := PortableResponsesSignatureRetry(raw, []byte(`{"error":{"code":"invalid_encrypted_content"}}`), "https://fixture.invalid/responses"); ok {
 			t.Fatal("compaction history silently changed")
 		}
 	}
 	for _, rejection := range []string{`{"error":{"code":"no_capacity"}}`, `{"error":{"code":"invalid_encrypted_content","param":"model"}}`, `{"error":{"code":"invalid_encrypted_content","param":"input[8]"}}`} {
-		if _, ok := PortableResponsesSignatureRetry(body, []byte(rejection)); ok {
+		if _, ok := PortableResponsesSignatureRetry(body, []byte(rejection), "https://fixture.invalid/responses"); ok {
 			t.Fatal("unrelated rejection changed history")
 		}
 	}

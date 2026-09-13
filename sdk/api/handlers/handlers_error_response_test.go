@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
@@ -276,5 +277,24 @@ func TestWriteErrorResponse_ContextCanceledUses499(t *testing.T) {
 
 	if recorder.Code != clienterror.StatusClientClosedRequest {
 		t.Fatalf("status = %d, want %d", recorder.Code, clienterror.StatusClientClosedRequest)
+	}
+}
+
+func TestWriteErrorResponsePreservesCredentialCooldownCause(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	a := &coreauth.Auth{ID: "private-credential", Provider: "codex", Unavailable: true, NextRetryAfter: time.Now().Add(time.Minute), LastError: &coreauth.Error{HTTPStatus: 402, Message: `{"error":{"message":"Budget pool quota has been exhausted. private-key"}}`}}
+	_, err := (&coreauth.RoundRobinSelector{}).Pick(context.Background(), "codex", "cpa-6a", coreexecutor.Options{}, []*coreauth.Auth{a})
+	if err == nil {
+		t.Fatal("expected cooling error")
+	}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	NewBaseAPIHandlers(nil, nil).WriteErrorResponse(c, executionErrorMessage(err))
+	if recorder.Code != 503 || recorder.Header().Get("Retry-After") == "" || !strings.Contains(recorder.Body.String(), "upstream_budget_pool_exhausted") {
+		t.Fatalf("cooldown diagnostic lost: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "private-") {
+		t.Fatal("credential information leaked")
 	}
 }

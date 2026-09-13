@@ -315,6 +315,7 @@ This repository is maintained as a fork of `router-for-me/CLIProxyAPI`.
 - If you work from a personal GitHub fork, keep `origin` pointed at your fork and use `upstream` for `router-for-me/CLIProxyAPI`.
 - When explicitly requested, push daily fork work to `origin/CPA-fork`; keep fork-only changes out of upstream. Local delivery alone does not include a push.
 - Every local code-change task includes tests, docs, required review, an automatic scoped Git commit, and live verification without another reminder. Local development uses `docker-compose.local.yml` plus `docker-compose.hot-reload.yml`: source edits and commits automatically compile and replace the CPA process inside the same container; failed builds keep the old process running. Rebuild the development image only for runtime/toolchain/supervisor changes. Production releases retain immutable images. See [Local Fork Delivery](docs/local-fork-delivery.md).
+- Codex provider tests reuse the production Responses request path and the save-form draft. Normal tests pin one key; testing the whole pool is explicit. Empty HTTP 200 and unfinished streams remain failures. See [Codex Connectivity Testing](docs/codex-connectivity-testing.md).
 - The forked management UI is maintained in `yunqiasen/Cli-Proxy-API-Management-Center` on the `CPA-UI-fork` branch. Docker deployments of this fork should use the normal `/management.html` flow; the backend defaults to downloading the latest `management.html` release from that fork.
 
 ## Who is with us?

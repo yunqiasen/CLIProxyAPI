@@ -178,7 +178,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 		if streamErr, terminalBody, ok := codexTerminalFailureErr(eventData); ok {
 			if !observedOutput && !signatureRepairUsed {
-				if repaired, canRetry := helps.PortableResponsesSignatureRetry(upstreamBody, terminalBody); canRetry {
+				if repaired, canRetry := helps.PortableResponsesSignatureRetry(upstreamBody, terminalBody, httpReq.URL.String()); canRetry {
 					retry := helps.CloneResponsesRetryRequest(httpReq, repaired)
 					closeHTTPResponseBody(httpResp, "codex executor: close rejected response body")
 					if errRecord := recordSignatureRetry(nil, terminalBody, retry, repaired); errRecord != nil {

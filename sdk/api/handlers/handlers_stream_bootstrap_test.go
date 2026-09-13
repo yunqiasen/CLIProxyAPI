@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -876,7 +875,7 @@ func TestExecuteStreamWithAuthManager_DoesNotRetryAfterFirstByte(t *testing.T) {
 	}
 }
 
-func TestExecuteStreamWithAuthManager_EnrichesBootstrapRetryAuthUnavailableError(t *testing.T) {
+func TestExecuteStreamWithAuthManager_PreservesBootstrapRetryCredentialFailure(t *testing.T) {
 	executor := &failOnceStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
@@ -927,18 +926,25 @@ func TestExecuteStreamWithAuthManager_EnrichesBootstrapRetryAuthUnavailableError
 		t.Fatalf("status = %d, want %d", gotErr.StatusCode, http.StatusServiceUnavailable)
 	}
 
-	var authErr *coreauth.Error
-	if !errors.As(gotErr.Error, &authErr) || authErr == nil {
-		t.Fatalf("expected coreauth.Error, got %T", gotErr.Error)
+	var diagnostic struct {
+		Error struct {
+			Code   string `json:"code"`
+			Model  string `json:"model"`
+			Causes []struct {
+				Provider string `json:"provider"`
+				Code     string `json:"code"`
+				Status   int    `json:"upstream_status"`
+			} `json:"causes"`
+		} `json:"error"`
 	}
-	if authErr.Code != "auth_unavailable" {
-		t.Fatalf("code = %q, want %q", authErr.Code, "auth_unavailable")
+	if err := json.Unmarshal([]byte(gotErr.Error.Error()), &diagnostic); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(authErr.Message, "providers=codex") {
-		t.Fatalf("message missing provider context: %q", authErr.Message)
+	if diagnostic.Error.Code != "upstream_credentials_cooling_down" || diagnostic.Error.Model != "test-model" {
+		t.Fatalf("known failure lost model context: %v", gotErr.Error)
 	}
-	if !strings.Contains(authErr.Message, "model=test-model") {
-		t.Fatalf("message missing model context: %q", authErr.Message)
+	if len(diagnostic.Error.Causes) != 1 || diagnostic.Error.Causes[0].Provider != "codex" || diagnostic.Error.Causes[0].Status != http.StatusUnauthorized || diagnostic.Error.Causes[0].Code != "upstream_authentication_failed" {
+		t.Fatalf("known failure lost provider/cause: %v", gotErr.Error)
 	}
 
 	if executor.Calls() != 1 {

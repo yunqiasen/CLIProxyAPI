@@ -294,6 +294,9 @@ func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, no
 			}
 			return nil, newModelCooldownError(model, providerForError, resetIn)
 		}
+		if err := knownCredentialCooldownError(auths, provider, model, now); err != nil {
+			return nil, err
+		}
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}
 

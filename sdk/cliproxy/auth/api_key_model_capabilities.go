@@ -97,6 +97,29 @@ func CodexAPIKeyModelIsCompat(cfg *internalconfig.Config, auth *Auth, model stri
 	return false
 }
 
+// ResolveConfiguredAPIKeyModel resolves aliases, prefixes and reasoning suffixes
+// identically for pinned probes and manager-selected execution.
+func ResolveConfiguredAPIKeyModel(cfg *internalconfig.Config, auth *Auth, routeModel string) string {
+	requested := rewriteModelForAuth(strings.TrimSpace(routeModel), auth)
+	resolved := resolveAPIKeyModelAliasWithResult(cfg, auth, requested)
+	if resolved.UpstreamModel != "" {
+		return resolved.UpstreamModel
+	}
+	return requested
+}
+
+// WithConfiguredAPIKeyModelInfo binds the same model capability snapshot used by
+// manager-selected requests to an explicitly pinned executor request.
+func WithConfiguredAPIKeyModelInfo(cfg *internalconfig.Config, auth *Auth, req cliproxyexecutor.Request, routeModel string) cliproxyexecutor.Request {
+	if auth == nil {
+		return req
+	}
+	routing := &apiKeyModelRoutingSnapshot{config: cfg, capabilities: apiKeyModelCapabilityTable{
+		auth.ID: compileAPIKeyModelCapabilitiesForAuth(cfg, auth),
+	}}
+	return attachResolvedAPIKeyModelInfo(routing, req, auth, routeModel, req.Model)
+}
+
 func (m *Manager) attachResolvedAPIKeyModelInfo(req cliproxyexecutor.Request, auth *Auth, routeModel, upstreamModel string) cliproxyexecutor.Request {
 	return attachResolvedAPIKeyModelInfo(m.loadAPIKeyModelRouting(), req, auth, routeModel, upstreamModel)
 }

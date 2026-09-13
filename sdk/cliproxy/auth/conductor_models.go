@@ -778,6 +778,10 @@ func resolveNativeAPIKeyConfigByAuth[T internalconfig.NativeAPIKeyConfigEntry](e
 	if auth.AuthSourceKind() == AuthSourceConfig && auth.Attributes != nil {
 		if index, errIndex := strconv.Atoi(strings.TrimSpace(auth.Attributes[AttributeConfigIndex])); errIndex == nil && index >= 0 && index < len(entries) {
 			entry := &entries[index]
+			// Pinned management probes can use a header-only native credential.
+			if apiKey == "" && baseURL != "" && strings.EqualFold((*entry).GetBaseURL(), baseURL) && len((*entry).GetEffectiveAPIKeys()) == 0 && auth.AuthKind() == AuthKindAPIKey {
+				return entry
+			}
 			for _, effective := range (*entry).GetEffectiveAPIKeys() {
 				if (apiKey == "" || strings.EqualFold(effective.APIKey, apiKey)) &&
 					(baseURL == "" || strings.EqualFold((*entry).GetBaseURL(), baseURL)) {

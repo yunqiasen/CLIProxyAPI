@@ -47,6 +47,12 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 - Quota management must keep the fork behavior: current-page refresh is separate from true background refresh-all with bounded concurrency.
 - Auth files credential download must keep ZIP export for selected credentials instead of triggering one browser download per credential.
 
+## Request and Probe Parity (Required)
+- Codex provider tests and speed probes must use the production Responses executor, source translation, provider synthesis, model alias/capability resolution and payload rules. Reuse these seams; never duplicate routing/compatibility behavior in a raw HTTP probe.
+- The edit sheet sends the same serialized draft used for saving, without its credential pool. New provider settings must reach saves and probes together; add a shared-path regression whenever request behavior changes.
+- A normal provider test uses one selected key (the first key by default), never rotates to another key after failure, and succeeds only on a valid completed response. Testing every key requires the explicit all-keys action. Live debugging pins one key per affected site; do not enumerate paid credentials.
+- Codex probe timing belongs to the production executor. Do not impose a second whole-response browser deadline; retain caller cancellation and the configured first-output watch.
+
 ## Management UI Verification
 - After changing `static/management.html`, run `node test/provider_usage_match_test.mjs`.
 - If the management service is running locally, verify the served page matches the workspace file with `curl -sS --max-time 8 http://100.126.43.55:8317/management.html -o /tmp/live-management.html && sha256sum /tmp/live-management.html static/management.html`.

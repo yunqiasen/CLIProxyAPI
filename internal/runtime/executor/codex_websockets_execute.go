@@ -71,6 +71,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
+	if !sourceFormatEqual(from, sdktranslator.FromString(codexOpenAIImageSourceFormat)) {
+		body = helps.NormalizeResponsesHistory(body, httpURL)
+	}
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
 	if err != nil {
 		return resp, err
@@ -287,7 +290,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 		eventType := gjson.GetBytes(payload, "type").String()
 		if !observedOutput && !signatureRepairUsed && (eventType == "error" || eventType == "response.failed") {
-			if repaired, canRetry := helps.PortableResponsesSignatureRetry(upstreamBody, payload); canRetry {
+			if repaired, canRetry := helps.PortableResponsesSignatureRetry(upstreamBody, payload, httpURL); canRetry {
 				signatureRepairUsed = true
 				if errClear := clearCodexReasoningReplayOnWebsocketError(ctx, replayScope, payload); errClear != nil {
 					return resp, errClear

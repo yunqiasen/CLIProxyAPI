@@ -330,6 +330,11 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 			}
 			return nil, newModelCooldownError(routeModel, providerForError, resetIn)
 		}
+		if err := credentialCooldownErrorForModels(auths, provider, routeModel, now, func(a *Auth) string {
+			return m.selectionModelForAuth(a, routeModel)
+		}); err != nil {
+			return nil, err
+		}
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}
 
@@ -371,6 +376,12 @@ func selectionArgForSelector(selector Selector, routeModel string) string {
 func restoreModelCooldownErrorModel(err error, requestedModel string) error {
 	if err == nil || requestedModel == "" {
 		return err
+	}
+	var credentialErr *credentialCooldownError
+	if errors.As(err, &credentialErr) && credentialErr != nil && credentialErr.model == "" {
+		copy := *credentialErr
+		copy.model = requestedModel
+		return &copy
 	}
 	var cooldownErr *modelCooldownError
 	if !errors.As(err, &cooldownErr) || cooldownErr == nil || cooldownErr.model != "" {

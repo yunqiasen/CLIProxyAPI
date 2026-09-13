@@ -200,7 +200,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				eventType = gjson.GetBytes(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErr(data); ok {
 					if !bootstrap.Committed() && !signatureRepairUsed {
-						if repaired, canRetry := helps.PortableResponsesSignatureRetry(upstreamBody, terminalBody); canRetry {
+						if repaired, canRetry := helps.PortableResponsesSignatureRetry(upstreamBody, terminalBody, httpReq.URL.String()); canRetry {
 							retry := helps.CloneResponsesRetryRequest(httpReq, repaired)
 							closeHTTPResponseBody(httpResp, "codex executor: close rejected response body")
 							errRetry := recordSignatureRetry(nil, terminalBody, retry, repaired)

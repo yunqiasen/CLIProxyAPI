@@ -459,6 +459,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 	total := 0
 	cooldownCount := 0
 	earliest := time.Time{}
+	var candidates []*Auth
 	for _, providerKey := range providers {
 		providerState := s.providers[providerKey]
 		if providerState == nil {
@@ -469,6 +470,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 			continue
 		}
 		localTotal, localCooldownCount, localEarliest := shard.availabilitySummaryLocked(predicate)
+		candidates = append(candidates, shard.matchingAuths(predicate)...)
 		total += localTotal
 		cooldownCount += localCooldownCount
 		if !localEarliest.IsZero() && (earliest.IsZero() || localEarliest.Before(earliest)) {
@@ -484,6 +486,9 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 			resetIn = 0
 		}
 		return newModelCooldownError(model, "", resetIn)
+	}
+	if err := knownCredentialCooldownError(candidates, "mixed", model, now); err != nil {
+		return err
 	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
 }
@@ -894,6 +899,9 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 			resetIn = 0
 		}
 		return newModelCooldownError(model, providerForError, resetIn)
+	}
+	if err := knownCredentialCooldownError(m.matchingAuths(predicate), provider, model, now); err != nil {
+		return err
 	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
 }

@@ -203,66 +203,76 @@ func (s *ConfigSynthesizer) synthesizeXAIKeys(ctx *SynthesisContext) []*coreauth
 }
 
 func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entries []config.CodexKey, provider string) []*coreauth.Auth {
-	cfg := ctx.Config
-	now := ctx.Now
-	idGen := ctx.IDGenerator
-
 	out := make([]*coreauth.Auth, 0, len(entries))
 	for i := range entries {
 		entry := entries[i]
 		effectiveKeys := config.EffectiveNativeAPIKeys(entry.APIKey, entry.Priority, entry.ProxyURL, entry.APIKeyEntries)
-		prefix := strings.TrimSpace(entry.Prefix)
-		baseURL := strings.TrimSpace(entry.BaseURL)
-		label := strings.TrimSpace(entry.Name)
-		if label == "" {
-			label = provider + "-apikey"
-		}
 		for _, effective := range effectiveKeys {
-			id, token := nextNativeAuthID(idGen, provider+":apikey", effective, baseURL)
-			attrs := map[string]string{
-				"source":       fmt.Sprintf("config:%s[%s]", provider, token),
-				"api_key":      effective.APIKey,
-				"config_index": strconv.Itoa(i),
-			}
-			if entry.Name != "" {
-				attrs["provider_name"] = strings.TrimSpace(entry.Name)
-			}
-			metadata := map[string]any{}
-			if entry.DisableCooling {
-				metadata["disable_cooling"] = true
-			}
-			if effective.Priority != 0 || (effective.Index >= 0 && entry.APIKeyEntries[effective.Index].Priority != nil) {
-				attrs["priority"] = strconv.Itoa(effective.Priority)
-			}
-			addWeightToAttrs(entry.Weight, attrs)
-			if baseURL != "" {
-				attrs["base_url"] = baseURL
-			}
-			if entry.Websockets {
-				attrs["websockets"] = "true"
-			}
-			if provider == "codex" && entry.ResponsesFirstOutputTimeoutSeconds > 0 {
-				attrs[coreauth.AttributeResponsesFirstOutputTimeoutSeconds] = strconv.Itoa(entry.ResponsesFirstOutputTimeoutSeconds)
-			}
-			if provider == "codex" && entry.AlphaSearch {
-				attrs[coreauth.AttributeCodexAlphaSearch] = "true"
-			}
-			if provider == "codex" && entry.DisableImageGeneration {
-				attrs[coreauth.AttributeCodexDisableImageGeneration] = "true"
-			}
-			if hash := diff.ComputeCodexModelsHash(entry.Models); hash != "" {
-				attrs["models_hash"] = hash
-			}
-			addConfigHeadersToAttrs(entry.Headers, attrs)
-			a := &coreauth.Auth{ID: id, Provider: provider, Label: label, Prefix: prefix, Status: coreauth.StatusActive, ProxyURL: effective.ProxyURL, Attributes: attrs, Metadata: metadata, CreatedAt: now, UpdatedAt: now}
-			ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
-			if len(a.Metadata) == 0 {
-				a.Metadata = nil
-			}
-			out = append(out, a)
+			out = append(out, synthesizeCodexStyleKey(ctx, entry, effective, i, provider))
 		}
 	}
 	return out
+}
+
+// SynthesizeCodexAuth uses production credential attributes for a single selected key.
+// Callers may use an empty key only with an explicit header credential.
+func SynthesizeCodexAuth(ctx *SynthesisContext, entry config.CodexKey, effective config.EffectiveNativeAPIKey, index int) *coreauth.Auth {
+	return synthesizeCodexStyleKey(ctx, entry, effective, index, "codex")
+}
+
+func synthesizeCodexStyleKey(ctx *SynthesisContext, entry config.CodexKey, effective config.EffectiveNativeAPIKey, index int, provider string) *coreauth.Auth {
+	cfg, now, idGen := ctx.Config, ctx.Now, ctx.IDGenerator
+	prefix := strings.TrimSpace(entry.Prefix)
+	baseURL := strings.TrimSpace(entry.BaseURL)
+	label := strings.TrimSpace(entry.Name)
+	if label == "" {
+		label = provider + "-apikey"
+	}
+	id, token := nextNativeAuthID(idGen, provider+":apikey", effective, baseURL)
+	attrs := map[string]string{
+		"source":       fmt.Sprintf("config:%s[%s]", provider, token),
+		"api_key":      effective.APIKey,
+		"config_index": strconv.Itoa(index),
+	}
+	if effective.APIKey == "" {
+		attrs[coreauth.AttributeAuthKind] = coreauth.AuthKindAPIKey
+	}
+	if entry.Name != "" {
+		attrs["provider_name"] = strings.TrimSpace(entry.Name)
+	}
+	metadata := map[string]any{}
+	if entry.DisableCooling {
+		metadata["disable_cooling"] = true
+	}
+	if effective.Priority != 0 || (effective.Index >= 0 && entry.APIKeyEntries[effective.Index].Priority != nil) {
+		attrs["priority"] = strconv.Itoa(effective.Priority)
+	}
+	addWeightToAttrs(entry.Weight, attrs)
+	if baseURL != "" {
+		attrs["base_url"] = baseURL
+	}
+	if entry.Websockets {
+		attrs["websockets"] = "true"
+	}
+	if provider == "codex" && entry.ResponsesFirstOutputTimeoutSeconds > 0 {
+		attrs[coreauth.AttributeResponsesFirstOutputTimeoutSeconds] = strconv.Itoa(entry.ResponsesFirstOutputTimeoutSeconds)
+	}
+	if provider == "codex" && entry.AlphaSearch {
+		attrs[coreauth.AttributeCodexAlphaSearch] = "true"
+	}
+	if provider == "codex" && entry.DisableImageGeneration {
+		attrs[coreauth.AttributeCodexDisableImageGeneration] = "true"
+	}
+	if hash := diff.ComputeCodexModelsHash(entry.Models); hash != "" {
+		attrs["models_hash"] = hash
+	}
+	addConfigHeadersToAttrs(entry.Headers, attrs)
+	a := &coreauth.Auth{ID: id, Provider: provider, Label: label, Prefix: prefix, Status: coreauth.StatusActive, ProxyURL: effective.ProxyURL, Attributes: attrs, Metadata: metadata, CreatedAt: now, UpdatedAt: now}
+	ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
+	if len(a.Metadata) == 0 {
+		a.Metadata = nil
+	}
+	return a
 }
 
 // synthesizeOpenAICompat creates Auth entries for OpenAI-compatible providers.

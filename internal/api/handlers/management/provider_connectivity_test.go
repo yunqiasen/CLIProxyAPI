@@ -298,8 +298,8 @@ func TestProviderConnectivityTestCodexUsesExecutorAndUnsavedImageGenOverride(t *
 	if got := gjson.GetBytes(seenBody, "store"); !got.Exists() || got.Bool() {
 		t.Fatalf("store = %s, want false; body=%s", got.Raw, seenBody)
 	}
-	if got := gjson.GetBytes(seenBody, "max_output_tokens").Int(); got != 256 {
-		t.Fatalf("max_output_tokens = %d, want 256; body=%s", got, seenBody)
+	if got := gjson.GetBytes(seenBody, "max_output_tokens"); got.Exists() {
+		t.Fatalf("production Responses translation should remove max_output_tokens: %s", seenBody)
 	}
 	if got := gjson.GetBytes(seenBody, "include.0").String(); got != "reasoning.encrypted_content" {
 		t.Fatalf("include[0] = %q, want reasoning.encrypted_content; body=%s", got, seenBody)
@@ -427,5 +427,34 @@ func TestProviderConnectivityTestCodexExplicitAPIKeyOverridesSavedAuthorizationH
 	}
 	if seenAuthorization != "Bearer new-key" {
 		t.Fatalf("Authorization = %q, want explicit API key", seenAuthorization)
+	}
+}
+
+func TestProviderConnectivityCodexPreservesSavedHeaderOnlyAuth(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.Header.Get("Authorization") != "Bearer saved-header-token" || r.Header.Get("X-Saved") != "kept" {
+			t.Error("saved runtime headers were lost")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_header\",\"status\":\"completed\",\"output\":[]}}\n\n")
+	}))
+	defer server.Close()
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{ID: "saved-header-only", Provider: "codex", Attributes: map[string]string{
+		"base_url":             server.URL,
+		"header:Authorization": "Bearer saved-header-token",
+		"header:X-Saved":       "kept",
+	}}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{cfg: &config.Config{}, authManager: manager}
+	response, status, err := h.performProviderConnectivityTest(context.Background(), providerConnectivityTestRequest{
+		Provider: "codex", AuthIndex: auth.EnsureIndex(), Model: "gpt-fixture",
+	})
+	if err != nil || status != http.StatusOK || response.StatusCode != http.StatusOK || hits.Load() != 1 {
+		t.Fatalf("response=%#v status=%d hits=%d err=%v", response, status, hits.Load(), err)
 	}
 }

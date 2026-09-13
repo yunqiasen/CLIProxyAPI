@@ -20,10 +20,11 @@ var responsesRejectedInputIndex = regexp.MustCompile(`^input(?:\[([0-9]+)\]|\.([
 
 // PortableResponsesSignatureRetry repairs only explicit rejection of opaque reasoning.
 // It leaves the caller's body, portable history, and successful requests unchanged.
-func PortableResponsesSignatureRetry(body, rejection []byte) ([]byte, bool) {
+func PortableResponsesSignatureRetry(body, rejection []byte, endpoint string) ([]byte, bool) {
 	if !json.Valid(body) || !json.Valid(rejection) {
 		return body, false
 	}
+	rejection = normalizeAgentSignatureRejection(body, rejection, endpoint)
 	code := gjson.GetBytes(rejection, "error.code").String()
 	if code == "" {
 		code = gjson.GetBytes(rejection, "response.error.code").String()
@@ -69,6 +70,18 @@ func PortableResponsesSignatureRetry(body, rejection []byte) ([]byte, bool) {
 		}
 		if (target < 0 || target == i) && typ == "reasoning" && item.Get("encrypted_content").Type == gjson.String && item.Get("encrypted_content").String() != "" {
 			removed = true
+			// Only opaque state is expendable; retain readable summaries/content.
+			if responsesReasoningHasText(item) {
+				readable, err := sjson.Delete(item.Raw, "encrypted_content")
+				if err != nil {
+					return body, false
+				}
+				readable, err = sjson.Delete(readable, "id")
+				if err != nil {
+					return body, false
+				}
+				kept = append(kept, json.RawMessage(readable))
+			}
 			continue
 		}
 		kept = append(kept, json.RawMessage(item.Raw))
@@ -88,6 +101,17 @@ func PortableResponsesSignatureRetry(body, rejection []byte) ([]byte, bool) {
 		return body, false
 	}
 	return updated, true
+}
+
+func responsesReasoningHasText(item gjson.Result) bool {
+	for _, field := range []string{"summary", "content"} {
+		for _, part := range item.Get(field).Array() {
+			if part.Get("text").Type == gjson.String && part.Get("text").String() != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type restoredResponsesBody struct {
@@ -118,7 +142,7 @@ func DoWithResponsesSignatureRecovery(client *http.Client, req *http.Request, on
 	if errPayload != nil {
 		return resp, nil
 	}
-	repaired, ok := PortableResponsesSignatureRetry(payload, rejected)
+	repaired, ok := PortableResponsesSignatureRetry(payload, rejected, req.URL.String())
 	if !ok {
 		return resp, nil
 	}

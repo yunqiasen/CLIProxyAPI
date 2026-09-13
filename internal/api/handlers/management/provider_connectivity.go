@@ -1,6 +1,7 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	apiHandlers "github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	openaiHandlers "github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -222,18 +224,22 @@ func collectProviderConnectivityStream(ctx context.Context, stream *coreexecutor
 		return coreexecutor.Response{}, fmt.Errorf("connectivity probe returned no stream")
 	}
 	response := coreexecutor.Response{Headers: stream.Headers}
+	var payload bytes.Buffer
+	framer := openaiHandlers.NewResponsesStreamFramer()
 	for {
 		select {
 		case <-ctx.Done():
 			return response, ctx.Err()
 		case chunk, ok := <-stream.Chunks:
 			if !ok {
+				framer.Flush(&payload)
+				response.Payload = payload.Bytes()
 				return response, nil
 			}
 			if chunk.Err != nil {
 				return response, chunk.Err
 			}
-			response.Payload = append(response.Payload, chunk.Payload...)
+			framer.WriteChunk(&payload, chunk.Payload)
 		}
 	}
 }

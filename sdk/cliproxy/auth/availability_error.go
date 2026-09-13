@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 	"sort"
@@ -33,6 +34,17 @@ func (e *credentialCooldownError) Error() string {
 	}})
 	return string(body)
 }
+
+// CredentialCooldownDiagnostic returns only CPA-generated structured details.
+// Raw upstream errors with a matching code are intentionally not trusted.
+func CredentialCooldownDiagnostic(err error) []byte {
+	var cooling *credentialCooldownError
+	if !errors.As(err, &cooling) || cooling == nil {
+		return nil
+	}
+	return []byte(cooling.Error())
+}
+
 func (e *credentialCooldownError) StatusCode() int { return http.StatusServiceUnavailable }
 func (e *credentialCooldownError) Headers() http.Header {
 	h := make(http.Header)

@@ -8,6 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/tidwall/gjson"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
@@ -889,5 +892,37 @@ func TestForwardResponsesStreamFailsWhenUpstreamClosesWithoutTerminalEvent(t *te
 	}
 	if !strings.Contains(body, "closed before a terminal event") {
 		t.Fatalf("response.failed does not explain the premature close: %q", body)
+	}
+}
+
+func TestResponsesHandlerPreservesKnownCredentialCooldownDetails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	executor := &prematureResponsesStreamExecutor{}
+	manager.RegisterExecutor(executor)
+	const model = "cooldown-details-handler-model"
+	a := &coreauth.Auth{ID: "private-auth", Provider: executor.Identifier(), Attributes: map[string]string{"provider_name": "AgentRouter"}, ModelStates: map[string]*coreauth.ModelState{
+		model: {Unavailable: true, NextRetryAfter: time.Now().Add(time.Minute), LastError: &coreauth.Error{HTTPStatus: 402, Message: `{"error":{"message":"Budget pool quota has been exhausted. private-secret"}}`}},
+	}}
+	if _, err := manager.Register(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(a.ID, a.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(a.ID) })
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+	router := gin.New()
+	router.POST("/v1/responses", h.Responses)
+	for _, stream := range []bool{false, true} {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(fmt.Sprintf(`{"model":%q,"input":"hi","stream":%t}`, model, stream)))
+		r.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(w, r)
+		body := w.Body.String()
+		if w.Code != 503 || w.Header().Get("Retry-After") == "" || gjson.Get(body, "error.model").String() != model || gjson.Get(body, "error.reset_seconds").Int() < 1 || gjson.Get(body, "error.causes.0.code").String() != "upstream_budget_pool_exhausted" {
+			t.Errorf("stream=%t lost details: %s", stream, body)
+		}
+		if strings.Contains(body, "private-") {
+			t.Error("credential data leaked")
+		}
 	}
 }

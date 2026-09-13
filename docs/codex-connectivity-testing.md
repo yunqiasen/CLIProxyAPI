@@ -104,3 +104,14 @@ Read `X-CPA-COMMIT` from an authenticated management response, such as
   resolves that route to the upstream model and attaches model capabilities.
 - Required endpoint arguments prevent future signature-recovery callers from
   silently omitting the host-scoped Agent error classification.
+
+Live acceptance also caught a last-hop Responses sanitizer dropping the structured
+cooldown fields. The actual HTTP handler now preserves only the concrete CPA
+cooldown diagnostic; arbitrary upstream JSON remains sanitized. Streaming and
+non-streaming `/v1/responses` route tests cover model, cause and Retry-After.
+
+The live browser check additionally caught delimiter-free executor chunks being
+concatenated by the management collector (`data: {...}data: {...}`). Probes now
+use the same Responses stream framer as the public HTTP handler. A two-event
+upstream fixture asserts valid, separated SSE frames, not just a completion
+substring; the UI still rejects malformed or incomplete streams.

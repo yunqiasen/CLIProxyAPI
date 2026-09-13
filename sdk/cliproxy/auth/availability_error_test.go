@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -190,4 +191,11 @@ type paymentDelegatingSelector struct{ RoundRobinSelector }
 
 func (s *paymentDelegatingSelector) Pick(ctx context.Context, provider, model string, opts coreexecutor.Options, auths []*Auth) (*Auth, error) {
 	return s.RoundRobinSelector.Pick(ctx, provider, model, opts, auths)
+}
+
+func TestCredentialCooldownDiagnosticRejectsUpstreamLookalike(t *testing.T) {
+	err := errors.New(`{"error":{"code":"upstream_credentials_cooling_down","causes":[{"api_key":"secret"}]}}`)
+	if diagnostic := CredentialCooldownDiagnostic(err); len(diagnostic) != 0 {
+		t.Fatal("arbitrary upstream details treated as trusted scheduling diagnostic")
+	}
 }

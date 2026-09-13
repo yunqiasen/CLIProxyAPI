@@ -141,6 +141,7 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 					return
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_ok\",\"status\":\"in_progress\"}}\n\n")
 				_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\"}]}]}}\n\n")
 			}))
 			defer upstream.Close()
@@ -185,6 +186,21 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 			}
 			if w.Code != 200 || response.StatusCode != 200 || !strings.Contains(response.Body, "response.completed") {
 				t.Fatalf("probe status=%d upstream=%d", w.Code, response.StatusCode)
+			}
+			frames := strings.Split(strings.TrimSpace(response.Body), "\n\n")
+			if len(frames) != 2 {
+				t.Fatalf("probe merged SSE events without framing: got %d frames", len(frames))
+			}
+			for _, frame := range frames {
+				var eventData string
+				for _, line := range strings.Split(frame, "\n") {
+					if strings.HasPrefix(line, "data: ") {
+						eventData += strings.TrimPrefix(line, "data: ")
+					}
+				}
+				if !json.Valid([]byte(eventData)) {
+					t.Fatalf("invalid SSE event JSON: %s", frame)
+				}
 			}
 			want := 1
 			if host == "agentrouter.org" {

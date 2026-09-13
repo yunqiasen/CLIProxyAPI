@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -59,6 +60,15 @@ type responsesSSEFramer struct {
 	terminalError        *interfaces.ErrorMessage
 	failureEvent         string
 	dataFrames           int
+}
+
+// NewResponsesStreamFramer shares the production SSE framing boundary with
+// management probes, including delimiter repair and terminal-event handling.
+func NewResponsesStreamFramer() interface {
+	WriteChunk(io.Writer, []byte)
+	Flush(io.Writer)
+} {
+	return &responsesSSEFramer{}
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
@@ -784,6 +794,12 @@ func sanitizeResponsesStreamEventName(eventName string) string {
 }
 
 func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) string {
+	if errMsg != nil {
+		if diagnostic := coreauth.CredentialCooldownDiagnostic(errMsg.Error); len(diagnostic) > 0 {
+			return string(diagnostic)
+		}
+	}
+
 	text := http.StatusText(status)
 	if errMsg != nil && errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
 		text = strings.TrimSpace(errMsg.Error.Error())

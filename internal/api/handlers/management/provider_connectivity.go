@@ -133,6 +133,7 @@ func (h *Handler) performCodexConnectivityTest(ctx context.Context, body provide
 		return providerConnectivityTestResponse{}, http.StatusBadRequest, errAuth
 	}
 	model := resolveCodexConnectivityModel(cfg, auth, requestedModel)
+	recovery := h.codexRecoverySnapshot(body, cfg)
 
 	probeSessionID := uuid.NewString()
 	probeThreadID := uuid.NewString()
@@ -206,6 +207,7 @@ func (h *Handler) performCodexConnectivityTest(ctx context.Context, body provide
 	if errCollect != nil {
 		return providerConnectivityErrorResponse(errCollect), http.StatusOK, nil
 	}
+	h.recoverCodexProbe(ctx, body, cfg, recovery, model, response.Payload)
 	return providerConnectivityResponse(response), http.StatusOK, nil
 }
 

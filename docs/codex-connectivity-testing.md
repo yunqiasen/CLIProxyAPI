@@ -39,7 +39,9 @@ A draft never supplies credentials: only the selected `auth_index`/`api_key` doe
 The editor reuses its save builder and managed-field list, including explicit
 clears and opaque provider/model options. It strips the key pool from the draft.
 The backend synthesizes exactly one temporary auth without registering it in the
-live manager or resetting cooldowns. Header-only probes use the same synthesis.
+live manager. Header-only probes use the same synthesis. A completed probe of an
+unchanged saved credential may now recover that model's payment cooldown as
+described below.
 
 Normal provider-row probes use the first key only; key-row probes use that key.
 The edit sheet's explicit **all keys** button remains available and bounded to four
@@ -50,7 +52,20 @@ must pin one key per affected site rather than scanning paid pools.
 The Codex browser request has no independent 30-second whole-response deadline.
 The executor's provider-configured first-output watch still applies (zero disables
 it), and real output stops that watch. Other provider probe timing is unchanged.
-Closing/canceling the HTTP request retains normal caller cancellation.
+The edit sheet fingerprints the complete serialized Codex draft, not a second
+list of selected fields. Editing it clears old results and cancels in-flight
+Codex probes. Closing the sheet or replacing a test cancels the network request;
+late results cannot restore stale success or loading state. Provider-list refresh
+and unmount also cancel outstanding probes and stop queued bulk tests.
+
+A completed test can recover a 402/403 model cooldown only for its selected saved
+credential and unchanged production settings. Draft-only, failed, partial and
+canceled tests never reset production state. The manager compares the pre-probe
+snapshot atomically; newer failures, configuration edits and manual disabling
+win over old probe success. Other keys/models and usage counters stay unchanged.
+This is operator-triggered, single-key recovery, not automatic paid pool scanning
+or a shorter default cooldown. Unknown client model names remain errors; consult
+`/v1/models` rather than guessing aliases.
 
 A green probe confirms that one request completed for the selected provider/key
 and draft, not that arbitrary old conversation history or every upstream request
@@ -115,3 +130,13 @@ concatenated by the management collector (`data: {...}data: {...}`). Probes now
 use the same Responses stream framer as the public HTTP handler. A two-event
 upstream fixture asserts valid, separated SSE frames, not just a completion
 substring; the UI still rejects malformed or incomplete streams.
+
+
+## Lifecycle regression
+
+The browser fixture `tests/browser/codexProbeLifecycle.cjs` in the UI repository
+reads the local panel and intercepts every connectivity request; it never saves
+provider edits or sends an upstream paid probe. Run with `PLAYWRIGHT_MODULE`
+pointing to an installed Playwright package. Optional `PROBE_PANEL_HTML` selects a
+candidate bundle before deployment. It checks draft edits, late results, request
+cancellation, restarting a test and single-key selection.

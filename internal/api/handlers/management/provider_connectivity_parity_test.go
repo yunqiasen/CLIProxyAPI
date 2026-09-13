@@ -215,3 +215,122 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 		})
 	}
 }
+
+func TestCodexProbeRecoversOnlyUnchangedSavedPaymentCooldown(t *testing.T) {
+	for _, scenario := range []string{"completed", "saved_ui_draft", "failed", "edited_draft", "changed_during_probe", "canceled"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			m := coreauth.NewManager(nil, nil, nil)
+			var cfg *config.Config
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if scenario == "changed_during_probe" {
+					cfg.CodexKey[0].Headers = map[string]string{"X-Changed": "true"}
+				}
+				if scenario == "canceled" {
+					cancel()
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				if scenario == "failed" {
+					_, _ = io.WriteString(w, "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"budget exhausted\"}}}\n\n")
+					return
+				}
+				_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"probe\",\"status\":\"completed\",\"output\":[]}}\n\n")
+			}))
+			defer upstream.Close()
+			cfg = &config.Config{CodexKey: []config.CodexKey{{APIKey: "selected-key", BaseURL: upstream.URL, Models: []config.CodexModel{{Name: "upstream", Alias: "public"}}}}}
+			a := &coreauth.Auth{ID: "recovery-selected", Provider: "codex", Attributes: map[string]string{"api_key": "selected-key", "base_url": upstream.URL, "config_index": "0"}}
+			for _, id := range []string{a.ID, "other-key"} {
+				clone := a.Clone()
+				clone.ID = id
+				if id != a.ID {
+					clone.Attributes["api_key"] = "other-key"
+				}
+				if _, err := m.Register(ctx, clone); err != nil {
+					t.Fatal(err)
+				}
+				m.MarkResult(ctx, coreauth.Result{AuthID: id, Model: "public", Error: &coreauth.Error{HTTPStatus: 402, Message: "budget exhausted"}})
+			}
+			m.SetConfig(cfg)
+			h := &Handler{cfg: cfg, authManager: m}
+			req := providerConnectivityTestRequest{Provider: "codex", AuthIndex: a.EnsureIndex(), Model: "public"}
+			if scenario == "saved_ui_draft" {
+				req.CodexConfig = json.RawMessage(`{"name":null,"priority":null,"weight":null,"prefix":null,"base-url":"` + upstream.URL + `","proxy-url":null,"headers":null,"models":[{"name":"upstream","alias":"public"}],"excluded-models":null,"disable-cooling":null,"websockets":null,"disable-image-generation":null,"responses-first-output-timeout-seconds":null}`)
+			}
+			if scenario == "edited_draft" {
+				req.CodexConfig = json.RawMessage(`{"headers":{"X-Draft":"unsaved"}}`)
+			}
+			_, _, _ = h.performProviderConnectivityTest(ctx, req)
+			got, _ := m.GetByID(a.ID)
+			if cleared := !got.ModelStates["public"].Unavailable; cleared != (scenario == "completed" || scenario == "saved_ui_draft") {
+				t.Fatalf("cooldown cleared=%v", cleared)
+			}
+			other, _ := m.GetByID("other-key")
+			if !other.ModelStates["public"].Unavailable {
+				t.Fatal("other credential was resumed")
+			}
+		})
+	}
+}
+
+func TestCompletedCodexProbeRequiresValidTerminalEvent(t *testing.T) {
+	for _, tc := range []struct {
+		name, payload string
+		want          bool
+	}{
+		{"complete", `data: {"type":"response.completed","response":{"status":"completed","output":[]}}`, true},
+		{"event_name", "event: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}\n\n", true},
+		{"done", "data: [DONE]\n\n", false},
+		{"partial", `data: {"type":"response.output_text.delta","delta":"hi"}`, false},
+		{"no_status", `data: {"type":"response.completed","response":{}}`, false},
+		{"error_after_complete", "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\ndata: {\"type\":\"error\",\"error\":{\"message\":\"fail\"}}\n\n", false},
+		{"incomplete", `data: {"type":"response.completed","response":{"status":"incomplete"}}`, false},
+		{"error_event_with_completed_type", "event: error\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n", false},
+		{"malformed", "data: {\n\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := completedCodexProbe([]byte(tc.payload)); got != tc.want {
+				t.Fatalf("completed=%v want=%v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexConnectivityCancellationReachesUpstream(t *testing.T) {
+	received := make(chan struct{})
+	canceled := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"probe\",\"status\":\"in_progress\"}}\n\n")
+		w.(http.Flusher).Flush()
+		close(received)
+		<-r.Context().Done()
+		close(canceled)
+	}))
+	defer upstream.Close()
+	h := &Handler{cfg: &config.Config{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	key := "selected"
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _, _ = h.performProviderConnectivityTest(ctx, providerConnectivityTestRequest{Provider: "codex", Model: "m", APIKey: &key, BaseURL: &upstream.URL})
+	}()
+	select {
+	case <-received:
+	case <-time.After(3 * time.Second):
+		t.Fatal("probe not received")
+	}
+	cancel()
+	select {
+	case <-canceled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("upstream did not receive cancellation")
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("probe handler did not finish")
+	}
+}

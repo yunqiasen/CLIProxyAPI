@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"reflect"
+	"slices"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -22,10 +23,29 @@ func (h *Handler) codexRecoverySnapshot(body providerConnectivityTestRequest, cf
 		return nil
 	}
 	_, savedCfg, err := h.codexConnectivityAuth(providerConnectivityTestRequest{AuthIndex: body.AuthIndex})
-	if err != nil || !reflect.DeepEqual(cfg, savedCfg) {
+	if err != nil || !sameCodexRecoveryConfig(cfg, savedCfg) {
 		return nil
 	}
 	return saved
+}
+
+// Empty exclusion lists and null both mean no exclusions in the save/probe API.
+// Normalize only that representation; all other settings remain strict.
+func sameCodexRecoveryConfig(a, b *config.Config) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	normalize := func(cfg *config.Config) config.Config {
+		cloned := *cfg
+		cloned.CodexKey = slices.Clone(cfg.CodexKey)
+		for i := range cloned.CodexKey {
+			if len(cloned.CodexKey[i].ExcludedModels) == 0 {
+				cloned.CodexKey[i].ExcludedModels = nil
+			}
+		}
+		return cloned
+	}
+	return reflect.DeepEqual(normalize(a), normalize(b))
 }
 
 func (h *Handler) recoverCodexProbe(ctx context.Context, body providerConnectivityTestRequest, cfg *config.Config, snapshot *coreauth.Auth, upstreamModel string, payload []byte) {

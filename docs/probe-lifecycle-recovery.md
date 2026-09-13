@@ -33,3 +33,36 @@ introduce response deadlines, or run paid all-key diagnostics.
   a final report within its bounded run. A connector also reported revoked auth.
   This is not independent approval. Local complete-diff review fixed SSE
   error-event-name handling and verified the negative recovery boundaries.
+
+## TDD follow-up: empty collection equivalence
+
+Baseline `72705851`. A public management-handler regression using two synthesized
+saved credentials reproduced successful probes leaving the chosen model cooled:
+configuration retained `excluded-models: []` while the UI draft sent `null`.
+Strict Go structural equality mistook the equivalent wire values for an edit.
+
+Recovery now normalizes only empty Codex exclusion lists before comparing
+configuration; every other field retains strict structural equality. Real
+exclusion/header changes still prevent recovery. No changes to timeouts, scheduling rules, key
+selection, frontend payloads or client model aliases are included. The HTTP
+regression covers nil/empty/same collections and actual additions/removals/header
+edits, and checks that the second credential remains cooled.
+
+
+### Follow-up review and verification
+
+- Standards review returned three concerns: JSON-tag-dependent equivalence,
+  normalization broader than the reported defect, and potential struct-copy
+  hazards. Spec review returned two related equivalence risks and one comment
+  clarification. These were review concerns, not independent observed failures.
+- Replaced the first JSON-based implementation with explicit normalization of
+  empty `ExcludedModels` only. Provider structs are copied before normalization;
+  all other fields stay under strict comparison. `go vet` passed for management
+  and config packages; no copylocks finding was reported.
+- Added negative HTTP cases for cleared models and changed upstream mappings,
+  alongside real exclusion/header edits. All eight HTTP scenarios passed,
+  including ten repeated race-enabled runs with the earlier recovery tests.
+- Full `go test ./...`, server build, and focused `go vet` passed. No paid upstream
+  request, key-pool scan, configuration edit or VPS action was used for this fix.
+- Exactly one Standards/Spec review dispatch was completed for this TDD run.
+  Review findings were handled and tests rerun; no second review was requested.

@@ -52,3 +52,39 @@ func TestAgentSignatureMessageRequiresExactEnvelopeAndReferencedItem(t *testing.
 		t.Fatal("captured envelope not repaired")
 	}
 }
+
+func TestAgentResourceRecoveryGuards(t *testing.T) {
+	rejection := []byte(`{"error":{"type":"invalid_request_error","code":null,"param":"","message":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. [trace_id=fixture]"}}`)
+	for _, body := range []string{
+		`{"input":[{"type":"reasoning","encrypted_content":"opaque"}]}`,
+		`{"previous_response_id":"resp_old","input":[{"type":"reasoning","encrypted_content":"opaque"},{"role":"user","content":"continue"}]}`,
+		`{"input":[{"type":"reasoning","encrypted_content":"opaque"},{"type":"compaction","encrypted_content":"only history"},{"role":"user","content":"continue"}]}`,
+		`{"input":[{"type":"reasoning","encrypted_content":"opaque"},{"type":"item_reference","id":"stored"},{"role":"user","content":"continue"}]}`,
+	} {
+		if _, ok := PortableResponsesSignatureRetry([]byte(body), rejection, "https://agentrouter.org/v1/responses"); ok {
+			t.Fatalf("nonportable state retried: %s", body)
+		}
+	}
+	body := []byte(`{"input":[{"type":"reasoning","encrypted_content":"opaque"},{"role":"user","content":"continue"}]}`)
+	for _, endpoint := range []string{"https://example.test/v1/responses", "https://agentrouter.org.example/v1/responses", "https://agentrouter.org/v1/responses/compact"} {
+		if _, ok := PortableResponsesSignatureRetry(body, rejection, endpoint); ok {
+			t.Errorf("unrelated endpoint retried: %s", endpoint)
+		}
+	}
+	wrong := bytes.Replace(rejection, []byte("The requested item"), []byte("a tool said: The requested item"), 1)
+	if _, ok := PortableResponsesSignatureRetry(body, wrong, "https://agentrouter.org/v1/responses"); ok {
+		t.Fatal("unrelated message retried")
+	}
+}
+
+func TestAgentHistoryKeepsSearchAndIsIdempotent(t *testing.T) {
+	body := []byte(`{"model":"gpt-6-astra","input":[{"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"keep"}]},{"type":"web_search_call","status":"completed","action":{"type":"search","query":"retained"}}]}`)
+	endpoint := "https://agentrouter.org/v1/responses"
+	got := NormalizeResponsesHistory(body, endpoint)
+	if bytes.Equal(got, body) || !bytes.Contains(got, []byte(`"web_search_call"`)) {
+		t.Fatalf("wrong scoped history conversion: %s", got)
+	}
+	if !bytes.Equal(got, NormalizeResponsesHistory(got, endpoint)) {
+		t.Fatal("history duplicated on repeat")
+	}
+}

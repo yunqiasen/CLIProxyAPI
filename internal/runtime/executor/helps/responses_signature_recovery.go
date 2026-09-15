@@ -65,7 +65,7 @@ func PortableResponsesSignatureRetry(body, rejection []byte, endpoint string) ([
 	portable := false
 	for i, item := range items {
 		typ := item.Get("type").String()
-		if typ == "compaction" || typ == "compaction_summary" {
+		if typ == "compaction" || typ == "compaction_summary" || typ == "item_reference" {
 			return body, false
 		}
 		if (target < 0 || target == i) && typ == "reasoning" && item.Get("encrypted_content").Type == gjson.String && item.Get("encrypted_content").String() != "" {

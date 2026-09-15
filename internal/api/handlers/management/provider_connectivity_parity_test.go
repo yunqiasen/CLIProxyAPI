@@ -119,12 +119,19 @@ func TestProviderConnectivityCodexDraftOverridesRoutingWithoutChangingSavedState
 }
 
 func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
-	for _, host := range []string{"anyrouter.top", "agentrouter.org"} {
-		t.Run(host, func(t *testing.T) {
+	for _, scenario := range []struct {
+		host     string
+		resource bool
+	}{{"anyrouter.top", false}, {"agentrouter.org", false}, {"agentrouter.org", true}} {
+		host := scenario.host
+		t.Run(fmt.Sprintf("%s/resource_%t", host, scenario.resource), func(t *testing.T) {
 			var requests [][]byte
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				b, _ := io.ReadAll(r.Body)
 				requests = append(requests, b)
+				if scenario.resource && (gjson.GetBytes(b, "input.0.content.#").Int() != 0 || gjson.GetBytes(b, "input.0.summary.0.text").String() != "retained reasoning") {
+					t.Error("Agent reasoning compatibility missing from production/probe")
+				}
 				if r.Header.Get("Authorization") != "Bearer selected-key" {
 					t.Error("wrong key")
 				}
@@ -137,7 +144,11 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 					}
 				} else if gjson.GetBytes(b, "input.0.encrypted_content").Exists() {
 					w.WriteHeader(400)
-					_, _ = io.WriteString(w, `{"error":{"type":"invalid_request_error","code":null,"param":"","message":"OpenAI Responses bad request: The encrypted content for item rs_foreign could not be verified. Reason: Encrypted content could not be decrypted or parsed. [trace_id=parity]"}}`)
+					message := "OpenAI Responses bad request: The encrypted content for item rs_foreign could not be verified. Reason: Encrypted content could not be decrypted or parsed. [trace_id=parity]"
+					if scenario.resource {
+						message = "The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. [trace_id=parity]"
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"type": "invalid_request_error", "code": nil, "param": "", "message": message}})
 					return
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
@@ -150,6 +161,9 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 				token := make([]byte, 73)
 				token[0] = 0x80
 				history = `[{"type":"reasoning","id":"rs_foreign","encrypted_content":"` + base64.URLEncoding.EncodeToString(token) + `"},{"role":"user","content":"reply OK"}]`
+			}
+			if scenario.resource {
+				history = strings.Replace(history, `"id":"rs_foreign"`, `"id":"rs_foreign","content":[{"type":"reasoning_text","text":"retained reasoning"}]`, 1)
 			}
 			cfg := &config.Config{CodexKey: []config.CodexKey{{Name: "fixture", APIKey: "selected-key", BaseURL: "http://" + host + "/v1", ProxyURL: upstream.URL, DisableImageGeneration: true, Models: []config.CodexModel{{Name: "gpt-6-astra", Alias: "cpa-6a", Thinking: &registry.ThinkingSupport{Levels: []string{"high"}}}}}}, Payload: config.PayloadConfig{OverrideRaw: []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: "cpa-6a", Protocol: "codex", FromProtocol: sdktranslator.FormatOpenAIResponse.String()}}, Params: map[string]any{"input": history}}}}}
 			auths, err := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{Config: cfg, Now: time.Now(), IDGenerator: synthesizer.NewStableIDGenerator()})

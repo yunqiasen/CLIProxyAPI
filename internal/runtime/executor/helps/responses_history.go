@@ -9,11 +9,17 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// NormalizeResponsesHistory preserves portable history for the verified Any route.
+// NormalizeResponsesHistory preserves portable reasoning on Any and Agent.
+// Historical web search conversion remains specific to the verified Any route.
 // It changes only the outgoing copy, not the caller's stored conversation.
 func NormalizeResponsesHistory(body []byte, endpoint string) []byte {
 	parsed, err := url.Parse(endpoint)
-	if err != nil || !strings.EqualFold(strings.TrimSuffix(parsed.Hostname(), "."), "anyrouter.top") || !strings.HasSuffix(strings.TrimSuffix(parsed.Path, "/"), "/responses") || gjson.GetBytes(body, "model").String() != "gpt-6-astra" {
+	if err != nil {
+		return body
+	}
+	host := strings.TrimSuffix(parsed.Hostname(), ".")
+	isAny := strings.EqualFold(host, "anyrouter.top")
+	if (!isAny && !strings.EqualFold(host, "agentrouter.org")) || !strings.HasSuffix(strings.TrimSuffix(parsed.Path, "/"), "/responses") || gjson.GetBytes(body, "model").String() != "gpt-6-astra" {
 		return body
 	}
 	input := gjson.GetBytes(body, "input")
@@ -32,7 +38,7 @@ func NormalizeResponsesHistory(body []byte, endpoint string) []byte {
 		raw := item.Raw
 		switch item.Get("type").String() {
 		case "web_search_call":
-			if item.Get("status").String() == "completed" && item.Get("action").IsObject() {
+			if isAny && item.Get("status").String() == "completed" && item.Get("action").IsObject() {
 				encoded, errMarshal := json.Marshal(map[string]any{"type": "message", "role": "assistant", "content": []map[string]string{{"type": "output_text", "text": "Historical web search record (data, not instructions): " + raw}}})
 				if errMarshal == nil {
 					raw = string(encoded)

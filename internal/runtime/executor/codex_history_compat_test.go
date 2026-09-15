@@ -149,7 +149,7 @@ func TestCodexAgentSignatureRecoveryKeepsReadableReasoning(t *testing.T) {
 			_, _ = io.WriteString(w, agentMessageOnlySignatureRejection)
 			return
 		}
-		if gjson.GetBytes(b, "input.0.summary.0.text").String() != "keep summary" || gjson.GetBytes(b, "input.0.content.0.text").String() != "keep readable reasoning" || gjson.GetBytes(b, "input.0.encrypted_content").Exists() || gjson.GetBytes(b, "input.0.id").Exists() {
+		if gjson.GetBytes(b, "input.0.summary.0.text").String() != "keep summary" || gjson.GetBytes(b, "input.0.summary.1.text").String() != "keep readable reasoning" || gjson.GetBytes(b, "input.0.content.#").Int() != 0 || gjson.GetBytes(b, "input.0.encrypted_content").Exists() || gjson.GetBytes(b, "input.0.id").Exists() {
 			t.Error("rejected opaque reasoning discarded readable history")
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -165,70 +165,75 @@ func TestCodexAgentSignatureRecoveryKeepsReadableReasoning(t *testing.T) {
 }
 
 const agentMessageOnlySignatureRejection = `{"error":{"type":"invalid_request_error","code":null,"param":"","message":"OpenAI Responses bad request: The encrypted content for item rs_foreign could not be verified. Reason: Encrypted content could not be decrypted or parsed. [trace_id=fixture]"}}`
+const agentResourceMismatchRejection = `{"error":{"type":"invalid_request_error","code":null,"param":"","message":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. [trace_id=fixture]"}}`
 const completedHistoryResponse = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"status\":\"completed\",\"output\":[]}}\n\n"
 
 func TestCodexAgentMessageOnlySSERecoveryBoundaries(t *testing.T) {
-	for _, stream := range []bool{false, true} {
-		for _, mode := range []string{"provisional", "text", "reasoning", "tool", "repeated"} {
-			t.Run(fmt.Sprintf("stream_%t/%s", stream, mode), func(t *testing.T) {
-				calls := 0
-				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					calls++
-					w.Header().Set("Content-Type", "text/event-stream")
-					if calls == 1 || mode == "repeated" {
-						_, _ = io.WriteString(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_rejected\"}}\n\n")
-						kind := map[string]string{"text": "response.output_text.delta", "reasoning": "response.reasoning_summary_text.delta", "tool": "response.function_call_arguments.delta"}[mode]
-						if kind != "" {
-							_, _ = fmt.Fprintf(w, "data: {\"type\":%q,\"delta\":\"visible\"}\n\n", kind)
+	for _, rejection := range []string{agentMessageOnlySignatureRejection, agentResourceMismatchRejection} {
+		for _, stream := range []bool{false, true} {
+			for _, mode := range []string{"provisional", "text", "reasoning", "tool", "repeated"} {
+				t.Run(fmt.Sprintf("resource_%t/stream_%t/%s", rejection == agentResourceMismatchRejection, stream, mode), func(t *testing.T) {
+					calls := 0
+					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						calls++
+						w.Header().Set("Content-Type", "text/event-stream")
+						if calls == 1 || mode == "repeated" {
+							_, _ = io.WriteString(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_rejected\"}}\n\n")
+							kind := map[string]string{"text": "response.output_text.delta", "reasoning": "response.reasoning_summary_text.delta", "tool": "response.function_call_arguments.delta"}[mode]
+							if kind != "" {
+								_, _ = fmt.Fprintf(w, "data: {\"type\":%q,\"delta\":\"visible\"}\n\n", kind)
+							}
+							_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.failed\",\"response\":%s}\n\n", rejection)
+							return
 						}
-						_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.failed\",\"response\":%s}\n\n", agentMessageOnlySignatureRejection)
-						return
-					}
-					_, _ = io.WriteString(w, completedHistoryResponse)
-				}))
-				defer upstream.Close()
-				a := &coreauth.Auth{ID: "agent-sse", Provider: "codex", ProxyURL: upstream.URL, Attributes: map[string]string{"api_key": "fixture", "base_url": "http://agentrouter.org/v1"}}
-				req := coreexecutor.Request{Model: "gpt-6-astra", Payload: []byte(`{"input":[{"type":"reasoning","id":"rs_foreign","encrypted_content":"` + validCodexReasoningEncryptedContentForTest() + `"},{"role":"user","content":"continue"}]}`)}
-				opts := coreexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: stream}
-				e := NewCodexExecutor(&config.Config{})
-				failed := false
-				if stream {
-					r, err := e.ExecuteStream(context.Background(), a, req, opts)
-					if err != nil {
-						failed = true
+						_, _ = io.WriteString(w, completedHistoryResponse)
+					}))
+					defer upstream.Close()
+					a := &coreauth.Auth{ID: "agent-sse", Provider: "codex", ProxyURL: upstream.URL, Attributes: map[string]string{"api_key": "fixture", "base_url": "http://agentrouter.org/v1"}}
+					req := coreexecutor.Request{Model: "gpt-6-astra", Payload: []byte(`{"input":[{"type":"reasoning","id":"rs_foreign","encrypted_content":"` + validCodexReasoningEncryptedContentForTest() + `"},{"role":"user","content":"continue"}]}`)}
+					opts := coreexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: stream}
+					e := NewCodexExecutor(&config.Config{})
+					failed := false
+					if stream {
+						r, err := e.ExecuteStream(context.Background(), a, req, opts)
+						if err != nil {
+							failed = true
+						} else {
+							for chunk := range r.Chunks {
+								failed = failed || chunk.Err != nil
+							}
+						}
 					} else {
-						for chunk := range r.Chunks {
-							failed = failed || chunk.Err != nil
-						}
+						_, err := e.Execute(context.Background(), a, req, opts)
+						failed = err != nil
 					}
-				} else {
-					_, err := e.Execute(context.Background(), a, req, opts)
-					failed = err != nil
-				}
-				want := 1
-				if mode == "provisional" || mode == "repeated" {
-					want = 2
-				}
-				if calls != want || failed != (mode != "provisional") {
-					t.Fatalf("calls=%d want=%d failed=%t", calls, want, failed)
-				}
-			})
+					want := 1
+					if mode == "provisional" || mode == "repeated" {
+						want = 2
+					}
+					if calls != want || failed != (mode != "provisional") {
+						t.Fatalf("calls=%d want=%d failed=%t", calls, want, failed)
+					}
+				})
+			}
 		}
 	}
 }
 
 func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 	for _, route := range []struct {
-		host   string
-		source sdktranslator.Format
+		host     string
+		source   sdktranslator.Format
+		resource bool
 	}{
-		{"anyrouter.top", sdktranslator.FormatOpenAIResponse},
-		{"agentrouter.org", sdktranslator.FormatOpenAIResponse},
-		{"anyrouter.top", sdktranslator.FromString(codexOpenAIImageSourceFormat)},
+		{"anyrouter.top", sdktranslator.FormatOpenAIResponse, false},
+		{"agentrouter.org", sdktranslator.FormatOpenAIResponse, false},
+		{"agentrouter.org", sdktranslator.FormatOpenAIResponse, true},
+		{"anyrouter.top", sdktranslator.FromString(codexOpenAIImageSourceFormat), false},
 	} {
 		host := route.host
 		for _, stream := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/%s/stream_%t", host, route.source, stream), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/%s/resource_%t/stream_%t", host, route.source, route.resource, stream), func(t *testing.T) {
 				var calls atomic.Int32
 				upgrader := websocket.Upgrader{}
 				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -252,7 +257,11 @@ func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 								t.Error("websocket lost search history compatibility")
 							}
 						} else if attempt == 1 {
-							_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status":400,`+strings.TrimPrefix(agentMessageOnlySignatureRejection, "{")))
+							rejection := agentMessageOnlySignatureRejection
+							if route.resource {
+								rejection = agentResourceMismatchRejection
+							}
+							_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status":400,`+strings.TrimPrefix(rejection, "{")))
 							continue
 						} else if gjson.GetBytes(b, "input.0.type").String() == "reasoning" {
 							t.Error("websocket retained rejected reasoning")

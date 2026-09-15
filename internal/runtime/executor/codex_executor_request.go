@@ -12,7 +12,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -369,9 +368,8 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	var ginHeaders http.Header
 	if len(clientHeaders) > 0 && clientHeaders[0] != nil {
 		ginHeaders = clientHeaders[0]
-	} else if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		ginHeaders = ginCtx.Request.Header
 	}
+	ginHeaders = helps.CodexClientHeaders(r.Context(), ginHeaders)
 	applyCodexHeadersFromSources(r, auth, token, stream, cfg, ginHeaders)
 }
 
@@ -380,12 +378,8 @@ func applyModelHeaderOverrides(headers http.Header, modelName string) {
 	if headers == nil {
 		return
 	}
-	overrides := registry.ModelOverrideHeaders(modelName)
-	if len(overrides) == 0 {
+	if !helps.ApplyCodexModelHeaderOverrides(headers, modelName) {
 		return
-	}
-	for key, value := range overrides {
-		headers.Set(key, value)
 	}
 	if strings.Contains(headers.Get("User-Agent"), "Mac OS") && codexSessionHeaderValue(headers) == "" {
 		headers.Set("Session_id", uuid.NewString())

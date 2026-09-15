@@ -62,6 +62,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 			applyCodexClientDisplayName(entry, model)
 			applyCodexClientMaxContextLengthOverride(entry, model)
 			applyCodexClientSearchToolSupport(entry, id, true, providersForModel)
+			applyCodexClientPatchToolSupport(entry, id, providersForModel)
 			sanitizeCodexClientReasoningMetadata(entry)
 			applyCodexClientVisibilityOverride(entry, id)
 			if optimizeMultiAgentV2 {
@@ -74,6 +75,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 		entry := cloneCodexClientModelMap(defaultTemplate)
 		applyCodexClientModelMetadata(entry, id, model, optimizeMultiAgentV2)
 		applyCodexClientSearchToolSupport(entry, id, false, providersForModel)
+		applyCodexClientPatchToolSupport(entry, id, providersForModel)
 		sanitizeCodexClientReasoningMetadata(entry)
 		applyCodexClientVisibilityOverride(entry, id)
 		result = append(result, entry)
@@ -491,4 +493,25 @@ func cloneCodexClientModelValue(value any) any {
 	default:
 		return value
 	}
+}
+
+// Only advertise freeform patches when every selectable executor has a verified
+// complete bridge. Model names and default-template inheritance are not evidence.
+func applyCodexClientPatchToolSupport(entry map[string]any, id string, providersForModel ProvidersForModelFunc) {
+	delete(entry, "apply_patch_tool_type")
+	if providersForModel == nil {
+		return
+	}
+	providers := providersForModel(id)
+	if len(providers) == 0 {
+		return
+	}
+	for _, provider := range providers {
+		switch strings.ToLower(strings.TrimSpace(provider)) {
+		case "codex", "claude", "gemini":
+		default:
+			return
+		}
+	}
+	entry["apply_patch_tool_type"] = "freeform"
 }

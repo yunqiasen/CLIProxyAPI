@@ -46,6 +46,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	originalPayload := originalPayloadSource
 	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true)
 
+	body = helps.RestorePublicResponsesCompactionFields(body, req.Payload, baseURL, from.String())
+	originalTranslated = helps.RestorePublicResponsesCompactionFields(originalTranslated, originalPayload, baseURL, from.String())
+
 	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
@@ -67,6 +70,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if errReplay != nil {
 		return nil, errReplay
 	}
+	body, routeState := helps.PrepareCodexRouteState(auth, baseModel,
+		xaiReasoningReplayIsolateSessionKey(ctx, codexReasoningReplaySessionKey(ctx, from, req, opts, body)), body)
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	if !sourceFormatEqual(from, sdktranslator.FromString(codexOpenAIImageSourceFormat)) {
@@ -294,6 +299,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		var param any
+		compactionContract := helps.NewResponsesCompactionStream(body)
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		var bootstrap helps.ResponsesStreamBootstrap
@@ -413,6 +419,17 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 
 			eventType = gjson.GetBytes(payload, "type").String()
+			if errContract := compactionContract.Observe(payload); errContract != nil {
+				failure := statusErr{code: http.StatusBadGateway, msg: errContract.Error()}
+				terminateReason, terminateErr = "compaction_contract", failure
+				if sess != nil {
+					unlockStreamSession()
+					e.invalidateUpstreamConn(sess, conn, "compaction_contract", failure)
+				}
+				reporter.PublishFailure(ctx, failure)
+				_ = send(cliproxyexecutor.StreamChunk{Err: failure})
+				return
+			}
 			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "error"
 			if eventType == "response.output_item.done" {
 				collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
@@ -422,6 +439,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				completedPayload = normalizeCodexWebsocketCompletion(completedPayload)
 				completedPayload = patchCodexCompletedOutput(completedPayload, outputItemsByIndex, outputItemsFallback)
 				cacheCodexReasoningReplayFromCompleted(replayScope, completedPayload)
+				routeState.Completed(ctx, completedPayload)
 				if detail, ok := helps.ParseCodexUsage(completedPayload); ok {
 					reporter.Publish(ctx, detail)
 				}

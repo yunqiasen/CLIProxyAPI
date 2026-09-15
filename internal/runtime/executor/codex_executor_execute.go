@@ -46,6 +46,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	originalPayload := originalPayloadSource
 	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, false, helps.APIKeyModelIsCompat(req))
 
+	body = helps.RestorePublicResponsesCompactionFields(body, req.Payload, baseURL, from.String())
+	originalTranslated = helps.RestorePublicResponsesCompactionFields(originalTranslated, originalPayload, baseURL, from.String())
+
 	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
@@ -73,6 +76,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if errReplay != nil {
 		return resp, errReplay
 	}
+	body, routeState := helps.PrepareCodexRouteState(auth, baseModel,
+		xaiReasoningReplayIsolateSessionKey(ctx, codexReasoningReplaySessionKey(ctx, from, req, opts, body)), body)
+
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -149,6 +155,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	// body first would turn the first-output watch into a full-generation deadline.
 	var errRead error
 	reader := helps.NewResponsesSSEReader(httpResp.Body, 52_428_800)
+	compactionContract := helps.NewResponsesCompactionStream(body)
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
 	observedOutput := false
@@ -221,6 +228,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		if !helps.ResponsesProvisionalEvent(eventType, eventData) {
 			observedOutput = true
 		}
+		if errContract := compactionContract.Observe(eventData); errContract != nil {
+			return resp, statusErr{code: http.StatusBadGateway, msg: errContract.Error()}
+		}
 		if eventType == "response.output_item.done" {
 			itemResult := gjson.GetBytes(eventData, "item")
 			if !itemResult.Exists() || itemResult.Type != gjson.JSON {
@@ -247,6 +257,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		completedData := patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 		if eventType == "response.completed" {
 			cacheCodexReasoningReplayFromCompleted(replayScope, completedData)
+			routeState.Completed(ctx, completedData)
 		}
 
 		var param any
@@ -291,6 +302,9 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	}
 	originalPayload := originalPayloadSource
 	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, false, helps.APIKeyModelIsCompat(req))
+
+	body = helps.RestorePublicResponsesCompactionFields(body, req.Payload, baseURL, from.String())
+	originalTranslated = helps.RestorePublicResponsesCompactionFields(originalTranslated, originalPayload, baseURL, from.String())
 
 	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -367,6 +381,9 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	}
 	upstreamData := applyCodexIdentityConfuseResponsePayload(data, identityState)
 	helps.AppendAPIResponseChunk(ctx, e.cfg, upstreamData)
+	if errContract := helps.ValidateResponsesCompactWindow(upstreamData); errContract != nil {
+		return resp, statusErr{code: http.StatusBadGateway, msg: errContract.Error()}
+	}
 	upstreamData = helps.RestoreCodexMultiAgentV2Response(upstreamData, optimizeMultiAgentV2)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(upstreamData))
 	reporter.EnsurePublished(ctx)

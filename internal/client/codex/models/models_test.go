@@ -363,3 +363,26 @@ func TestCodexClientModelsResponseAppliesMaxContextLengthOverride(t *testing.T) 
 		}
 	}
 }
+
+func TestPatchCapabilityRequiresVerifiedRoutes(t *testing.T) {
+	cases := []struct {
+		name      string
+		providers []string
+		want      bool
+	}{
+		{"claude", []string{"claude"}, true}, {"gemini", []string{"gemini"}, true},
+		{"native", []string{"codex"}, true}, {"mixed", []string{"codex", "claude", "gemini"}, true},
+		{"unknown", []string{"unknown"}, false}, {"mixed_unknown", []string{"claude", "unknown"}, false},
+		{"missing", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := BuildResponse([]map[string]any{{"id": "patch-fixture"}}, func(string) []string { return tc.providers }, false)
+			entry := resp["models"].([]map[string]any)[0]
+			got := entry["apply_patch_tool_type"] == "freeform"
+			if got != tc.want {
+				t.Fatalf("capability = %v want %v: %#v", got, tc.want, entry["apply_patch_tool_type"])
+			}
+		})
+	}
+}

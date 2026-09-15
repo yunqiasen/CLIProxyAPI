@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"github.com/tidwall/gjson"
 	"net/http"
 	"sync"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"golang.org/x/net/context"
 )
 
@@ -461,6 +463,23 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, 
 		Body:           cloneBytes(req.Body),
 		Metadata:       req.Metadata,
 	}, skipPluginID)
+	// Selected-auth interceptors still see the source payload before executor
+	// translation. Give both interception phases a chance to decode the window.
+	if required, _ := ctx.Value(compactionDecoderRequiredKey{}).(bool); required && !resp.Terminate && req.ToFormat != sdktranslator.FormatCodex {
+		body := req.Body
+		if len(resp.Body) > 0 {
+			body = resp.Body
+		}
+		for _, item := range gjson.GetBytes(body, "input").Array() {
+			switch item.Get("type").String() {
+			case "compaction", "compaction_summary":
+				return coreexecutor.RequestAfterAuthInterceptResponse{
+					Terminate: true, StatusCode: http.StatusBadRequest,
+					ResponseBody: []byte(`{"error":{"type":"invalid_request_error","code":"compaction_state_unhandled","message":"compaction state was not decoded by a registered adapter for this upstream"}}`),
+				}
+			}
+		}
+	}
 	return coreexecutor.RequestAfterAuthInterceptResponse{
 		Headers:         resp.Headers,
 		Body:            resp.Body,
@@ -496,4 +515,20 @@ func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestI
 		body = cloneBytes(resp.Body)
 	}
 	return body, responseHeaders
+}
+
+// HasRequestInterceptors reports whether request state may be owned by a plugin.
+// Transport normalization must preserve opaque items until those interceptors
+// have had an opportunity to validate and decode them.
+func (h *BaseAPIHandler) HasRequestInterceptors() bool {
+	return requestInterceptorsEnabled(h.interceptorHost())
+}
+
+type compactionDecoderRequiredKey struct{}
+
+// WithCompactionDecoderRequired guards a preserved window on an upstream that
+// cannot consume opaque compaction itself. Interceptors must decode or terminate
+// before protocol translation can discard the state.
+func WithCompactionDecoderRequired(ctx context.Context) context.Context {
+	return context.WithValue(ctx, compactionDecoderRequiredKey{}, true)
 }

@@ -69,6 +69,8 @@ type geminiToResponsesState struct {
 	FuncCallIDs      map[int]string
 	FuncDone         map[int]bool
 	SanitizedNameMap map[string]string
+	CustomCalls      map[string]bool
+	CustomSequence   int
 }
 
 // responseIDCounter provides a process-wide unique counter for synthesized response identifiers.
@@ -126,7 +128,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			CompletedMessages:       make(map[int]geminiCompletedMessageItem),
 			CompletedReasoning:      make(map[int]geminiCompletedReasoningItem),
 			SeenReasoningSignatures: make(map[string]bool),
-			SanitizedNameMap:        util.SanitizedToolNameMap(originalRequestRawJSON),
+			SanitizedNameMap:        util.SanitizedToolNameMap(translatorcommon.BridgeResponsesCustomTools(originalRequestRawJSON)),
 		}
 	}
 	st := (*param).(*geminiToResponsesState)
@@ -155,7 +157,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		st.SeenReasoningSignatures = make(map[string]bool)
 	}
 	if st.SanitizedNameMap == nil {
-		st.SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
+		st.SanitizedNameMap = util.SanitizedToolNameMap(translatorcommon.BridgeResponsesCustomTools(originalRequestRawJSON))
 	}
 
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
@@ -835,14 +837,14 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		st.Completed = true
 	}
 
-	return out
+	return restoreGeminiCustomEvents(out, translatorcommon.ResponsesCustomToolNames(originalRequestRawJSON), st)
 }
 
 // ConvertGeminiResponseToOpenAIResponsesNonStream aggregates Gemini response JSON into a single OpenAI Responses JSON object.
 func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	root := gjson.ParseBytes(rawJSON)
 	root = unwrapGeminiResponseRoot(root)
-	sanitizedNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
+	sanitizedNameMap := util.SanitizedToolNameMap(translatorcommon.BridgeResponsesCustomTools(originalRequestRawJSON))
 
 	// Base response scaffold
 	resp := []byte(`{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}`)
@@ -1212,5 +1214,5 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		}
 	}
 
-	return resp
+	return translatorcommon.RestoreResponsesCustomOutput(resp, translatorcommon.ResponsesCustomToolNames(originalRequestRawJSON), "output")
 }

@@ -38,7 +38,7 @@ func TestCodexExecutorCompactAddsDefaultInstructionsWithoutInjectingImageTool(t 
 				body, _ := io.ReadAll(r.Body)
 				gotBody = body
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+				_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque-fixture"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
 			}))
 			defer server.Close()
 
@@ -72,7 +72,7 @@ func TestCodexExecutorCompactAddsDefaultInstructionsWithoutInjectingImageTool(t 
 			if len(input) != 2 || input[1].Get("type").String() != "compaction_trigger" {
 				t.Fatalf("compact input order changed: %s", gotBody)
 			}
-			if string(resp.Payload) != `{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}` {
+			if string(resp.Payload) != `{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque-fixture"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}` {
 				t.Fatalf("payload = %s", string(resp.Payload))
 			}
 		})
@@ -100,7 +100,7 @@ func TestCodexCompactDisabledProviderStripsImageGenAcrossExecutors(t *testing.T)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotBody, _ = io.ReadAll(r.Body)
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+				_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque-fixture"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
 			}))
 			defer server.Close()
 

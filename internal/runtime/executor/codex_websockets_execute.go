@@ -46,6 +46,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	originalPayload := originalPayloadSource
 	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, false)
 
+	body = helps.RestorePublicResponsesCompactionFields(body, req.Payload, baseURL, from.String())
+	originalTranslated = helps.RestorePublicResponsesCompactionFields(originalTranslated, originalPayload, baseURL, from.String())
+
 	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
@@ -70,6 +73,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if errReplay != nil {
 		return resp, errReplay
 	}
+	body, routeState := helps.PrepareCodexRouteState(auth, baseModel,
+		xaiReasoningReplayIsolateSessionKey(ctx, codexReasoningReplaySessionKey(ctx, from, req, opts, body)), body)
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	if !sourceFormatEqual(from, sdktranslator.FromString(codexOpenAIImageSourceFormat)) {
@@ -254,6 +259,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}
 	}
 
+	compactionContract := helps.NewResponsesCompactionStream(body)
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
 	observedOutput := false
@@ -334,12 +340,21 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		if !helps.ResponsesProvisionalEvent(eventType, payload) {
 			observedOutput = true
 		}
+		if errContract := compactionContract.Observe(payload); errContract != nil {
+			failure := statusErr{code: http.StatusBadGateway, msg: errContract.Error()}
+			if sess != nil {
+				unlockSession()
+				e.invalidateUpstreamConn(sess, conn, "compaction_contract", failure)
+			}
+			return resp, failure
+		}
 		switch eventType {
 		case "response.output_item.done":
 			collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
 		case "response.completed":
 			payload = patchCodexCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
 			cacheCodexReasoningReplayFromCompleted(replayScope, payload)
+			routeState.Completed(ctx, payload)
 			if detail, ok := helps.ParseCodexUsage(payload); ok {
 				reporter.Publish(ctx, detail)
 			}

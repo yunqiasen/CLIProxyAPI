@@ -470,16 +470,18 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			passthroughModelName = ""
 		}
 
-		allowCompactionReplayBypass := false
+		upstreamSupportsCompactionReplay := false
 		if !nativeWebsocketPassthrough {
 			if pinnedAuthID != "" {
 				if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && pinnedAuth != nil {
-					allowCompactionReplayBypass = responsesWebsocketAuthSupportsCompactionReplay(pinnedAuth)
+					upstreamSupportsCompactionReplay = responsesWebsocketAuthSupportsCompactionReplay(pinnedAuth)
 				}
 			} else {
-				allowCompactionReplayBypass = h.websocketUpstreamSupportsCompactionReplayForModel(requestModelName)
+				upstreamSupportsCompactionReplay = h.websocketUpstreamSupportsCompactionReplayForModel(requestModelName)
 			}
 		}
+
+		allowCompactionReplayBypass := upstreamSupportsCompactionReplay || h.HasRequestInterceptors()
 
 		var requestJSON []byte
 		var updatedLastRequest []byte
@@ -566,6 +568,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		pinnedAuthAttempted := false
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, executionParent)
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
+		if !nativeWebsocketPassthrough && !upstreamSupportsCompactionReplay && allowCompactionReplayBypass {
+			cliCtx = handlers.WithCompactionDecoderRequired(cliCtx)
+		}
 		if nativeWebsocketPassthrough && requestRequiresCurrentUpstreamWebsocket {
 			cliCtx = cliproxyexecutor.WithRequiredUpstreamWebsocket(cliCtx)
 		}

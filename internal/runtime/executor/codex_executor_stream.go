@@ -46,6 +46,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	originalPayload := originalPayloadSource
 	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true, helps.APIKeyModelIsCompat(req))
 
+	body = helps.RestorePublicResponsesCompactionFields(body, req.Payload, baseURL, from.String())
+	originalTranslated = helps.RestorePublicResponsesCompactionFields(originalTranslated, originalPayload, baseURL, from.String())
+
 	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
@@ -76,6 +79,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if errReplay != nil {
 		return nil, errReplay
 	}
+	body, routeState := helps.PrepareCodexRouteState(auth, baseModel,
+		xaiReasoningReplayIsolateSessionKey(ctx, codexReasoningReplaySessionKey(ctx, from, req, opts, body)), body)
+
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -167,6 +173,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		reader := helps.NewResponsesSSEReader(httpResp.Body, 52_428_800)
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		var param any
+		compactionContract := helps.NewResponsesCompactionStream(body)
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		var readErr error
@@ -267,6 +274,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					readErr = errFirstOutput
 					break
 				}
+				if errContract := compactionContract.Observe(data); errContract != nil {
+					failure := statusErr{code: http.StatusBadGateway, msg: errContract.Error()}
+					reporter.PublishFailure(ctx, failure)
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: failure}:
+					case <-ctx.Done():
+					}
+					return
+				}
 				switch eventType {
 				case "response.output_item.done":
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
@@ -279,6 +295,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
 					if eventType == "response.completed" {
 						cacheCodexReasoningReplayFromCompleted(replayScope, data)
+						routeState.Completed(ctx, data)
 					}
 					translatedLine = append(append([]byte("data: "), data...), '\n', '\n')
 				}

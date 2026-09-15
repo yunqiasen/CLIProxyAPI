@@ -15,7 +15,7 @@ import (
 const geminiResponsesThoughtSignature = "skip_thought_signature_validator"
 
 func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := inputRawJSON
+	rawJSON := translatorcommon.BridgeResponsesCustomTools(inputRawJSON)
 
 	// Note: stream parameter is part of the fixed method signature
 	useGeminiNativeReasoningLayout := sigcompat.SignatureProviderFromModelName(modelName) == sigcompat.SignatureProviderGemini

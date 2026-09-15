@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -553,6 +554,10 @@ func apiResponseSourceOrNil(ginCtx *gin.Context) *logging.FileBodySource {
 	return source
 }
 
+// Publication only protects per-context lock initialization; independent
+// requests never serialize their file I/O on this global mutex.
+var websocketTimelinePublicationMu sync.Mutex
+
 func appendAPIWebsocketTimeline(ginCtx *gin.Context, chunk []byte) {
 	if ginCtx == nil {
 		return
@@ -561,6 +566,17 @@ func appendAPIWebsocketTimeline(ginCtx *gin.Context, chunk []byte) {
 	if len(data) == 0 {
 		return
 	}
+	websocketTimelinePublicationMu.Lock()
+	const lockKey = "CPA_API_WEBSOCKET_TIMELINE_MUTEX"
+	value, exists := ginCtx.Get(lockKey)
+	if !exists {
+		value = &sync.Mutex{}
+		ginCtx.Set(lockKey, value)
+	}
+	websocketTimelinePublicationMu.Unlock()
+	timelineMu := value.(*sync.Mutex)
+	timelineMu.Lock()
+	defer timelineMu.Unlock()
 	if source, ok := apiWebsocketTimelineSource(ginCtx); ok {
 		if errAppend := source.AppendPart(data); errAppend == nil {
 			return

@@ -521,6 +521,13 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 				inputDone, _ = sjson.SetBytes(inputDone, "item_id", fmt.Sprintf("ctc_%s", callID))
 				inputDone, _ = sjson.SetBytes(inputDone, "output_index", outputIndex)
 				inputDone, _ = sjson.SetBytes(inputDone, "input", input)
+				// Custom inputs are opaque strings; publish the decoded value once,
+				// rather than leaking partial JSON escapes as freeform deltas.
+				inputDelta, _ := sjson.SetBytes(inputDone, "type", "response.custom_tool_call_input.delta")
+				inputDelta, _ = sjson.DeleteBytes(inputDelta, "input")
+				inputDelta, _ = sjson.SetBytes(inputDelta, "delta", input)
+				out = append(out, emitRespEvent("response.custom_tool_call_input.delta", inputDelta))
+				inputDone, _ = sjson.SetBytes(inputDone, "sequence_number", nextSeq())
 				out = append(out, emitRespEvent("response.custom_tool_call_input.done", inputDone))
 
 				itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}}`)

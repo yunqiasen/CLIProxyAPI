@@ -734,10 +734,6 @@ func convertResponsesContentPartToClaude(part gjson.Result) []byte {
 	return nil
 }
 
-func isOpenAIResponsesApplyPatchCustomTool(toolType string, tool gjson.Result) bool {
-	return toolType == "custom" && strings.TrimSpace(tool.Get("name").String()) == "apply_patch"
-}
-
 func convertResponsesToolDescriptorToClaude(descriptor responsesToolDescriptor) ([]byte, bool) {
 	overrideName := ""
 	if !descriptor.direct {
@@ -830,9 +826,7 @@ func responsesToolDescriptors(root gjson.Result) []responsesToolDescriptor {
 			case "", "function":
 				appendDescriptor(child, qualifiedName, childName, namespaceName, "function", sourcePriority, false)
 			case "custom":
-				if !isOpenAIResponsesApplyPatchCustomTool("custom", child) {
-					appendDescriptor(child, qualifiedName, childName, namespaceName, "custom", sourcePriority, false)
-				}
+				appendDescriptor(child, qualifiedName, childName, namespaceName, "custom", sourcePriority, false)
 			}
 			return true
 		})
@@ -844,9 +838,7 @@ func responsesToolDescriptors(root gjson.Result) []responsesToolDescriptor {
 			case "", "function":
 				appendDescriptor(tool, responsesToolName(tool), "", "", "function", source.priority, true)
 			case "custom":
-				if !isOpenAIResponsesApplyPatchCustomTool("custom", tool) {
-					appendDescriptor(tool, responsesToolName(tool), "", "", "custom", source.priority, true)
-				}
+				appendDescriptor(tool, responsesToolName(tool), "", "", "custom", source.priority, true)
 			case "namespace":
 				appendNamespaceChildren(tool, source.priority)
 			case "web_search":

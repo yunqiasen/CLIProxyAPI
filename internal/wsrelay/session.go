@@ -21,14 +21,47 @@ var errClosed = errors.New("websocket session closed")
 
 type pendingRequest struct {
 	ch        chan Message
+	done      chan struct{}
+	initOnce  sync.Once
 	closeOnce sync.Once
+	mu        sync.Mutex
+	closed    bool
+}
+
+func (pr *pendingRequest) initialize() { pr.initOnce.Do(func() { pr.done = make(chan struct{}) }) }
+
+// deliver applies backpressure and coordinates with cancellation before closing
+// the public channel. It never drops an event to make room for a terminal.
+func (pr *pendingRequest) deliver(msg Message) bool {
+	pr.initialize()
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	if pr.closed {
+		return false
+	}
+	select {
+	case <-pr.done:
+		return false
+	default:
+	}
+	select {
+	case pr.ch <- msg:
+		return true
+	case <-pr.done:
+		return false
+	}
 }
 
 func (pr *pendingRequest) close() {
 	if pr == nil {
 		return
 	}
+	pr.initialize()
 	pr.closeOnce.Do(func() {
+		close(pr.done)
+		pr.mu.Lock()
+		defer pr.mu.Unlock()
+		pr.closed = true
 		close(pr.ch)
 	})
 }
@@ -105,14 +138,10 @@ func (s *session) dispatch(msg Message) {
 	}
 	if value, ok := s.pending.Load(msg.ID); ok {
 		req := value.(*pendingRequest)
-		select {
-		case req.ch <- msg:
-		default:
-		}
+		req.deliver(msg)
 		if msg.Type == MessageTypeHTTPResp || msg.Type == MessageTypeError || msg.Type == MessageTypeStreamEnd {
-			if actual, loaded := s.pending.LoadAndDelete(msg.ID); loaded {
-				actual.(*pendingRequest).close()
-			}
+			s.pending.CompareAndDelete(msg.ID, req)
+			req.close()
 		}
 		return
 	}
@@ -142,25 +171,29 @@ func (s *session) request(ctx context.Context, msg Message) (<-chan Message, err
 	if msg.ID == "" {
 		return nil, fmt.Errorf("wsrelay: message id is required")
 	}
-	if _, loaded := s.pending.LoadOrStore(msg.ID, &pendingRequest{ch: make(chan Message, 8)}); loaded {
+	req := &pendingRequest{ch: make(chan Message, 8)}
+	req.initialize()
+	if _, loaded := s.pending.LoadOrStore(msg.ID, req); loaded {
 		return nil, fmt.Errorf("wsrelay: duplicate message id %s", msg.ID)
 	}
-	value, _ := s.pending.Load(msg.ID)
-	req := value.(*pendingRequest)
+	select {
+	case <-s.closed:
+		s.pending.CompareAndDelete(msg.ID, req)
+		req.close()
+		return nil, errClosed
+	default:
+	}
 	if err := s.send(ctx, msg); err != nil {
-		if actual, loaded := s.pending.LoadAndDelete(msg.ID); loaded {
-			req := actual.(*pendingRequest)
-			req.close()
-		}
+		s.pending.CompareAndDelete(msg.ID, req)
+		req.close()
 		return nil, err
 	}
 	go func() {
 		select {
 		case <-ctx.Done():
-			if actual, loaded := s.pending.LoadAndDelete(msg.ID); loaded {
-				actual.(*pendingRequest).close()
-			}
-		case <-s.closed:
+			s.pending.CompareAndDelete(msg.ID, req)
+			req.close()
+		case <-req.done:
 		}
 	}()
 	return req.ch, nil
@@ -172,15 +205,17 @@ func (s *session) cleanup(cause error) {
 		s.pending.Range(func(key, value any) bool {
 			req := value.(*pendingRequest)
 			msg := Message{ID: key.(string), Type: MessageTypeError, Payload: map[string]any{"error": cause.Error()}}
-			select {
-			case req.ch <- msg:
-			default:
+			if !s.pending.CompareAndDelete(key, req) {
+				return true
 			}
-			req.close()
+			// Release the session promptly while retaining queued output and the
+			// terminal error. Caller cancellation unblocks a stopped consumer.
+			go func() { req.deliver(msg); req.close() }()
 			return true
 		})
-		s.pending = sync.Map{}
-		_ = s.conn.Close()
+		if s.conn != nil {
+			_ = s.conn.Close()
+		}
 		if s.manager != nil {
 			s.manager.handleSessionClosed(s, cause)
 		}

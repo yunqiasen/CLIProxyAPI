@@ -733,7 +733,7 @@ func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth
 	if codexAuthDisablesImageGeneration(auth) {
 		return stripCodexImageGenerationTools(body)
 	}
-	if isCodexResponsesLiteRequest(body, headers) {
+	if isCodexResponsesLiteRequest(body, headers) || helps.ResponsesCompactionTrigger(body) || gjson.GetBytes(body, "tool_choice").String() == "none" {
 		return body
 	}
 	if strings.HasSuffix(baseModel, "spark") {

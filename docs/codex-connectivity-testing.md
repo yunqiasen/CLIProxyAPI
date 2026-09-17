@@ -72,6 +72,20 @@ and draft, not that arbitrary old conversation history or every upstream request
 will succeed. Regressions separately exercise old history, signature recovery,
 output commit boundaries and the same production/management upstream fixture.
 
+## September 17: Agent budget-pool recovery parity
+
+The verified Agent budget-pool 402 is a site supply error, not evidence of an
+exhausted user account. Production no longer quarantines the selected credential
+for this error; existing unrelated payment/quota handling remains unchanged.
+See [the exact recognition and persistence boundary](any-agent-responses-compatibility.md#september-17-agent-budget-pools-are-not-credential-balances).
+
+The management HTTP handler still returns an envelope whose inner status is 402
+and whose body preserves the upstream error. It neither reports a green result nor
+tries a sibling key. A shared production/probe fixture covers both Sol and Astra:
+while supply is absent, both fail; after supply recovers, production succeeds
+before any successful probe could reset state, and the next selected-key probe
+also completes. Probe executions do not change production success/failure counts.
+
 ## Regression and local delivery
 
 In `Cli-Proxy-API-Management-Center`, run:

@@ -333,6 +333,11 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	if auth == nil || auth.Disabled || auth.Status == StatusDisabled || m.cooldownDisabledForAuth(auth) {
 		return false
 	}
+	// Older versions quarantined Agent keys for upstream budget-pool failures.
+	// Do not reinstate those records after a process reload.
+	if isAgentBudgetPoolResultError(auth, record.LastError) {
+		return false
+	}
 	updatedAt := record.UpdatedAt
 	if updatedAt.IsZero() {
 		updatedAt = now
@@ -741,7 +746,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		} else {
 			if modelKey != "" {
-				if !shouldSkipCredentialCooldown(result.Error) {
+				if !shouldSkipCredentialCooldownForAuth(auth, result.Error) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, modelKey)
 					state.Unavailable = true
@@ -1737,7 +1742,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if auth == nil {
 		return
 	}
-	if shouldSkipCredentialCooldown(resultErr) {
+	if shouldSkipCredentialCooldownForAuth(auth, resultErr) {
 		return
 	}
 	defer func() {

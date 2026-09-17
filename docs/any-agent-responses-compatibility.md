@@ -20,6 +20,56 @@ commits them locally, and verifies automatic code hot reload with the exact
 the container. Live checks pin one existing key per affected site. Remote publication follows
 the separately requested fork delivery workflow.
 
+## September 17: Agent budget pools are not credential balances
+
+Agent's public announcement, rechecked on September 17, explicitly describes
+limited GPT/Claude supply released in batches (currently 07:00 and 19:00 Beijing
+time). Exhausting that supply returns `402 Budget pool quota has been exhausted.`
+This is distinct from the user's account balance or an individual key's limit.
+Source: [Agent status API, announcement 16](https://agentrouter.org/api/status).
+The release schedule belongs to Agent and is not hard-coded into CPA.
+
+The captured 19:56 local failure was followed by CPA-generated 503 diagnostics
+reporting **10** Agent credentials cooling down for this same budget-pool error.
+A pinned key also returned the identical 402 through direct minimal Responses and
+Chat requests, without conversation history or tools. The previous stream/history
+repair did not generate the upstream 402. CPA's separate defect was applying a
+30-minute payment cooldown and blocking later attempts even after supply recovered.
+
+The auth manager now recognizes only the verified combination:
+
+- Actual auth provider `codex`, with HTTP(S) base-URL host exactly `agentrouter.org`.
+- HTTP 402, valid JSON, both `error.type` and `error.code` equal to
+  `bad_response_status_code`, and the exact budget-pool message prefix.
+- Provider display names, arbitrary mentions of the message and other hosts do
+  not opt into this exception.
+
+Such failures remain failures: original status/body, failure counts and hooks are
+preserved. They do not create key/model cooldowns or suspend registry availability.
+Normal bounded credential selection still applies; no hidden replay, background
+key sweep, additional inference, model substitution or fabricated success is added.
+On process reload, matching persisted cooldown records are discarded before they
+are applied; unrelated records and disabled credentials retain existing behavior.
+This avoids reintroducing old 30-minute blocks without resetting every account.
+Genuine 401/402/403/429 errors keep their existing handling.
+
+Regression seams use real config synthesis, selection and the Codex executor with
+local HTTP fixtures. Responses/Chat clients, stream/nonstream, Sol/Astra, repeated
+402s, immediate recovery on the same key, bounded failover, disabled entries,
+existing real cooldowns and persisted mixed-model state are covered. The management
+HTTP probe uses the same executor, pins its selected key, reports a 402 as failure
+and does not add production usage. Production recovery is checked **before** a
+successful probe, so probe-triggered recovery cannot hide a scheduler regression.
+
+```sh
+go test ./test ./sdk/cliproxy/auth ./internal/api/handlers/management \
+  -run 'AgentBudgetPool|DropsOnlyAgentBudgetPool' -count=1
+```
+
+These fixtures verify CPA recovery, not restoration of Agent's supply. A live
+402 remains an upstream failure; no completed real-site request is inferred from
+an account balance, model listing, or the probe's outer HTTP 200.
+
 ## September 13: historical input and accurate cooldown diagnostics
 
 Captured Any `gpt-6-astra` requests fail with `array_above_max_length` even when
@@ -50,8 +100,9 @@ errors after real text/reasoning/tool output stay failures; no fabricated comple
 
 The historical 07:56 Agent response contained nine budget-pool 402 failures and one
 account-quota 403. A later check observed recovery, so this capture is not evidence
-that the provider remains out of credit. Existing 30-minute cooldown behavior is
-retained, including normal expiry and explicit targeted reset. When all matching
+that the provider remains out of credit. The September 17 budget-pool exception
+above supersedes that error's earlier payment classification; other credential
+failures retain the 30-minute cooldown, normal expiry and targeted reset. When all matching
 credentials are in known payment/auth/account cooldown, CPA returns HTTP 503 with
 `error.code=upstream_credentials_cooling_down`, the requested model, remaining
 seconds, and grouped sanitized cause codes/status/counts plus `Retry-After`.

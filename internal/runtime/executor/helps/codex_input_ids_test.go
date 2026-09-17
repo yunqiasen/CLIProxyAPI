@@ -197,13 +197,13 @@ func TestSanitizeCodexInputItemIDsNormalizesCustomToolCallOutputIDs(t *testing.T
 	}
 }
 
-func TestSanitizeCodexInputItemIDsDropsOverlongEncryptedReasoningItem(t *testing.T) {
+func TestSanitizeCodexInputItemIDsDropsOverlongOpaqueOnlyReasoningItem(t *testing.T) {
 	longReasoningID := "rs_" + strings.Repeat("a", 64)
 	shortReasoningID := "rs_" + strings.Repeat("b", 48)
 	longCallID := strings.Repeat("call-item-", 8)
 	body := []byte(`{"input":[` +
 		`{"type":"message","id":"msg-1","role":"user","content":"before"},` +
-		`{"type":"reasoning","id":"` + longReasoningID + `","encrypted_content":"gAAAA-encrypted","summary":[{"type":"summary_text","text":"drop me"}]},` +
+		`{"type":"reasoning","id":"` + longReasoningID + `","encrypted_content":"gAAAA-encrypted","summary":[]},` +
 		`{"type":"reasoning","id":"` + shortReasoningID + `","encrypted_content":"gAAAA-encrypted","summary":[]},` +
 		`{"type":"function_call","id":"` + longCallID + `","call_id":"call-1","name":"lookup","arguments":"{}"}` +
 		`]}`)

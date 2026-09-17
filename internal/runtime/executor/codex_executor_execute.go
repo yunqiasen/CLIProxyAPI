@@ -154,7 +154,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	// Read frames as they arrive, even for a non-streaming client. Reading the whole
 	// body first would turn the first-output watch into a full-generation deadline.
 	var errRead error
-	reader := helps.NewResponsesSSEReader(httpResp.Body, 52_428_800)
+	reader := helps.NewCodexResponsesSSEReader(ctx, httpResp.Body, 52_428_800, httpReq.URL.String(), upstreamBody)
 	compactionContract := helps.NewResponsesCompactionStream(body)
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
@@ -207,7 +207,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 						}
 						return resp, helps.ResponsesChannelCapacityError(baseURL, baseModel, next.StatusCode, upstreamData, newCodexStatusErr(next.StatusCode, upstreamData))
 					}
-					reader = helps.NewResponsesSSEReader(next.Body, 52_428_800)
+					reader = helps.NewCodexResponsesSSEReader(ctx, next.Body, 52_428_800, retry.URL.String(), repaired)
 					continue
 				}
 			}

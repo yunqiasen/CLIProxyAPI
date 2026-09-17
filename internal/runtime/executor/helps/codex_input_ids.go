@@ -23,9 +23,9 @@ const (
 	codexInputItemIDPreserved uint8 = 1 << 1
 )
 
-// SanitizeCodexInputItemIDs normalizes supported input item IDs for Codex, removes encrypted
-// reasoning items whose IDs exceed the Codex limit, and deterministically shortens
-// other overlong input item IDs.
+// SanitizeCodexInputItemIDs normalizes supported input item IDs for Codex. Overlong
+// encrypted reasoning loses its unusable binding, but retains readable history.
+// Other overlong input item IDs are deterministically shortened.
 func SanitizeCodexInputItemIDs(body []byte) []byte {
 	input := util.GetGJSONBytesNoCopy(body, "input")
 	if !input.IsArray() {
@@ -35,7 +35,7 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 	items := input.Array()
 	idStates := make(map[string]uint8, len(items))
 	for _, item := range items {
-		if shouldDropCodexEncryptedReasoningItem(item) {
+		if codexEncryptedReasoningIDIsOverlong(item) {
 			continue
 		}
 		itemID := item.Get("id")
@@ -61,7 +61,14 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 	rebuilt := make([]string, 0, len(items))
 	changed := false
 	for _, item := range items {
-		if shouldDropCodexEncryptedReasoningItem(item) {
+		if codexEncryptedReasoningIDIsOverlong(item) {
+			if responsesReasoningHasText(item) {
+				readable, err := stripResponsesReasoningBinding(item.Raw)
+				if err != nil {
+					return body
+				}
+				rebuilt = append(rebuilt, readable)
+			}
 			changed = true
 			continue
 		}
@@ -151,7 +158,7 @@ func normalizeCodexInputItemID(item gjson.Result, id string) string {
 	return prefix + "_" + id
 }
 
-func shouldDropCodexEncryptedReasoningItem(item gjson.Result) bool {
+func codexEncryptedReasoningIDIsOverlong(item gjson.Result) bool {
 	if item.Get("type").String() != "reasoning" {
 		return false
 	}

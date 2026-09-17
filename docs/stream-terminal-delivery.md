@@ -19,3 +19,11 @@ Regression tests reproduce a full queue dropping stream_end and concurrent log
 publication retaining only a subset of 64 auth-bearing requests. Focused race tests
 cover cancellation, cleanup and publication. No automatic continuation, output
 replay, added network timeout or synthetic successful terminal is introduced.
+
+## Agent forced-function compatibility (2026-09-17)
+
+The later user-approved HTTP exception is documented in
+[Agent tool terminal compatibility](agent-tool-terminal-compatibility.md).
+It reconstructs a response terminal only after verified complete forced-function
+items and clean EOF on Agent Astra. Raw upstream logs, real errors, partial output,
+cancellation and the wsrelay/WebSocket contracts above remain unchanged.

@@ -68,3 +68,11 @@ Delivery follows local-fork-delivery.md: scoped commit, automatic hot reload,
 exact clean revision header, unchanged container ID, API/panel availability and
 local upstream fixture verification. This does not certify Agent's live Azure
 resource routing; the user-disabled model remains disabled.
+
+## Later complete-tool and readable-history repair
+
+The 2026-09-17 user-approved extension is specified in
+[Agent tool terminal compatibility](agent-tool-terminal-compatibility.md).
+It retains readable content when an encrypted reasoning ID is overlong and adds
+a strict complete-forced-function EOF adapter shared by requests and probes.
+It is not a general EOF-to-success rule or an automatic continuation call.

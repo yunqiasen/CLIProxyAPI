@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -78,5 +79,39 @@ func TestCodexExecutorExecuteStreamSanitizesOverlongInputItemIDs(t *testing.T) {
 	}
 	if got := gjson.GetBytes(gotBody, "input.2.id").String(); got != "msg_item_74ec40c883248ebb4885ec84" {
 		t.Fatalf("message input item ID was not normalized: %q", got)
+	}
+}
+
+func TestCodexExecutorPreservesLongIDReasoningHistory(t *testing.T) {
+	for _, host := range []string{"agentrouter.org", "anyrouter.top", "other.example"} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream_%t", host, stream), func(t *testing.T) {
+				requests := make(chan []byte, 1)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					body, _ := io.ReadAll(r.Body)
+					requests <- body
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"status\":\"completed\",\"output\":[]}}\n\n")
+				}))
+				defer server.Close()
+				payload := []byte(`{"model":"gpt-6-astra","input":[{"type":"reasoning","id":"rs_` + strings.Repeat("a", 62) + `","encrypted_content":"` + validOpenAIResponsesReasoningEncryptedContentForTest() + `","summary":[{"type":"summary_text","text":"summary stays"}],"content":[{"type":"reasoning_text","text":"content stays"}]},{"type":"message","role":"user","content":"continue"},{"type":"function_call_output","call_id":"call_keep","output":"tool stays"}]}`)
+				original := string(payload)
+				e := NewCodexExecutor(&config.Config{})
+				credential := &cliproxyauth.Auth{ID: "history-fixture", Provider: "codex", ProxyURL: server.URL, Attributes: map[string]string{"api_key": "selected", "base_url": "http://" + host + "/v1"}}
+				executeAgentAstraFixture(t, e, credential, cliproxyexecutor.Request{Model: "gpt-6-astra", Payload: payload}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: stream})
+				got := <-requests
+				for _, text := range []string{"summary stays", "content stays", "tool stays"} {
+					if !strings.Contains(string(got), text) {
+						t.Fatalf("%q lost upstream: %s", text, got)
+					}
+				}
+				if gjson.GetBytes(got, "input.0.id").Exists() || gjson.GetBytes(got, "input.0.encrypted_content").Exists() || string(payload) != original {
+					t.Fatal("binding remained or caller input changed")
+				}
+				if host != "other.example" && gjson.GetBytes(got, "input.0.content.#").Int() != 0 {
+					t.Fatal("provider reasoning normalization bypassed")
+				}
+			})
+		}
 	}
 }

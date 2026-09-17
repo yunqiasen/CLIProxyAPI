@@ -72,11 +72,7 @@ func PortableResponsesSignatureRetry(body, rejection []byte, endpoint string) ([
 			removed = true
 			// Only opaque state is expendable; retain readable summaries/content.
 			if responsesReasoningHasText(item) {
-				readable, err := sjson.Delete(item.Raw, "encrypted_content")
-				if err != nil {
-					return body, false
-				}
-				readable, err = sjson.Delete(readable, "id")
+				readable, err := stripResponsesReasoningBinding(item.Raw)
 				if err != nil {
 					return body, false
 				}
@@ -101,6 +97,15 @@ func PortableResponsesSignatureRetry(body, rejection []byte, endpoint string) ([
 		return body, false
 	}
 	return updated, true
+}
+
+// stripResponsesReasoningBinding preserves the readable item and its extension fields.
+func stripResponsesReasoningBinding(raw string) (string, error) {
+	readable, err := sjson.Delete(raw, "encrypted_content")
+	if err != nil {
+		return "", err
+	}
+	return sjson.Delete(readable, "id")
 }
 
 func responsesReasoningHasText(item gjson.Result) bool {

@@ -170,7 +170,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
 		}()
-		reader := helps.NewResponsesSSEReader(httpResp.Body, 52_428_800)
+		reader := helps.NewCodexResponsesSSEReader(ctx, httpResp.Body, 52_428_800, httpReq.URL.String(), upstreamBody)
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		var param any
 		compactionContract := helps.NewResponsesCompactionStream(body)
@@ -229,7 +229,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 							httpResp = next
 							helps.RecordAPIResponseMetadata(ctx, e.cfg, next.StatusCode, next.Header.Clone())
 							if next.StatusCode >= 200 && next.StatusCode < 300 {
-								reader = helps.NewResponsesSSEReader(next.Body, 52_428_800)
+								reader = helps.NewCodexResponsesSSEReader(ctx, next.Body, 52_428_800, retry.URL.String(), repaired)
 								bootstrap.Reset()
 								param = nil
 								claudeInputTokens = helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)

@@ -19,7 +19,7 @@ import (
 
 func TestAgentAstraReportedErrors(t *testing.T) {
 	for _, stream := range []bool{false, true} {
-		for _, kind := range []string{"reasoning-content", "resource", "prefixed-resource", "encrypted", "prefixed-encrypted"} {
+		for _, kind := range []string{"reasoning-content", "resource", "prefixed-resource", "masked-resource", "prefixed-masked-resource", "encrypted", "prefixed-encrypted"} {
 			name := kind
 			if stream {
 				name += "/stream"
@@ -49,6 +49,9 @@ func TestAgentAstraReportedErrors(t *testing.T) {
 							message = "The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it."
 						} else {
 							message = "The encrypted content for item rs_foreign could not be verified. Reason: Encrypted content could not be decrypted or parsed."
+						}
+						if strings.Contains(kind, "masked") {
+							message = strings.Replace(message, "Azure", "***", 1)
 						}
 						if strings.HasPrefix(kind, "prefixed") {
 							message = "OpenAI Responses bad request: " + message

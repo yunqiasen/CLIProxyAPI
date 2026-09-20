@@ -24,6 +24,16 @@ import (
 const agentResourceSwitchRejection = `{"error":{"type":"invalid_request_error","code":null,"param":"","message":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. [trace_id=fixture]"}}`
 
 func TestAgentRateLimitSwitchKeepsPortableConversation(t *testing.T) {
+	testAgentRateLimitSwitchKeepsPortableConversation(t, agentResourceSwitchRejection)
+}
+
+func TestAgentRateLimitSwitchWithMaskedResourceKeepsPortableConversation(t *testing.T) {
+	rejection := `{"error":{"message":"OpenAI Responses bad request: The requested item was created under a different *** OpenAI resource. Use the same resource that created the item to access it. [trace_id=fixture]","param":"","type":"invalid_request_error"}}`
+	testAgentRateLimitSwitchKeepsPortableConversation(t, rejection)
+}
+
+func testAgentRateLimitSwitchKeepsPortableConversation(t *testing.T, rejection string) {
+	t.Helper()
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
 			var mu sync.Mutex
@@ -52,7 +62,7 @@ func TestAgentRateLimitSwitchKeepsPortableConversation(t *testing.T) {
 					routeBoundID := typ == "reasoning" || (typ == "message" && role == "assistant") || typ == "function_call" || typ == "function_call_output" || typ == "custom_tool_call" || typ == "custom_tool_call_output"
 					if (routeBoundID && item.Get("id").Exists()) || item.Get("encrypted_content").Exists() {
 						w.WriteHeader(http.StatusBadRequest)
-						_, _ = io.WriteString(w, agentResourceSwitchRejection)
+						_, _ = io.WriteString(w, rejection)
 						return
 					}
 				}

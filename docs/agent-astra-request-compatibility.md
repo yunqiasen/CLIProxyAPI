@@ -108,3 +108,60 @@ The 2026-09-17 user-approved extension is specified in
 It retains readable content when an encrypted reasoning ID is overlong and adds
 a strict complete-forced-function EOF adapter shared by requests and probes.
 It is not a general EOF-to-success rule or an automatic continuation call.
+
+## September 20 follow-up: masked resource name
+
+Baseline: `d69b8cc111670c5e3c2b30d170e03e263ade34b1`.
+
+The retained request-log index for `9d04ee2f` (10:04:27, local time) contains
+`different *** OpenAI resource`, not `different Azure OpenAI resource`.
+The executor's upstream-error log for `7aff0ffe` (10:55:51) independently records
+the same masked wording before the error reaches the client. The morning's
+12 indexed Agent resource failures contain eight masked messages and four Azure
+messages; these are incident sample counts, not a provider-wide failure rate.
+The old recognizer accepted only Azure, so the masked envelope skipped recovery
+even after the earlier portable-item-ID repair.
+
+The completed request immediately before `9d04ee2f` used the same CPA credential
+and client turn. The failure was the next Responses request in that task, not a
+retroactively failed completed response. Stable CPA key selection alone does not
+make every historical item valid at Agent's backing resource. No global routing
+strategy or session files are changed by this repair.
+
+The matcher now accepts exactly `Azure` or the observed literal `***`. It retains
+all existing gates: Agent Responses endpoint, invalid-request error type, empty
+code/parameter, route-bound input state and portable history. It does not match
+arbitrary resource names, quoted errors, rate-limit envelopes or other providers.
+The existing one-attempt recovery, ID cleanup and history-preservation rules are
+reused, including their stored-reference, compaction and post-output guards.
+
+### Verification
+
+- The original masked envelope fails against the baseline through the public
+  recovery helper, HTTP executor, SSE executor, native WebSocket executor,
+  management probe and credential-failover manager. Restoring the one-line matcher
+  change makes these same regressions pass.
+- A copied baseline runtime binary returns the exact masked HTTP 400 after one
+  attempt against a local upstream fixture. The repaired binary passes six
+  runtime cases: HTTP-400 and SSE-failure recovery, each through streaming,
+  non-streaming and the management probe. Each performs two attempts on the same
+  key/session and retains readable summaries, text, tool call IDs/results,
+  search history and the client-owned message ID.
+- The manager fixture covers Astra rate limit -> another credential -> masked
+  resource rejection -> same-credential repair -> completed response.
+- Public HTTP regressions separately verify that rate limits after text,
+  reasoning, function or native-search output remain failures, preserve the
+  original error details, and do not replay the already-started work.
+- `go test ./... -count=1 -timeout=180s`, the affected four-package race suite
+  (`-count=3`), server build and management-bundle regression all passed.
+
+The 12:20 single-key direct check used only Agent's first configured credential
+and a two-message request. It returned upstream HTTP 402 with the budget-pool
+message before the resource comparison could complete. No other key was tried;
+this does not establish the user's account balance or live recovery success.
+Local protocol replay is verified separately from upstream availability. The
+saved provider settings and its existing disable switch remain unchanged.
+
+Standards and Spec were manually reviewed against this baseline: no remaining
+findings. The change is confined to the shared recognizer, its regression tests
+and this document; this is not an independent dual-model review.

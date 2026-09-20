@@ -122,9 +122,15 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 	for _, scenario := range []struct {
 		host     string
 		resource bool
-	}{{"anyrouter.top", false}, {"agentrouter.org", false}, {"agentrouter.org", true}} {
+		masked   bool
+	}{
+		{host: "anyrouter.top"},
+		{host: "agentrouter.org"},
+		{host: "agentrouter.org", resource: true},
+		{host: "agentrouter.org", resource: true, masked: true},
+	} {
 		host := scenario.host
-		t.Run(fmt.Sprintf("%s/resource_%t", host, scenario.resource), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s/resource_%t/masked_%t", host, scenario.resource, scenario.masked), func(t *testing.T) {
 			var requests [][]byte
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				b, _ := io.ReadAll(r.Body)
@@ -147,6 +153,9 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 					message := "OpenAI Responses bad request: The encrypted content for item rs_foreign could not be verified. Reason: Encrypted content could not be decrypted or parsed. [trace_id=parity]"
 					if scenario.resource {
 						message = "The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. [trace_id=parity]"
+					}
+					if scenario.masked {
+						message = "OpenAI Responses bad request: " + strings.Replace(message, "Azure", "***", 1)
 					}
 					_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"type": "invalid_request_error", "code": nil, "param": "", "message": message}})
 					return

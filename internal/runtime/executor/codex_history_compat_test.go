@@ -166,13 +166,19 @@ func TestCodexAgentSignatureRecoveryKeepsReadableReasoning(t *testing.T) {
 
 const agentMessageOnlySignatureRejection = `{"error":{"type":"invalid_request_error","code":null,"param":"","message":"OpenAI Responses bad request: The encrypted content for item rs_foreign could not be verified. Reason: Encrypted content could not be decrypted or parsed. [trace_id=fixture]"}}`
 const agentResourceMismatchRejection = `{"error":{"type":"invalid_request_error","code":null,"param":"","message":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. [trace_id=fixture]"}}`
+const agentMaskedResourceMismatchRejection = `{"error":{"type":"invalid_request_error","param":"","message":"OpenAI Responses bad request: The requested item was created under a different *** OpenAI resource. Use the same resource that created the item to access it. [trace_id=fixture]"}}`
 const completedHistoryResponse = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"status\":\"completed\",\"output\":[]}}\n\n"
 
 func TestCodexAgentMessageOnlySSERecoveryBoundaries(t *testing.T) {
-	for _, rejection := range []string{agentMessageOnlySignatureRejection, agentResourceMismatchRejection} {
+	for _, scenario := range []struct{ name, rejection string }{
+		{"encrypted", agentMessageOnlySignatureRejection},
+		{"resource", agentResourceMismatchRejection},
+		{"masked-resource", agentMaskedResourceMismatchRejection},
+	} {
+		rejection := scenario.rejection
 		for _, stream := range []bool{false, true} {
 			for _, mode := range []string{"provisional", "text", "reasoning", "tool", "repeated"} {
-				t.Run(fmt.Sprintf("resource_%t/stream_%t/%s", rejection == agentResourceMismatchRejection, stream, mode), func(t *testing.T) {
+				t.Run(fmt.Sprintf("%s/stream_%t/%s", scenario.name, stream, mode), func(t *testing.T) {
 					calls := 0
 					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						calls++
@@ -225,15 +231,17 @@ func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 		host     string
 		source   sdktranslator.Format
 		resource bool
+		masked   bool
 	}{
-		{"anyrouter.top", sdktranslator.FormatOpenAIResponse, false},
-		{"agentrouter.org", sdktranslator.FormatOpenAIResponse, false},
-		{"agentrouter.org", sdktranslator.FormatOpenAIResponse, true},
-		{"anyrouter.top", sdktranslator.FromString(codexOpenAIImageSourceFormat), false},
+		{"anyrouter.top", sdktranslator.FormatOpenAIResponse, false, false},
+		{"agentrouter.org", sdktranslator.FormatOpenAIResponse, false, false},
+		{"agentrouter.org", sdktranslator.FormatOpenAIResponse, true, false},
+		{"agentrouter.org", sdktranslator.FormatOpenAIResponse, true, true},
+		{"anyrouter.top", sdktranslator.FromString(codexOpenAIImageSourceFormat), false, false},
 	} {
 		host := route.host
 		for _, stream := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/%s/resource_%t/stream_%t", host, route.source, route.resource, stream), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/%s/resource_%t/masked_%t/stream_%t", host, route.source, route.resource, route.masked, stream), func(t *testing.T) {
 				var calls atomic.Int32
 				upgrader := websocket.Upgrader{}
 				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -260,6 +268,9 @@ func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 							rejection := agentMessageOnlySignatureRejection
 							if route.resource {
 								rejection = agentResourceMismatchRejection
+								if route.masked {
+									rejection = agentMaskedResourceMismatchRejection
+								}
 							}
 							_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status":400,`+strings.TrimPrefix(rejection, "{")))
 							continue

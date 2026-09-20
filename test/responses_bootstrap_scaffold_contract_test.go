@@ -89,7 +89,7 @@ func TestResponsesDoesNotReplayAfterRealOutput(t *testing.T) {
 		{"function_arguments", `{"type":"response.function_call_arguments.delta","delta":"partial arguments"}`, "partial arguments"},
 		{"native_search", `{"type":"response.output_item.added","output_index":0,"item":{"type":"web_search_call","id":"search_fixture","status":"in_progress"}}`, "search_fixture"},
 	} {
-		for _, failure := range []string{"overload", "EOF"} {
+		for _, failure := range []string{"overload", "rate_limit", "EOF"} {
 			t.Run(tc.name+"/"+failure, func(t *testing.T) {
 				var mu sync.Mutex
 				var attempts []string
@@ -107,6 +107,9 @@ func TestResponsesDoesNotReplayAfterRealOutput(t *testing.T) {
 					_, _ = io.WriteString(w, "data: "+tc.event+"\n\n")
 					if failure == "overload" {
 						_, _ = io.WriteString(w, "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"upstream overloaded\"}}}\n\n")
+					}
+					if failure == "rate_limit" {
+						_, _ = io.WriteString(w, `data: {"type":"response.failed","response":{"status":"failed","error":{"type":"too_many_requests","code":"rate_limit_exceeded","message":"Your requests to gpt-6-astra for gpt-6-astra in eastus2 have exceeded rate limit."}}}`+"\n\n")
 					}
 				}), []string{"primary", "secondary"})
 				payload, _ := json.Marshal(map[string]any{"model": fixture.model, "input": "hello", "stream": true})
@@ -132,6 +135,9 @@ func TestResponsesDoesNotReplayAfterRealOutput(t *testing.T) {
 				mu.Unlock()
 				if !reflect.DeepEqual(got, []string{"primary"}) || strings.Contains(string(body), `"type":"response.completed"`) || strings.Count(string(body), `"type":"response.failed"`) != 1 || !strings.Contains(string(body), tc.marker) {
 					t.Fatalf("partial output was lost or replayed: attempts=%v body=%s", got, body)
+				}
+				if failure == "rate_limit" && (!strings.Contains(string(body), "rate_limit_exceeded") || !strings.Contains(string(body), "eastus2")) {
+					t.Fatal("real rate-limit details were lost")
 				}
 				item := fixture.waitForLog(t)
 				if item.Get("success").Bool() || !item.Get("has_error").Bool() || item.Get("auth_id").String() != t.Name()+"-primary" {

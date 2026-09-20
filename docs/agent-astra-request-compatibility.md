@@ -8,9 +8,9 @@ The user reported resource-mismatch, reasoning-content length, encrypted-content
 verification and Chat tools/reasoning errors. Searching local request logs for the
 four supplied trace IDs found copies inside the user's conversation, not the
 original upstream response envelopes. These matches are not incident captures.
-The current Agent Codex configuration exposes only gpt-5.6-sol; gpt-6-astra was
-removed by the user. Tests use local upstream fixtures reproducing the reported
-messages, not paid-key enumeration or claims of a successful live Agent replay.
+During the September 15 investigation, Agent exposed only gpt-5.6-sol because
+gpt-6-astra had been removed temporarily. The model was configured again before
+the September 20 capture described below.
 
 `go test ./internal/runtime/executor -run '^TestAgentAstraReportedErrors$' -count=1`
 reproduced eight failing HTTP/streaming cases and two already-working cases before
@@ -28,13 +28,14 @@ portable message; tool call/results assert preservation across retries.
   OpenAI Responses bad request prefix. Named items must still match actual opaque
   reasoning in the outgoing request.
 - An exact Agent Azure resource-mismatch error enters the existing one-attempt,
-  same-credential portable-reasoning recovery. This is reactive: an upstream
-  router can switch its internal Azure resource even when CPA keeps the same key.
-  Local route ownership alone does not observe that internal change. Resource
-  errors without a matching disposable reasoning candidate remain errors.
+  same-credential portable-history recovery. This is reactive: an upstream router
+  can switch its internal Azure resource even when CPA keeps the same key. Local
+  route ownership alone does not observe that internal change. Resource errors
+  without matching disposable route-bound state remain errors.
 - Stored references (previous_response_id and item_reference), opaque compaction
   and absent portable history prevent this recovery. CPA does not reconstruct
-  missing remote state, strip arbitrary item IDs, or return synthetic success.
+  missing remote state, strip client-owned user message IDs, or return synthetic
+  success.
   Failure after committed text/reasoning/tool output does not trigger replay.
 - Production and management probes share these helpers. The existing synthesis/
   alias/payload test now covers Agent content normalization and resource-error
@@ -49,8 +50,8 @@ regression exercises both streaming and non-streaming Chat clients and confirms
 function tools and high reasoning survive. Removing tools or reasoning_effort to
 make /chat/completions return 200 is not an equivalent repair.
 
-The removed Agent model is not silently re-enabled by this code change. No config,
-client transcript, credential pool, Web UI or VPS is changed. If a remaining
+The September 15 code change did not silently re-enable the removed Agent model.
+No config, client transcript, credential pool, Web UI or VPS was changed. If a remaining
 resource error refers to stored/compacted state rather than disposable reasoning,
 use the original upstream resource or replay a genuinely complete readable history;
 otherwise preserve the error instead of silently discarding context.
@@ -68,6 +69,37 @@ Delivery follows local-fork-delivery.md: scoped commit, automatic hot reload,
 exact clean revision header, unchanged container ID, API/panel availability and
 local upstream fixture verification. This does not certify Agent's live Azure
 resource routing; the user-disabled model remains disabled.
+
+## September 20: portable continuation across Agent resource switches
+
+A captured long Codex request showed the remaining failure after the earlier
+reasoning repair. The local routing strategy was `fill-first`, not session
+affinity. After a selected Agent credential received a real Astra rate limit,
+CPA could select another credential. The request still carried Azure-resource
+bindings on historical messages and function items, so Agent rejected the old
+conversation even after encrypted reasoning was removed.
+
+A same-key live differential replay used the repaired captured body.
+Keeping historical item IDs returned the resource-mismatch 400; removing only
+the assistant message/function/custom-tool item IDs returned HTTP 200 with
+`response.completed`. Readable text, reasoning summaries, function `call_id`,
+function outputs and search history remained present. This proves the remaining
+400 was route-bound item identity, not conversation length or account balance.
+
+For the exact Agent resource-mismatch envelope, the one pre-output retry now:
+
+- removes rejected encrypted reasoning while retaining readable summaries;
+- removes top-level IDs from reasoning, assistant messages and function/custom-tool
+  items while preserving client-owned user message IDs, `call_id` and results;
+- retains unrelated search item IDs and history;
+- remains disabled for `previous_response_id`, `item_reference`, opaque
+  compaction, missing portable history, repeated rejection and committed output.
+
+A manager-level regression covers the observed chain: first credential emits an
+Astra 429, bounded failover selects a second credential, the second resource
+rejects old bindings once, and the same credential completes after the portable
+retry. The existing conversation continues without requiring a new client task.
+The upstream 429 remains a real failure signal; CPA does not turn it into success.
 
 ## Later complete-tool and readable-history repair
 

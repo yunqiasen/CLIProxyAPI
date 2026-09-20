@@ -85,6 +85,65 @@ func TestAgentAstraReportedErrors(t *testing.T) {
 	}
 }
 
+func TestAgentAstraResourceRecoveryDropsRouteBoundItemIDs(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			calls := 0
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				body, errRead := io.ReadAll(r.Body)
+				if errRead != nil {
+					t.Fatal(errRead)
+				}
+				if calls == 1 {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = io.WriteString(w, agentResourceMismatchRejection)
+					return
+				}
+				for _, item := range gjson.GetBytes(body, "input").Array() {
+					typ := item.Get("type").String()
+					role := item.Get("role").String()
+					routeBoundID := typ == "reasoning" || (typ == "message" && role == "assistant") || typ == "function_call" || typ == "function_call_output" || typ == "custom_tool_call" || typ == "custom_tool_call_output"
+					if (routeBoundID && item.Get("id").Exists()) || item.Get("encrypted_content").Exists() {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusBadRequest)
+						_, _ = io.WriteString(w, agentResourceMismatchRejection)
+						return
+					}
+				}
+				if gjson.GetBytes(body, "input.0.summary.0.text").String() != "keep summary one" ||
+					gjson.GetBytes(body, "input.1.summary.0.text").String() != "keep summary two" ||
+					gjson.GetBytes(body, "input.3.call_id").String() != "call_keep" ||
+					gjson.GetBytes(body, "input.4.call_id").String() != "call_keep" ||
+					gjson.GetBytes(body, "input.4.output").String() != "keep result" ||
+					gjson.GetBytes(body, "input.5.id").String() != "ws_keep" ||
+					gjson.GetBytes(body, "input.6.id").String() != "msg_current" ||
+					gjson.GetBytes(body, "input.6.content").String() != "continue" {
+					t.Fatalf("portable history changed: %s", body)
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, completedHistoryResponse)
+			}))
+			defer upstream.Close()
+
+			payload := []byte(`{"model":"gpt-6-astra","input":[` +
+				`{"type":"reasoning","id":"rs_foreign_one","encrypted_content":"` + validCodexReasoningEncryptedContentForTest() + `","summary":[{"type":"summary_text","text":"keep summary one"}]},` +
+				`{"type":"reasoning","id":"rs_foreign_two","encrypted_content":"` + validCodexReasoningEncryptedContentForTest() + `","summary":[{"type":"summary_text","text":"keep summary two"}]},` +
+				`{"type":"message","id":"msg_foreign","role":"assistant","content":[{"type":"output_text","text":"keep answer"}]},` +
+				`{"type":"function_call","id":"fc_foreign","call_id":"call_keep","name":"fixture","arguments":"{}"},` +
+				`{"type":"function_call_output","id":"fco_foreign","call_id":"call_keep","output":"keep result"},` +
+				`{"type":"web_search_call","id":"ws_keep","status":"completed","action":{"type":"search","query":"keep query"}},` +
+				`{"type":"message","id":"msg_current","role":"user","content":"continue"}]}`)
+			credential := &auth.Auth{ID: "agent-resource-fixture", Provider: "codex", ProxyURL: upstream.URL, Attributes: map[string]string{"api_key": "one-fixture-key", "base_url": "http://agentrouter.org/v1"}}
+			executeAgentAstraFixture(t, NewCodexExecutor(&config.Config{}), credential, ex.Request{Model: "gpt-6-astra", Payload: payload}, ex.Options{SourceFormat: tr.FormatOpenAIResponse, Stream: stream})
+			if calls != 2 {
+				t.Fatalf("calls=%d, want one same-key portable retry", calls)
+			}
+		})
+	}
+}
+
 func TestAgentAstraChatClientUsesResponsesUpstream(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprint(stream), func(t *testing.T) {

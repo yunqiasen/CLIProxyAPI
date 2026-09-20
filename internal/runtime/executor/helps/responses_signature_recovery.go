@@ -18,12 +18,14 @@ import (
 
 var responsesRejectedInputIndex = regexp.MustCompile(`^input(?:\[([0-9]+)\]|\.([0-9]+))(?:\.(?:encrypted_content|id))?$`)
 
-// PortableResponsesSignatureRetry repairs only explicit rejection of opaque reasoning.
+// PortableResponsesSignatureRetry repairs explicit rejection of route-bound Responses state.
 // It leaves the caller's body, portable history, and successful requests unchanged.
 func PortableResponsesSignatureRetry(body, rejection []byte, endpoint string) ([]byte, bool) {
 	if !json.Valid(body) || !json.Valid(rejection) {
 		return body, false
 	}
+	agentRejection := classifyAgentSignatureRejection(body, rejection, endpoint)
+	resourceMismatch := agentRejection.kind == agentSignatureRejectionResource
 	rejection = normalizeAgentSignatureRejection(body, rejection, endpoint)
 	code := gjson.GetBytes(rejection, "error.code").String()
 	if code == "" {
@@ -61,7 +63,7 @@ func PortableResponsesSignatureRetry(body, rejection []byte, endpoint string) ([
 	}
 	items := input.Array()
 	kept := make([]json.RawMessage, 0, len(items))
-	removed := false
+	changed := false
 	portable := false
 	for i, item := range items {
 		typ := item.Get("type").String()
@@ -69,7 +71,7 @@ func PortableResponsesSignatureRetry(body, rejection []byte, endpoint string) ([
 			return body, false
 		}
 		if (target < 0 || target == i) && typ == "reasoning" && item.Get("encrypted_content").Type == gjson.String && item.Get("encrypted_content").String() != "" {
-			removed = true
+			changed = true
 			// Only opaque state is expendable; retain readable summaries/content.
 			if responsesReasoningHasText(item) {
 				readable, err := stripResponsesReasoningBinding(item.Raw)
@@ -80,12 +82,21 @@ func PortableResponsesSignatureRetry(body, rejection []byte, endpoint string) ([
 			}
 			continue
 		}
-		kept = append(kept, json.RawMessage(item.Raw))
+		raw := item.Raw
+		if resourceMismatch && responsesRouteBoundItemID(item) {
+			withoutID, errDelete := sjson.Delete(raw, "id")
+			if errDelete != nil {
+				return body, false
+			}
+			raw = withoutID
+			changed = true
+		}
+		kept = append(kept, json.RawMessage(raw))
 		if typ == "message" || item.Get("role").Exists() || typ == "function_call" || typ == "function_call_output" || typ == "custom_tool_call" || typ == "custom_tool_call_output" {
 			portable = true
 		}
 	}
-	if !removed || !portable {
+	if !changed || !portable {
 		return body, false
 	}
 	encoded, err := json.Marshal(kept)
@@ -106,6 +117,20 @@ func stripResponsesReasoningBinding(raw string) (string, error) {
 		return "", err
 	}
 	return sjson.Delete(readable, "id")
+}
+
+func responsesRouteBoundItemID(item gjson.Result) bool {
+	if !item.Get("id").Exists() {
+		return false
+	}
+	switch item.Get("type").String() {
+	case "reasoning", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output":
+		return true
+	case "message":
+		return item.Get("role").String() == "assistant"
+	default:
+		return false
+	}
 }
 
 func responsesReasoningHasText(item gjson.Result) bool {
@@ -199,7 +224,7 @@ func ResponsesSignatureRetryRecorder(ctx context.Context, cfg *config.Config, re
 				return err
 			}
 		}
-		LogWithRequestID(ctx).Debug("responses executor: retrying rejected opaque reasoning once with portable history")
+		LogWithRequestID(ctx).Debug("responses executor: retrying rejected route-bound state once with portable history")
 		entry := requestLog
 		entry.Headers = retry.Header.Clone()
 		entry.Body = retryBody

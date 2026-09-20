@@ -13,14 +13,27 @@ var agentSignatureRejection = regexp.MustCompile(`^(?:OpenAI Responses bad reque
 
 var agentResourceRejection = regexp.MustCompile(`^(?:OpenAI Responses bad request: )?The requested item was created under a different Azure OpenAI resource\. Use the same resource that created the item to access it\.(?: \[trace_id=[A-Za-z0-9_-]+\])?$`)
 
-// normalizeAgentSignatureRejection recognizes explicit Agent state rejections.
-// A named item must match opaque reasoning. Resource errors have no item ID;
-// the shared retry additionally requires portable history and excludes stored
-// references/compaction, then removes only opaque reasoning, never other items.
-func normalizeAgentSignatureRejection(body, rejection []byte, endpoint string) []byte {
+type agentSignatureRejectionKind uint8
+
+const (
+	agentSignatureRejectionNone agentSignatureRejectionKind = iota
+	agentSignatureRejectionEncrypted
+	agentSignatureRejectionResource
+)
+
+type agentSignatureRejectionMatch struct {
+	kind agentSignatureRejectionKind
+	path string
+}
+
+// classifyAgentSignatureRejection recognizes exact Agent state rejections. A
+// named encrypted item must match opaque reasoning. A resource mismatch may be
+// carried by portable response item IDs, so it only requires route-bound
+// state plus portable-history checks in the shared retry.
+func classifyAgentSignatureRejection(body, rejection []byte, endpoint string) agentSignatureRejectionMatch {
 	parsed, err := url.Parse(endpoint)
 	if err != nil || !strings.EqualFold(strings.TrimSuffix(parsed.Hostname(), "."), "agentrouter.org") || !strings.HasSuffix(strings.TrimSuffix(parsed.Path, "/"), "/responses") {
-		return rejection
+		return agentSignatureRejectionMatch{}
 	}
 	path := "error"
 	if !gjson.GetBytes(rejection, path).IsObject() {
@@ -28,21 +41,41 @@ func normalizeAgentSignatureRejection(body, rejection []byte, endpoint string) [
 	}
 	e := gjson.GetBytes(rejection, path)
 	if e.Get("type").String() != "invalid_request_error" || e.Get("code").String() != "" || e.Get("param").String() != "" {
-		return rejection
+		return agentSignatureRejectionMatch{}
 	}
-	match := agentSignatureRejection.FindStringSubmatch(e.Get("message").String())
-	resourceMismatch := agentResourceRejection.MatchString(e.Get("message").String())
-	if len(match) != 2 && !resourceMismatch {
-		return rejection
+	message := e.Get("message").String()
+	if match := agentSignatureRejection.FindStringSubmatch(message); len(match) == 2 {
+		for _, item := range gjson.GetBytes(body, "input").Array() {
+			if item.Get("type").String() == "reasoning" && item.Get("id").String() == match[1] && item.Get("encrypted_content").Type == gjson.String && item.Get("encrypted_content").String() != "" {
+				return agentSignatureRejectionMatch{kind: agentSignatureRejectionEncrypted, path: path}
+			}
+		}
+		return agentSignatureRejectionMatch{}
+	}
+	if !agentResourceRejection.MatchString(message) {
+		return agentSignatureRejectionMatch{}
 	}
 	for _, item := range gjson.GetBytes(body, "input").Array() {
-		if item.Get("type").String() != "reasoning" || (!resourceMismatch && item.Get("id").String() != match[1]) || item.Get("encrypted_content").Type != gjson.String || item.Get("encrypted_content").String() == "" {
-			continue
+		if responsesRouteBoundItemID(item) {
+			return agentSignatureRejectionMatch{kind: agentSignatureRejectionResource, path: path}
 		}
-		normalized, errSet := sjson.SetBytes(rejection, path+".code", "invalid_encrypted_content")
-		if errSet == nil {
-			return normalized
+		if item.Get("type").String() == "reasoning" && item.Get("encrypted_content").Type == gjson.String && item.Get("encrypted_content").String() != "" {
+			return agentSignatureRejectionMatch{kind: agentSignatureRejectionResource, path: path}
 		}
+	}
+	return agentSignatureRejectionMatch{}
+}
+
+// normalizeAgentSignatureRejection maps verified Agent state errors into the
+// shared route-bound-state recovery code without changing unrelated errors.
+func normalizeAgentSignatureRejection(body, rejection []byte, endpoint string) []byte {
+	match := classifyAgentSignatureRejection(body, rejection, endpoint)
+	if match.kind == agentSignatureRejectionNone {
+		return rejection
+	}
+	normalized, errSet := sjson.SetBytes(rejection, match.path+".code", "invalid_encrypted_content")
+	if errSet == nil {
+		return normalized
 	}
 	return rejection
 }

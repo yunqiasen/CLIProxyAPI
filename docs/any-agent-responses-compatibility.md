@@ -20,6 +20,31 @@ commits them locally, and verifies automatic code hot reload with the exact
 the container. Live checks pin one existing key per affected site. Remote publication follows
 the separately requested fork delivery workflow.
 
+## September 20: Agent route-bound item IDs
+
+The remaining Agent Astra resource error was reproduced from the September 20
+request logs. CPA was configured with `routing.strategy: fill-first`; session
+affinity was not enabled. A selected Agent key could be cooled by a genuine
+Astra 429 and bounded retry could move the request to another Agent key. The
+conversation carried Azure-resource-bound IDs on historical assistant-message and
+function items, while the previous repair removed only encrypted reasoning.
+That incomplete cleanup caused the replacement route to reject the old task.
+
+A pinned same-key real-site replay held the model, request headers and captured
+history constant. The retained-ID request returned the resource-mismatch 400.
+Removing only assistant-message/function/custom-tool top-level IDs completed
+successfully. CPA now performs that narrow cleanup together with encrypted-
+reasoning cleanup for the exact Agent resource rejection, before output and at
+most once. It keeps client-owned user message IDs, readable history, summaries,
+search records, function `call_id` values and tool results. Stored response
+references, opaque compaction, repeated rejection and post-output failures remain
+terminal.
+
+The production-manager regression also covers 429 credential rotation followed
+by resource recovery on the next key. This lets an existing portable conversation
+continue without opening a new task while preserving the real upstream rate-limit
+and bounded retry semantics.
+
 ## September 17: Agent budget pools are not credential balances
 
 Agent's public announcement, rechecked on September 17, explicitly describes

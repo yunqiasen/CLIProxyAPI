@@ -174,6 +174,7 @@ func TestCodexAgentMessageOnlySSERecoveryBoundaries(t *testing.T) {
 		{"encrypted", agentMessageOnlySignatureRejection},
 		{"resource", agentResourceMismatchRejection},
 		{"masked-resource", agentMaskedResourceMismatchRejection},
+		{"any-items", anyHistoricalItemRejection},
 	} {
 		rejection := scenario.rejection
 		for _, stream := range []bool{false, true} {
@@ -196,7 +197,13 @@ func TestCodexAgentMessageOnlySSERecoveryBoundaries(t *testing.T) {
 					}))
 					defer upstream.Close()
 					a := &coreauth.Auth{ID: "agent-sse", Provider: "codex", ProxyURL: upstream.URL, Attributes: map[string]string{"api_key": "fixture", "base_url": "http://agentrouter.org/v1"}}
+					if scenario.name == "any-items" {
+						a.Attributes["base_url"] = "http://anyrouter.top/v1"
+					}
 					req := coreexecutor.Request{Model: "gpt-6-astra", Payload: []byte(`{"input":[{"type":"reasoning","id":"rs_foreign","encrypted_content":"` + validCodexReasoningEncryptedContentForTest() + `"},{"role":"user","content":"continue"}]}`)}
+					if scenario.name == "any-items" {
+						req.Payload = []byte(`{"model":"gpt-6-astra","input":[{"type":"message","id":"msg_old","role":"assistant","content":"Keep answer"},{"role":"user","content":"Continue"}]}`)
+					}
 					opts := coreexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: stream}
 					e := NewCodexExecutor(&config.Config{})
 					failed := false
@@ -232,16 +239,18 @@ func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 		source   sdktranslator.Format
 		resource bool
 		masked   bool
+		anyItems bool
 	}{
-		{"anyrouter.top", sdktranslator.FormatOpenAIResponse, false, false},
-		{"agentrouter.org", sdktranslator.FormatOpenAIResponse, false, false},
-		{"agentrouter.org", sdktranslator.FormatOpenAIResponse, true, false},
-		{"agentrouter.org", sdktranslator.FormatOpenAIResponse, true, true},
-		{"anyrouter.top", sdktranslator.FromString(codexOpenAIImageSourceFormat), false, false},
+		{"anyrouter.top", sdktranslator.FormatOpenAIResponse, false, false, false},
+		{"anyrouter.top", sdktranslator.FormatOpenAIResponse, false, false, true},
+		{"agentrouter.org", sdktranslator.FormatOpenAIResponse, false, false, false},
+		{"agentrouter.org", sdktranslator.FormatOpenAIResponse, true, false, false},
+		{"agentrouter.org", sdktranslator.FormatOpenAIResponse, true, true, false},
+		{"anyrouter.top", sdktranslator.FromString(codexOpenAIImageSourceFormat), false, false, false},
 	} {
 		host := route.host
 		for _, stream := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/%s/resource_%t/masked_%t/stream_%t", host, route.source, route.resource, route.masked, stream), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/%s/resource_%t/masked_%t/items_%t/stream_%t", host, route.source, route.resource, route.masked, route.anyItems, stream), func(t *testing.T) {
 				var calls atomic.Int32
 				upgrader := websocket.Upgrader{}
 				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -260,12 +269,15 @@ func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 							if gjson.GetBytes(b, "input.0.type").String() != "web_search_call" {
 								t.Error("direct image source history was normalized")
 							}
-						} else if host == "anyrouter.top" {
+						} else if host == "anyrouter.top" && !route.anyItems {
 							if gjson.GetBytes(b, "input.0.content.0.text").String() == "" || gjson.GetBytes(b, "input.0.type").String() == "web_search_call" {
 								t.Error("websocket lost search history compatibility")
 							}
 						} else if attempt == 1 {
 							rejection := agentMessageOnlySignatureRejection
+							if route.anyItems {
+								rejection = anyHistoricalItemRejection
+							}
 							if route.resource {
 								rejection = agentResourceMismatchRejection
 								if route.masked {
@@ -274,7 +286,7 @@ func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 							}
 							_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status":400,`+strings.TrimPrefix(rejection, "{")))
 							continue
-						} else if gjson.GetBytes(b, "input.0.type").String() == "reasoning" {
+						} else if gjson.GetBytes(b, "input.0.type").String() == "reasoning" || (route.anyItems && gjson.GetBytes(b, "input.0.id").Exists()) {
 							t.Error("websocket retained rejected reasoning")
 						}
 						_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp_ok","status":"completed","output":[]}}`))
@@ -308,6 +320,9 @@ func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 				if host == "agentrouter.org" {
 					first = `{"type":"reasoning","id":"rs_foreign","encrypted_content":"` + validCodexReasoningEncryptedContentForTest() + `"}`
 				}
+				if route.anyItems {
+					first = `{"type":"message","id":"msg_agent","role":"assistant","content":[{"type":"output_text","text":"Earlier answer"}]}`
+				}
 				req := coreexecutor.Request{Model: "gpt-6-astra", Payload: []byte(`{"model":"gpt-6-astra","input":[` + first + `,{"role":"user","content":"continue"}]}`)}
 				a := &coreauth.Auth{ID: "websocket-history", Provider: "codex", ProxyURL: proxy.URL, Attributes: map[string]string{"api_key": "fixture", "base_url": "http://" + host + "/v1"}}
 				e := NewCodexWebsocketsExecutor(&config.Config{})
@@ -328,7 +343,7 @@ func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 					}
 				}
 				want := int32(1)
-				if host == "agentrouter.org" {
+				if host == "agentrouter.org" || route.anyItems {
 					want = 2
 				}
 				if calls.Load() != want {

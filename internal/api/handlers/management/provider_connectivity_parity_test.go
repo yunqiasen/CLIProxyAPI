@@ -123,14 +123,16 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 		host     string
 		resource bool
 		masked   bool
+		anyItems bool
 	}{
 		{host: "anyrouter.top"},
+		{host: "anyrouter.top", anyItems: true},
 		{host: "agentrouter.org"},
 		{host: "agentrouter.org", resource: true},
 		{host: "agentrouter.org", resource: true, masked: true},
 	} {
 		host := scenario.host
-		t.Run(fmt.Sprintf("%s/resource_%t/masked_%t", host, scenario.resource, scenario.masked), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s/resource_%t/masked_%t/items_%t", host, scenario.resource, scenario.masked, scenario.anyItems), func(t *testing.T) {
 			var requests [][]byte
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				b, _ := io.ReadAll(r.Body)
@@ -144,7 +146,16 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 				if gjson.GetBytes(b, "model").String() != "gpt-6-astra" || gjson.GetBytes(b, "reasoning.effort").String() != "high" || gjson.GetBytes(b, "max_output_tokens").Exists() {
 					t.Error("probe/production preparation differs")
 				}
-				if host == "anyrouter.top" {
+				if scenario.anyItems {
+					if gjson.GetBytes(b, "input.0.id").Exists() {
+						w.WriteHeader(400)
+						_, _ = io.WriteString(w, `{"error":{"type":"invalid_request_error","param":"","message":"bad response status code 400 (request id: fixture)"}}`)
+						return
+					}
+					if gjson.GetBytes(b, "input.0.content").String() != "Keep prior answer" || gjson.GetBytes(b, "input.2.output").String() != "Keep result" || gjson.GetBytes(b, "input.1.call_id").String() != "keep_call" {
+						t.Error("Any history lost")
+					}
+				} else if host == "anyrouter.top" {
 					if gjson.GetBytes(b, "input.0.content.0.text").String() == "" || gjson.GetBytes(b, "input.0.type").String() != "message" || gjson.GetBytes(b, "input.1.summary.0.text").String() != "preserved thinking" {
 						t.Error("Any history repair missing from entrypoint")
 					}
@@ -173,6 +184,9 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 			}
 			if scenario.resource {
 				history = strings.Replace(history, `"id":"rs_foreign"`, `"id":"rs_foreign","content":[{"type":"reasoning_text","text":"retained reasoning"}]`, 1)
+			}
+			if scenario.anyItems {
+				history = `[{"type":"message","id":"msg_agent","role":"assistant","content":"Keep prior answer"},{"type":"function_call","id":"fc_agent","name":"fixture","call_id":"keep_call","arguments":"{}"},{"type":"function_call_output","id":"fco_old","call_id":"keep_call","output":"Keep result"},{"role":"user","content":"Continue"}]`
 			}
 			cfg := &config.Config{CodexKey: []config.CodexKey{{Name: "fixture", APIKey: "selected-key", BaseURL: "http://" + host + "/v1", ProxyURL: upstream.URL, DisableImageGeneration: true, Models: []config.CodexModel{{Name: "gpt-6-astra", Alias: "cpa-6a", Thinking: &registry.ThinkingSupport{Levels: []string{"high"}}}}}}, Payload: config.PayloadConfig{OverrideRaw: []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: "cpa-6a", Protocol: "codex", FromProtocol: sdktranslator.FormatOpenAIResponse.String()}}, Params: map[string]any{"input": history}}}}}
 			auths, err := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{Config: cfg, Now: time.Now(), IDGenerator: synthesizer.NewStableIDGenerator()})
@@ -226,7 +240,7 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 				}
 			}
 			want := 1
-			if host == "agentrouter.org" {
+			if host == "agentrouter.org" || scenario.anyItems {
 				want = 2
 			}
 			if productionCalls != want || len(requests) != 2*want {

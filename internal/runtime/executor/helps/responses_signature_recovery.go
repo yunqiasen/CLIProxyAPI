@@ -25,13 +25,13 @@ func PortableResponsesSignatureRetry(body, rejection []byte, endpoint string) ([
 		return body, false
 	}
 	agentRejection := classifyAgentSignatureRejection(body, rejection, endpoint)
-	resourceMismatch := agentRejection.kind == agentSignatureRejectionResource
+	resourceMismatch := agentRejection.kind == agentSignatureRejectionResource || anyResponsesHistoricalItemRejection(body, rejection, endpoint)
 	rejection = normalizeAgentSignatureRejection(body, rejection, endpoint)
 	code := gjson.GetBytes(rejection, "error.code").String()
 	if code == "" {
 		code = gjson.GetBytes(rejection, "response.error.code").String()
 	}
-	if code != "invalid_encrypted_content" && code != "thinking_signature_invalid" {
+	if code != "invalid_encrypted_content" && code != "thinking_signature_invalid" && !resourceMismatch {
 		return body, false
 	}
 	if strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) != "" {

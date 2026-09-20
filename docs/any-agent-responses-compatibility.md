@@ -20,6 +20,47 @@ commits them locally, and verifies automatic code hot reload with the exact
 the container. Live checks pin one existing key per affected site. Remote publication follows
 the separately requested fork delivery workflow.
 
+## September 20: Agent-to-Any continuation with historical item IDs
+
+The Any request `20260920121127464443788CqZ9dieq` returned only
+`bad response status code 400 (request id: ...)`, hiding the underlying resource
+error. The earlier Agent-only error recognizer did not cover this envelope.
+A minimal replay used an actual assistant item ID recovered from the affected
+client conversation, the first configured Any key, and identical native-shaped
+Responses settings. Keeping the ID reproduced the wrapped 400; removing only
+that ID returned HTTP 200 and `response.completed`. This was a minimized
+reconstruction, not a replay of the entire original request (the raw log rotated).
+
+The shared signature-recovery boundary now recognizes this narrow repair
+candidate only for host `anyrouter.top`, a Responses endpoint, model
+`gpt-6-astra`, the exact wrapped-400 message, `invalid_request_error`, empty
+code/param, and a non-reasoning route-bound historical item ID. It attempts the
+existing same-key, pre-output repair once. A generic 400 without these guards
+is not reclassified. Successful requests keep their IDs and incur no retry.
+
+The repair removes top-level server-owned item IDs and rejected opaque reasoning
+bindings, retaining readable messages, reasoning summaries, tool arguments,
+`call_id`, tool outputs, and user-owned IDs. Caller bytes remain unchanged.
+Stored-response references, compaction, and item references block destructive
+reconstruction. Repeated errors or errors after real output remain failures;
+there is no synthetic completion, model substitution, or extra-key sweep.
+HTTP, SSE, native WebSocket, and management tests/speed probes share the same
+recovery helper; no separate probe implementation was added.
+
+Verification:
+
+- The new HTTP executor regression failed on baseline `74416042` with the exact
+  wrapped 400, then passed with this repair in stream and nonstream modes.
+- Guard tests cover unrelated hosts/models/errors, stored/compact histories,
+  user-only/reasoning-only IDs, and preservation of readable tool history.
+- HTTP/SSE/WebSocket and production/probe parity fixtures pass, including
+  bounded recovery and the existing post-output no-replay contracts.
+- The fixed binary completed the real first-key Any replay with the old Agent
+  item ID supplied by the client: HTTP 200, text output, `response.completed`.
+  No saved configuration, original conversation, or other paid key was changed.
+- Full `go test ./... -count=1 -timeout=180s`, focused `-race -count=3`,
+  server build, management-bundle regression, and `git diff --check` passed.
+
 ## September 20: Agent route-bound item IDs
 
 The remaining Agent Astra resource error was reproduced from the September 20

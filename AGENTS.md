@@ -53,6 +53,8 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 - A normal provider test uses one selected key (the first key by default), never rotates to another key after failure, and succeeds only on a valid completed response. Testing every key requires the explicit all-keys action. Live debugging pins one key per affected site; do not enumerate paid credentials.
 - Codex probe timing belongs to the production executor. Do not impose a second whole-response browser deadline; retain caller cancellation and the configured first-output watch.
 
+- Native embeddings/rerank requests and OpenAI-compatible probes share the retrieval executor, model capabilities, synthesis, payload rules and response validation. UI saves/probes share the OpenAI form builder, serializer and managed-field list, including explicit clears. Keep single-key selection and unchanged saved configuration covered by regression tests. See [Native Retrieval](docs/native-retrieval.md).
+
 ## Management UI Verification
 - After changing `static/management.html`, run `node test/provider_usage_match_test.mjs`.
 - If the management service is running locally, verify the served page matches the workspace file with `curl -sS --max-time 8 http://100.126.43.55:8317/management.html -o /tmp/live-management.html && sha256sum /tmp/live-management.html static/management.html`.

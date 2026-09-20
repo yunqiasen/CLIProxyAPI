@@ -121,6 +121,10 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 			// Skip providers with no base-url; treated as removed
 			continue
 		}
+		for j := range e.Models {
+			e.Models[j].Type = strings.ToLower(strings.TrimSpace(e.Models[j].Type))
+			e.Models[j].UpstreamPath = strings.TrimSpace(e.Models[j].UpstreamPath)
+		}
 		out = append(out, e)
 	}
 	cfg.OpenAICompatibility = out

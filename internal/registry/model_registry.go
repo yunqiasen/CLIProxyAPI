@@ -35,6 +35,8 @@ type ModelInfo struct {
 	OwnedBy string `json:"owned_by"`
 	// Type indicates the model type (e.g., "claude", "gemini", "openai")
 	Type string `json:"type"`
+	// UpstreamPath is the configured retrieval endpoint, kept out of public model catalogs.
+	UpstreamPath string `json:"-"`
 	// DisplayName is the human-readable name for the model
 	DisplayName string `json:"display_name,omitempty"`
 	// Name is used for Gemini-style model names
@@ -1373,6 +1375,10 @@ func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, erro
 	// Find the first model with available clients
 	for _, model := range models {
 		if modelID, ok := model["id"].(string); ok {
+			// Non-chat retrieval models must not displace chat in automatic selection.
+			if info := r.GetModelInfo(modelID, ""); info != nil && (info.Type == "embeddings" || info.Type == "rerank") {
+				continue
+			}
 			if count := r.GetModelCount(modelID); count > 0 {
 				return modelID, nil
 			}

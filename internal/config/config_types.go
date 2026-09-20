@@ -669,6 +669,12 @@ type OpenAICompatibilityAPIKey struct {
 // OpenAICompatibilityModel represents a model configuration for OpenAI compatibility,
 // including the actual model name and its alias for API routing.
 type OpenAICompatibilityModel struct {
+	// Type selects a non-chat endpoint: embeddings or rerank. Empty keeps existing chat/image behavior.
+	Type string `yaml:"type,omitempty" json:"type,omitempty"`
+
+	// UpstreamPath overrides the retrieval path relative to the provider base URL.
+	UpstreamPath string `yaml:"upstream-path,omitempty" json:"upstream-path,omitempty"`
+
 	// Name is the actual model name used by the external provider.
 	Name string `yaml:"name" json:"name"`
 

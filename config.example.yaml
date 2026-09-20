@@ -671,6 +671,23 @@ nonstream-keepalive-interval: 0
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
 
+#   # Native retrieval: the same credentials, aliases, proxies, logs and scheduler.
+#   - name: "retrieval"
+#     base-url: "https://provider.example/v1"
+#     api-key-entries:
+#       - api-key: "UPSTREAM_KEY"
+#     models:
+#       - name: "vector-v1"
+#         alias: "vector"
+#         type: "embeddings" # POST /v1/embeddings; no chat/thinking translation
+#       - name: "rank-v1"
+#         alias: "rank"
+#         type: "rerank" # POST /v1/rerank; Cohere-compatible JSON
+#         # upstream-path: "/custom-rank" # Appended to base-url: /v1/custom-rank
+#   # Omit type for existing chat/image behavior. Do not combine type with image: true.
+#   # Each embedding alias must map to one upstream model name (one vector space).
+#   # See docs/native-retrieval.md for payload rules, probes and Home-mode limits.
+
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
 #   - api-key: "vk-123..."                        # x-goog-api-key header

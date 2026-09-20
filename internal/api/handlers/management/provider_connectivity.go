@@ -32,6 +32,7 @@ type providerConnectivityClaudeCloak struct {
 }
 
 type providerConnectivityTestRequest struct {
+	OpenAIConfig            json.RawMessage                  `json:"openai_config"`
 	CodexConfig             json.RawMessage                  `json:"codex_config"`
 	Provider                string                           `json:"provider"`
 	AuthIndex               string                           `json:"auth_index"`
@@ -79,6 +80,8 @@ func (h *Handler) performProviderConnectivityTest(ctx context.Context, body prov
 	}
 
 	switch provider {
+	case "openai-compatibility":
+		return h.performRetrievalConnectivityTest(ctx, body, requestedModel)
 	case "claude":
 		return h.performClaudeConnectivityTest(ctx, body, requestedModel)
 	case "codex":

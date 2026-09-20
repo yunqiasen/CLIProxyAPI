@@ -41,6 +41,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	if err := m.ValidateRetrievalRouting(normalized, req, opts); err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 	if m.HomeEnabled() {
 		return m.executeHome(ctx, normalized, req, opts, false)
 	}
@@ -217,7 +220,7 @@ func requestToFormat(provider string, executor ProviderExecutor, req cliproxyexe
 		}
 	}
 	source := opts.SourceFormat.String()
-	if source == "openai-image" || source == "openai-video" {
+	if source == "openai-image" || source == "openai-video" || source == "openai-embeddings" || source == "cohere-rerank" {
 		return opts.SourceFormat
 	}
 	if opts.Alt == "responses/compact" && !opts.Stream {

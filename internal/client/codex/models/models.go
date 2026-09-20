@@ -287,6 +287,13 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 }
 
 func applyCodexClientVisibilityOverride(entry map[string]any, id string) {
+	if info := registry.LookupModelInfo(id); info != nil && (info.Type == "embeddings" || info.Type == "rerank") {
+		entry["visibility"] = "hide"
+		delete(entry, "input_modalities")
+		delete(entry, "supports_image_detail_original")
+		delete(entry, "apply_patch_tool_type")
+		entry["supports_search_tool"] = false
+	}
 	switch strings.TrimSpace(id) {
 	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "grok-imagine-image", "grok-imagine-video", "grok-imagine-video-1.5", "grok-imagine-video-1.5-preview":
 		entry["visibility"] = "hide"

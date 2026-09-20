@@ -142,6 +142,10 @@ Claude 模型名包含 `[1m]` 时，CPA 会自动启用 `context-1m-2025-08-07` 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
 
+## 原生 Embeddings 和 Rerank
+
+在 OpenAI 兼容供应商的模型上设置 `type: embeddings` 或 `type: rerank`，即可使用普通 CPA 客户端 Key 请求 `/v1/embeddings`、`/v1/rerank`。接口复用现有路由、别名、故障切换、日志和用量；UI 单 Key 测试走同一执行器，并同步当前未保存的模型设置，无需安装插件。不同嵌入模型须使用不同别名，避免混用向量空间。详见[配置、兼容边界与验收](docs/native-retrieval.md)。
+
 ## 原生 Provider 多 Key 与请求日志保留
 
 Claude、Codex、Gemini 原生 Provider 同时支持旧版单 Key 和命名分组配置：

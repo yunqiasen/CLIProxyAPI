@@ -239,11 +239,19 @@ func compileOpenAICompatibleModelCapabilities(out map[string][]apiKeyModelCapabi
 		if support == nil && !models[i].Image {
 			support = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 		}
-		addConfiguredModelCapability(out, models[i].Name, models[i].Alias, "openai-compatibility", support, models[i].IsCompat)
+		modelType := "openai-compatibility"
+		if models[i].Type != "" {
+			modelType = strings.ToLower(strings.TrimSpace(models[i].Type))
+			support = nil
+		}
+		info := addConfiguredModelCapability(out, models[i].Name, models[i].Alias, modelType, support, models[i].IsCompat)
+		if info != nil {
+			info.UpstreamPath = models[i].UpstreamPath
+		}
 	}
 }
 
-func addConfiguredModelCapability(out map[string][]apiKeyModelCapabilityRoute, name, alias, modelType string, support *registry.ThinkingSupport, isCompat bool) {
+func addConfiguredModelCapability(out map[string][]apiKeyModelCapabilityRoute, name, alias, modelType string, support *registry.ThinkingSupport, isCompat bool) *registry.ModelInfo {
 	name = strings.TrimSpace(name)
 	alias = strings.TrimSpace(alias)
 	if name == "" {
@@ -253,7 +261,7 @@ func addConfiguredModelCapability(out map[string][]apiKeyModelCapabilityRoute, n
 		alias = name
 	}
 	if name == "" {
-		return
+		return nil
 	}
 	modelInfo := modelconfig.ResolveModelInfo(name, modelType, support)
 	modelInfo.IsCompat = isCompat
@@ -282,4 +290,5 @@ func addConfiguredModelCapability(out map[string][]apiKeyModelCapabilityRoute, n
 			}
 		}
 	}
+	return modelInfo
 }

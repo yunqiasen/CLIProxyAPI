@@ -142,6 +142,15 @@ Claude model IDs containing `[1m]` automatically enable the `context-1m-2025-08-
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
 
+## Native Embeddings and Rerank
+
+Configure `type: embeddings` or `type: rerank` on OpenAI-compatible models to use
+`/v1/embeddings` and `/v1/rerank` with ordinary CPA client keys. The endpoints
+reuse CPA routing, aliases, failover, logs, and usage; UI single-key tests use
+the same executor and unsaved model settings. No plugin installation is needed.
+Different embedding model names must use distinct aliases to avoid mixed vector
+spaces. See [configuration, compatibility, and verification](docs/native-retrieval.md).
+
 ## Native Provider Key Groups and Request-Log Retention
 
 Claude, Codex, and Gemini native providers accept the legacy single-key form and a named grouped form:

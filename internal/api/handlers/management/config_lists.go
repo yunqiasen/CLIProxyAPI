@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -751,6 +752,10 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
+	if errValidate := config.ValidateOpenAICompatibilityModels(arr); errValidate != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errValidate.Error()})
+		return
+	}
 	filtered := make([]config.OpenAICompatibility, 0, len(arr))
 	for i := range arr {
 		normalizeOpenAICompatibilityEntry(&arr[i])
@@ -853,6 +858,10 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.SupportPromptCacheKey != nil {
 		entry.SupportPromptCacheKey = *body.Value.SupportPromptCacheKey
+	}
+	if errValidate := config.ValidateOpenAICompatibilityModels([]config.OpenAICompatibility{entry}); errValidate != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errValidate.Error()})
+		return
 	}
 	normalizeOpenAICompatibilityEntry(&entry)
 	h.cfg.OpenAICompatibility[targetIndex] = entry

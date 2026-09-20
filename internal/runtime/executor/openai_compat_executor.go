@@ -86,6 +86,12 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
 }
 
 func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if kind := helps.RetrievalKind(opts.SourceFormat.String()); kind != "" {
+		return e.executeRetrieval(ctx, auth, req, opts, kind)
+	}
+	if info, ok := cliproxyauth.ResolvedAPIKeyModelInfo(req); ok && (info.Type == "embeddings" || info.Type == "rerank") {
+		return resp, &cliproxyauth.Error{Code: "request_scoped", Message: "model requires its embeddings or rerank endpoint", HTTPStatus: 400}
+	}
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImages(ctx, auth, req, opts, endpointPath)
 	}
@@ -302,6 +308,9 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 }
 
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if info, ok := cliproxyauth.ResolvedAPIKeyModelInfo(req); ok && (info.Type == "embeddings" || info.Type == "rerank") {
+		return nil, &cliproxyauth.Error{Code: "request_scoped", Message: "model requires its embeddings or rerank endpoint", HTTPStatus: 400}
+	}
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImagesStream(ctx, auth, req, opts, endpointPath)
 	}

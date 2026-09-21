@@ -38,9 +38,46 @@ Agent output, local tool return, Agent continuation and a subsequent Any switch,
 in both streaming modes, without mutating the client's stored history.
 
 The September 21 18:10 first-key live replay returned Agent budget-pool 402 and
-Any capacity 500, not completed responses. Real-site acceptance remains pending;
-passing local fixtures is not a substitute for that acceptance. This change does
-not alter saved provider enablement, credential selection or cooldown behavior.
+Any capacity 500, not completed responses. Those observations establish neither
+upstream availability nor successful real-site completion. The user subsequently
+excluded upstream availability from this compatibility task, as specified below.
+Saved provider enablement, credential selection and cooldown behavior are unchanged.
+
+## Acceptance: conversation and channel compatibility
+
+The user clarified that this task owns Codex conversation/channel compatibility,
+not upstream capacity, budget pools or service availability. The completion gate
+is the production request/response contract plus local runtime delivery; external
+availability is not a prerequisite. This does not convert an upstream failure or
+truncated stream into a successful response.
+
+`test/codex_conversation_switch_contract_test.go` now exercises the public
+`/v1/responses` handlers, provider synthesis, alias selection, authentication
+manager and production executor together. Two independent clients run concurrently.
+Each retains actual preceding fixture output, appends function/custom-tool results,
+continues on the original channel, switches to the other, returns, then copies its
+history into a fresh client session and continues on both channels. Both Agent-to-Any
+and Any-to-Agent directions are covered through HTTP, SSE and a persistent downstream
+WebSocket, including a fresh socket for the copied session. Rejection arrives as
+either HTTP 400 or initial SSE failure.
+
+The matrix covers 84 client turns per run. It asserts stable per-channel identities,
+isolation between clients and copied sessions, consistent body/header metadata,
+restored client identity, preserved native search/open-page output and readable
+reasoning, matching function/custom-tool results, one completed terminal, no leaked
+rejection scaffolding, and no duplicate tools or excess recovery attempts. The same
+matrix fails with the pre-repair production helpers and passes after `ae3933b5`.
+No additional production behavior was needed for this expanded acceptance.
+
+```sh
+go test ./test -run '^TestCodexConversationSwitchContract$' -count=1
+go test -race ./test -run '^TestCodexConversationSwitchContract$' -count=3
+```
+
+Existing stored-reference/opaque-compaction guards, caller cancellation, post-output
+replay boundaries and production/probe parity remain covered by their focused tests.
+The matrix certifies the documented compatibility scenarios, not arbitrary future
+upstream schemas or universal portability of opaque server-owned state.
 
 ## September 20: Agent-to-Any continuation with historical item IDs
 

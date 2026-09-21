@@ -234,3 +234,17 @@ against the fixed baseline, AGENTS.md, CONTEXT.md and the compatibility ADR; no
 remaining actionable code findings were identified. Independent review subprocess
 attempts ended without verdicts because of external service/authentication errors
 and were not counted as approvals. This is not an independent dual-model signoff.
+
+
+## Conversation compatibility acceptance
+
+The user subsequently scoped completion to Codex conversation/channel compatibility,
+excluding upstream capacity and budget availability. The earlier 18:10 live errors
+remain historical observations, not blockers for this task. The public-handler matrix
+in `test/codex_conversation_switch_contract_test.go` extends verification to both
+channel directions, returning to a channel, independent concurrent sessions, and
+copying retained history into a fresh session over HTTP/SSE/WebSocket. Native search,
+readable reasoning and function/custom-tool results survive all 84 client turns.
+The pre-repair helpers fail this matrix; `ae3933b5` passes without additional production
+changes. See [the acceptance contract](any-agent-responses-compatibility.md#acceptance-conversation-and-channel-compatibility)
+for the exact scenarios and limits.

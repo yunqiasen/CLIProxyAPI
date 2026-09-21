@@ -22,8 +22,9 @@ portable message; tool call/results assert preservation across retries.
 - The gpt-6-astra history normalizer previously handled reasoning content only for
   anyrouter.top. It now also handles agentrouter.org, preserving reasoning_text
   as summary_text and emitting an empty content array. The maximum-length-zero
-  error is a field-shape rejection, not proof of a large conversation. Any-only
-  web_search_call conversion remains Any-only.
+  error is a field-shape rejection, not proof of a large conversation. Proactive
+  web_search_call conversion remains Any-only. Agent converts completed search
+  history only after an exact rejected-state envelope, as described below.
 - Agent encrypted-content errors accept either the raw message or the existing
   OpenAI Responses bad request prefix. Named items must still match actual opaque
   reasoning in the outgoing request.
@@ -91,7 +92,8 @@ For the exact Agent resource-mismatch envelope, the one pre-output retry now:
 - removes rejected encrypted reasoning while retaining readable summaries;
 - removes top-level IDs from reasoning, assistant messages and function/custom-tool
   items while preserving client-owned user message IDs, `call_id` and results;
-- retains unrelated search item IDs and history;
+- originally retained native search item IDs; the September 21 repair below
+  instead retains their complete records as readable history after rejection;
 - remains disabled for `previous_response_id`, `item_reference`, opaque
   compaction, missing portable history, repeated rejection and committed output.
 
@@ -165,3 +167,70 @@ saved provider settings and its existing disable switch remain unchanged.
 Standards and Spec were manually reviewed against this baseline: no remaining
 findings. The change is confined to the shared recognizer, its regression tests
 and this document; this is not an independent dual-model review.
+
+
+## September 21: search history and encryption-first recovery
+
+Review baseline: `3a4a4b50e66fda3f1fe2ca6743f0a2c8f7e203a1`.
+
+The reported trace `288391cb0f3c9ed6b46b903b685afb80` is an actual AgentRouter
+`gpt-6-astra` failure, not a copy in a user prompt. The request-log index records
+request `e4af285e` at 10:15:29. Main logs show portable-history recovery at
+10:15:44 and another resource rejection at 10:15:49. The previous repair was
+already running. The raw request log rotated away, so the exact first upstream
+error and full outgoing body are not established by these artifacts.
+
+The corresponding client transcript contains two completed native search records:
+`search` at 10:15:10 and `open_page` at 10:15:26, followed by local function calls
+and results. Recovery previously retained their server-owned IDs. The copied
+running baseline binary reproduces a rejection after its one retry with this
+history shape. An independent chained-error case reproduces encrypted-state
+rejection followed by resource rejection: the first repair only removed reasoning
+state and left other disposable route bindings active.
+
+The shared one-shot recovery now converts completed native search records into
+the same data-only assistant history representation used on Any, preserving the
+entire original JSON record, including queries, URLs and extension fields. Exact
+Agent encrypted-state and resource-state errors repair supported disposable
+bindings together rather than spending the retry on only one binding type.
+Successful Agent calls and their native search output are unchanged. No extra
+retry, model substitution, key sweep, or replay after committed output is added.
+
+Stored-response references, item references, opaque compaction, unfinished search
+records, missing search actions and absent portable conversation content retain
+the existing conservative boundaries. User-owned message IDs, readable reasoning,
+function/custom-tool call IDs, arguments and results remain intact. Client input
+bytes and saved provider configuration are not changed.
+
+Verification includes a generated-history sequence, not only a prebuilt request:
+Agent first returns native search/open-page records and a function call; the client
+appends the tool result, continues on Agent, and then sends the same stored history
+to Any. Both stream and nonstream variants fail on the baseline and pass with the
+repair. HTTP/SSE rejection, native WebSocket and management-probe regressions use
+the same shared recovery. The built-binary fixture passes 12 resource/encryption,
+HTTP/SSE and stream/nonstream/probe combinations on one selected key/session.
+
+```sh
+go test ./test -run TestAgentToAnyConversationRetainsGeneratedSearchHistory -count=1
+go test ./internal/runtime/executor ./internal/runtime/executor/helps \
+  ./internal/api/handlers/management ./test \
+  -run '(Agent|Any.*History|Signature|ProviderConnectivityAndProductionShareAnyAgentPipeline)' -count=1
+```
+
+At 18:10 on September 21, a separate CPA running the candidate binary replayed the
+captured search/reasoning/message/tool correlation IDs through production routing,
+with tool text redacted and exactly the first configured key per site. Agent
+returned HTTP 402 for its upstream budget pool; Any returned HTTP 500
+`get_channel_failed` (request `202609211810156688625482WOK491S`). Neither reached
+`response.completed` or the state-repair boundary. This is **not completed
+real-site acceptance**, nor evidence that all keys lack balance. The saved Agent
+exclusion and all production configuration remained unchanged. Full Go tests,
+focused race tests, build and panel regression passed independently of these
+external availability failures.
+
+
+Review: the complete diff and new tests received manual Standards and Spec passes
+against the fixed baseline, AGENTS.md, CONTEXT.md and the compatibility ADR; no
+remaining actionable code findings were identified. Independent review subprocess
+attempts ended without verdicts because of external service/authentication errors
+and were not counted as approvals. This is not an independent dual-model signoff.

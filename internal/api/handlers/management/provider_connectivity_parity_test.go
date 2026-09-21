@@ -171,6 +171,18 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"type": "invalid_request_error", "code": nil, "param": "", "message": message}})
 					return
 				}
+				if host == "agentrouter.org" {
+					found := false
+					for _, item := range gjson.GetBytes(b, "input").Array() {
+						if item.Get("type").String() == "web_search_call" {
+							t.Error("production/probe retained a native search bound to the rejected resource")
+						}
+						found = found || strings.Contains(item.Get("content.0.text").String(), "retained parity search")
+					}
+					if !found {
+						t.Error("production/probe dropped readable search history")
+					}
+				}
 				w.Header().Set("Content-Type", "text/event-stream")
 				_, _ = io.WriteString(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_ok\",\"status\":\"in_progress\"}}\n\n")
 				_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\"}]}]}}\n\n")
@@ -184,6 +196,9 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 			}
 			if scenario.resource {
 				history = strings.Replace(history, `"id":"rs_foreign"`, `"id":"rs_foreign","content":[{"type":"reasoning_text","text":"retained reasoning"}]`, 1)
+			}
+			if host == "agentrouter.org" {
+				history = strings.TrimSuffix(history, "]") + `,{"type":"web_search_call","id":"ws_parity","status":"completed","action":{"type":"open_page","url":"https://example.test/retained-parity-search"},"results":[{"text":"retained parity search"}]}]`
 			}
 			if scenario.anyItems {
 				history = `[{"type":"message","id":"msg_agent","role":"assistant","content":"Keep prior answer"},{"type":"function_call","id":"fc_agent","name":"fixture","call_id":"keep_call","arguments":"{}"},{"type":"function_call_output","id":"fco_old","call_id":"keep_call","output":"Keep result"},{"role":"user","content":"Continue"}]`

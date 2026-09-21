@@ -174,6 +174,8 @@ func TestCodexAgentMessageOnlySSERecoveryBoundaries(t *testing.T) {
 		{"encrypted", agentMessageOnlySignatureRejection},
 		{"resource", agentResourceMismatchRejection},
 		{"masked-resource", agentMaskedResourceMismatchRejection},
+		{"web-search-resource", agentMaskedResourceMismatchRejection},
+		{"encrypted-web-search", agentMessageOnlySignatureRejection},
 		{"any-items", anyHistoricalItemRejection},
 	} {
 		rejection := scenario.rejection
@@ -203,6 +205,12 @@ func TestCodexAgentMessageOnlySSERecoveryBoundaries(t *testing.T) {
 					req := coreexecutor.Request{Model: "gpt-6-astra", Payload: []byte(`{"input":[{"type":"reasoning","id":"rs_foreign","encrypted_content":"` + validCodexReasoningEncryptedContentForTest() + `"},{"role":"user","content":"continue"}]}`)}
 					if scenario.name == "any-items" {
 						req.Payload = []byte(`{"model":"gpt-6-astra","input":[{"type":"message","id":"msg_old","role":"assistant","content":"Keep answer"},{"role":"user","content":"Continue"}]}`)
+					}
+					if scenario.name == "web-search-resource" {
+						req.Payload = []byte(`{"input":[{"type":"web_search_call","id":"ws_foreign","status":"completed","action":{"type":"search","query":"preserved search"}},{"role":"user","content":"continue"}]}`)
+					}
+					if scenario.name == "encrypted-web-search" {
+						req.Payload = bytes.Replace(req.Payload, []byte(`{"role":"user"`), []byte(`{"type":"web_search_call","id":"ws_foreign","status":"completed","action":{"type":"search","query":"preserved search"}},{"role":"user"`), 1)
 					}
 					opts := coreexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: stream}
 					e := NewCodexExecutor(&config.Config{})
@@ -289,6 +297,9 @@ func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 						} else if gjson.GetBytes(b, "input.0.type").String() == "reasoning" || (route.anyItems && gjson.GetBytes(b, "input.0.id").Exists()) {
 							t.Error("websocket retained rejected reasoning")
 						}
+						if host == "agentrouter.org" && (gjson.GetBytes(b, "input.0.type").String() != "message" || !strings.Contains(gjson.GetBytes(b, "input.0.content.0.text").String(), "retained search query")) {
+							t.Error("websocket did not preserve rejected search history as portable data")
+						}
 						_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp_ok","status":"completed","output":[]}}`))
 						return
 					}
@@ -318,7 +329,7 @@ func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 				defer proxy.Close()
 				first := `{"type":"web_search_call","status":"completed","action":{"type":"search","query":"preserved"}}`
 				if host == "agentrouter.org" {
-					first = `{"type":"reasoning","id":"rs_foreign","encrypted_content":"` + validCodexReasoningEncryptedContentForTest() + `"}`
+					first = `{"type":"reasoning","id":"rs_foreign","encrypted_content":"` + validCodexReasoningEncryptedContentForTest() + `"},{"type":"web_search_call","id":"ws_foreign","status":"completed","action":{"type":"search","query":"retained search query"}}`
 				}
 				if route.anyItems {
 					first = `{"type":"message","id":"msg_agent","role":"assistant","content":[{"type":"output_text","text":"Earlier answer"}]}`

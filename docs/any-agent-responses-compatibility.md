@@ -20,6 +20,28 @@ commits them locally, and verifies automatic code hot reload with the exact
 the container. Live checks pin one existing key per affected site. Remote publication follows
 the separately requested fork delivery workflow.
 
+## September 21: remaining native search bindings
+
+The new Agent trace `288391cb0f3c9ed6b46b903b685afb80` occurred after the existing
+recovery had already retried. Completed native search IDs were missing from that
+repair, and encryption-first rejection could leave other route bindings active.
+The shared one-shot repair now retains completed search records as readable data
+and clears the supported disposable bindings together. Successful native Agent
+searches, caller-owned history and post-output replay boundaries are unchanged.
+See [Agent Astra Request Compatibility](agent-astra-request-compatibility.md#september-21-search-history-and-encryption-first-recovery)
+for the captured evidence, limitations and regression commands.
+
+The reported Any request `20260920121127464443788CqZ9dieq` is the September 20
+12:11 event, preceding its 14:37 repair. Its timestamp does not establish a new
+post-repair failure. The new generated-history regression nevertheless covers
+Agent output, local tool return, Agent continuation and a subsequent Any switch,
+in both streaming modes, without mutating the client's stored history.
+
+The September 21 18:10 first-key live replay returned Agent budget-pool 402 and
+Any capacity 500, not completed responses. Real-site acceptance remains pending;
+passing local fixtures is not a substitute for that acceptance. This change does
+not alter saved provider enablement, credential selection or cooldown behavior.
+
 ## September 20: Agent-to-Any continuation with historical item IDs
 
 The Any request `20260920121127464443788CqZ9dieq` returned only
@@ -278,9 +300,11 @@ covers both streaming and non-streaming Responses requests.
   or the narrowly verified AgentRouter envelope above; arbitrary words do not trigger recovery.
 - HTTP 400/422 rejection or an initial SSE/WebSocket signature error permits
   one repaired request using the same selected model, endpoint, and credential.
-- Use `error.param` to target an input index when available. Otherwise remove
-  only encrypted reasoning items. Preserve visible messages, function/custom
-  tool call IDs and results, image parts, and other request parameters.
+- Use `error.param` to target an input index when available. Generic signature
+  errors remove rejected encrypted reasoning only. Exact Agent state errors and
+  guarded Any historical-item errors repair supported disposable route bindings
+  together; completed search records remain readable. Preserve visible messages,
+  function/custom `call_id` values and results, images and other parameters.
 - Do not mutate the caller's request. Keep both attempts in raw logs.
 - Opaque compaction, a nonempty remote `previous_response_id` in the recovery
   payload, and history with no remaining portable items are not automatically

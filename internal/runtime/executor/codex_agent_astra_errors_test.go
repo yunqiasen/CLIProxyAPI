@@ -107,7 +107,7 @@ func TestAgentAstraResourceRecoveryDropsRouteBoundItemIDs(t *testing.T) {
 				for _, item := range gjson.GetBytes(body, "input").Array() {
 					typ := item.Get("type").String()
 					role := item.Get("role").String()
-					routeBoundID := typ == "reasoning" || (typ == "message" && role == "assistant") || typ == "function_call" || typ == "function_call_output" || typ == "custom_tool_call" || typ == "custom_tool_call_output"
+					routeBoundID := typ == "reasoning" || (typ == "message" && role == "assistant") || typ == "function_call" || typ == "function_call_output" || typ == "custom_tool_call" || typ == "custom_tool_call_output" || typ == "web_search_call"
 					if (routeBoundID && item.Get("id").Exists()) || item.Get("encrypted_content").Exists() {
 						w.Header().Set("Content-Type", "application/json")
 						w.WriteHeader(http.StatusBadRequest)
@@ -120,7 +120,9 @@ func TestAgentAstraResourceRecoveryDropsRouteBoundItemIDs(t *testing.T) {
 					gjson.GetBytes(body, "input.3.call_id").String() != "call_keep" ||
 					gjson.GetBytes(body, "input.4.call_id").String() != "call_keep" ||
 					gjson.GetBytes(body, "input.4.output").String() != "keep result" ||
-					gjson.GetBytes(body, "input.5.id").String() != "ws_keep" ||
+					gjson.GetBytes(body, "input.5.type").String() != "message" ||
+					!strings.Contains(gjson.GetBytes(body, "input.5.content.0.text").String(), `"id":"ws_keep"`) ||
+					!strings.Contains(gjson.GetBytes(body, "input.5.content.0.text").String(), `"query":"keep query"`) ||
 					gjson.GetBytes(body, "input.6.id").String() != "msg_current" ||
 					gjson.GetBytes(body, "input.6.content").String() != "continue" {
 					t.Fatalf("portable history changed: %s", body)

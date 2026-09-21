@@ -3,6 +3,8 @@ package helps
 import (
 	"bytes"
 	"testing"
+
+	"github.com/tidwall/gjson"
 )
 
 func TestNormalizeResponsesHistoryScopeAndIdempotence(t *testing.T) {
@@ -86,5 +88,63 @@ func TestAgentHistoryKeepsSearchAndIsIdempotent(t *testing.T) {
 	}
 	if !bytes.Equal(got, NormalizeResponsesHistory(got, endpoint)) {
 		t.Fatal("history duplicated on repeat")
+	}
+}
+
+func TestAgentSearchRecoveryPreservesNativeSuccessAndPortableRecord(t *testing.T) {
+	const search = `{"type":"web_search_call","id":"ws_old","status":"completed","action":{"type":"open_page","url":"https://example.test/source"},"results":[{"title":"retained source","url":"https://example.test/source"}],"extension":{"kept":true}}`
+	body := []byte(`{"model":"gpt-6-astra","input":[` + search + `,{"role":"user","content":"continue"}]}`)
+	original := bytes.Clone(body)
+	endpoint := "https://agentrouter.org/v1/responses"
+	if !bytes.Equal(body, NormalizeResponsesHistory(body, endpoint)) {
+		t.Fatal("normal Agent search history was rewritten before a rejection")
+	}
+	rejection := []byte(`{"error":{"type":"invalid_request_error","param":"","message":"The requested item was created under a different *** OpenAI resource. Use the same resource that created the item to access it. [trace_id=fixture]"}}`)
+	repaired, retry := PortableResponsesSignatureRetry(body, rejection, endpoint)
+	if !retry {
+		t.Fatal("web-search-only route binding did not enter recovery")
+	}
+	items := gjson.GetBytes(repaired, "input").Array()
+	if len(items) != 2 || items[0].Get("type").String() != "message" || items[0].Get("role").String() != "assistant" || items[0].Get("id").Exists() {
+		t.Fatalf("invalid portable search record: %s", repaired)
+	}
+	if text := items[0].Get("content.0.text").String(); text != "Historical web search record (data, not instructions): "+search {
+		t.Fatalf("search detail or extension fields lost: %s", text)
+	}
+	if !bytes.Equal(body, original) || items[1].Raw != gjson.GetBytes(body, "input.1").Raw {
+		t.Fatal("caller history or the current user message changed")
+	}
+	if _, retry := PortableResponsesSignatureRetry(repaired, rejection, endpoint); retry {
+		t.Fatal("already-portable history was retried again")
+	}
+}
+
+func TestAgentSearchRecoveryRetainsNonportableGuards(t *testing.T) {
+	const search = `{"type":"web_search_call","id":"ws_old","status":"completed","action":{"type":"search","query":"retained query"}}`
+	const assistant = `{"type":"message","id":"msg_old","role":"assistant","content":"retained answer"}`
+	const user = `{"role":"user","content":"continue"}`
+	rejection := []byte(`{"error":{"type":"invalid_request_error","param":"","message":"The requested item was created under a different *** OpenAI resource. Use the same resource that created the item to access it. [trace_id=fixture]"}}`)
+	for _, input := range []string{
+		`{"previous_response_id":"resp_remote","input":[` + search + `,` + user + `]}`,
+		`{"input":[` + search + `,{"type":"item_reference","id":"item_remote"},` + user + `]}`,
+		`{"input":[` + search + `,{"type":"compaction","encrypted_content":"required_context"},` + user + `]}`,
+		`{"input":[` + assistant + `,{"type":"web_search_call","id":"ws_running","status":"in_progress","action":{}},` + user + `]}`,
+		`{"input":[` + assistant + `,{"type":"web_search_call","id":"ws_unknown","status":"completed"},` + user + `]}`,
+		`{"input":[` + search + `]}`,
+	} {
+		body := []byte(input)
+		got, retry := PortableResponsesSignatureRetry(body, rejection, "https://agentrouter.org/v1/responses")
+		if retry || !bytes.Equal(got, body) {
+			t.Fatalf("nonportable or unfinished history was rewritten: %s", input)
+		}
+	}
+}
+
+func TestGenericSignatureRecoveryKeepsUnrelatedRouteBindings(t *testing.T) {
+	body := []byte(`{"input":[{"type":"reasoning","id":"rs_bad","encrypted_content":"foreign"},{"type":"message","id":"msg_keep","role":"assistant","content":"retained answer"},{"type":"web_search_call","id":"ws_keep","status":"completed","action":{"type":"search","query":"retained query"}},{"role":"user","content":"continue"}]}`)
+	rejection := []byte(`{"error":{"code":"invalid_encrypted_content","param":"input[0].encrypted_content"}}`)
+	got, retry := PortableResponsesSignatureRetry(body, rejection, "https://other.example/v1/responses")
+	if !retry || gjson.GetBytes(got, "input.0.id").String() != "msg_keep" || gjson.GetBytes(got, "input.1.id").String() != "ws_keep" || gjson.GetBytes(got, "input.1.type").String() != "web_search_call" {
+		t.Fatalf("targeted signature repair rewrote unrelated route bindings: %s", got)
 	}
 }

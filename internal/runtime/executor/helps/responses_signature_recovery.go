@@ -25,13 +25,15 @@ func PortableResponsesSignatureRetry(body, rejection []byte, endpoint string) ([
 		return body, false
 	}
 	agentRejection := classifyAgentSignatureRejection(body, rejection, endpoint)
-	resourceMismatch := agentRejection.kind == agentSignatureRejectionResource || anyResponsesHistoricalItemRejection(body, rejection, endpoint)
+	// Agent can reject encryption first, then a different item from the same
+	// former resource. Repair the portable route state together within one retry.
+	routeBindingRejected := agentRejection.kind != agentSignatureRejectionNone || anyResponsesHistoricalItemRejection(body, rejection, endpoint)
 	rejection = normalizeAgentSignatureRejection(body, rejection, endpoint)
 	code := gjson.GetBytes(rejection, "error.code").String()
 	if code == "" {
 		code = gjson.GetBytes(rejection, "response.error.code").String()
 	}
-	if code != "invalid_encrypted_content" && code != "thinking_signature_invalid" && !resourceMismatch {
+	if code != "invalid_encrypted_content" && code != "thinking_signature_invalid" && !routeBindingRejected {
 		return body, false
 	}
 	if strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) != "" {
@@ -83,7 +85,14 @@ func PortableResponsesSignatureRetry(body, rejection []byte, endpoint string) ([
 			continue
 		}
 		raw := item.Raw
-		if resourceMismatch && responsesRouteBoundItemID(item) {
+		if routeBindingRejected && typ == "web_search_call" {
+			var ok bool
+			raw, ok = portableResponsesWebSearchRecord(item)
+			if !ok {
+				return body, false
+			}
+			changed = true
+		} else if routeBindingRejected && responsesRouteBoundItemID(item) {
 			withoutID, errDelete := sjson.Delete(raw, "id")
 			if errDelete != nil {
 				return body, false
@@ -128,6 +137,8 @@ func responsesRouteBoundItemID(item gjson.Result) bool {
 		return true
 	case "message":
 		return item.Get("role").String() == "assistant"
+	case "web_search_call":
+		return item.Get("status").String() == "completed" && item.Get("action").IsObject()
 	default:
 		return false
 	}

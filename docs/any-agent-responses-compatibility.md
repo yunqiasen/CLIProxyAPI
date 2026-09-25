@@ -20,6 +20,48 @@ commits them locally, and verifies automatic code hot reload with the exact
 the container. Live checks pin one existing key per affected site. Remote publication follows
 the separately requested fork delivery workflow.
 
+## September 25: portable historical tool discovery
+
+Two resumed desktop tasks failed with `invalid_responses_request` / `invalid codex
+request` after switching models. Their `/v1/responses` requests already selected
+the new model. Both contained a completed client-side `tool_search_call` /
+`tool_search_output` pair, including old dynamically discovered tool namespaces.
+A first-key AnyRouter comparison isolated the schema mismatch: either native
+item produced HTTP 400; the same records serialized as readable messages produced
+HTTP 200 and assistant text. These direct observations alone do not certify a
+completed terminal event.
+
+The shared outgoing history normalizer now converts **matched, completed,
+client-executed** discovery pairs on the exact AnyRouter Responses endpoint into
+assistant data records. It preserves every original field inside the record,
+item order, current tool declarations, and subsequent function call/result pairs.
+It leaves the caller's stored history untouched. The new discovery conversion is
+model-independent: changing a model alias does not reintroduce this input-schema
+failure. Existing Astra reasoning/web-search rules retain their narrower scope.
+
+Old discovery results do not add executable tools to the current request. The
+current Codex client remains responsible for available tools and may discover
+them again. Other upstreams, incomplete/duplicate/unmatched discovery pairs,
+server-executed searches, remote references, and opaque compaction remain
+unchanged. This is not a generic HTTP-400 retry or an arbitrary-history deletion.
+The production HTTP, SSE and WebSocket paths already share this normalizer.
+
+A different desktop failure, `unknown provider for model cpa-5.6s`, was traced to
+Codex's **model-downshift pre-compaction using the previous model**, despite the
+new model already being selected. Do not silently redirect an unavailable model
+to another one or rewrite task IDs. Back up the task, resume with its selected
+available model, and use app-server `thread/compact/start` before another turn;
+verify the resulting task through an actual completed turn. This local recovery
+is separate from the relay history-schema repair.
+
+Regression commands:
+
+```sh
+go test ./internal/runtime/executor/helps ./internal/runtime/executor \
+  -run 'TestNormalizeResponsesToolSearchHistory|TestCodexAnyToolSearchHistoryCompatibility' -count=1
+go test -race ./test -run '^TestCodexConversationSwitchContract$' -count=1
+```
+
 ## September 21: remaining native search bindings
 
 The new Agent trace `288391cb0f3c9ed6b46b903b685afb80` occurred after the existing

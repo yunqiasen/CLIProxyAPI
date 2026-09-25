@@ -10,7 +10,7 @@ import (
 )
 
 // NormalizeResponsesHistory preserves portable reasoning on Any and Agent.
-// Historical web search conversion remains specific to the verified Any route.
+// Historical web and tool search conversion remains specific to the verified Any route.
 // It changes only the outgoing copy, not the caller's stored conversation.
 func NormalizeResponsesHistory(body []byte, endpoint string) []byte {
 	parsed, err := url.Parse(endpoint)
@@ -19,7 +19,7 @@ func NormalizeResponsesHistory(body []byte, endpoint string) []byte {
 	}
 	host := strings.TrimSuffix(parsed.Hostname(), ".")
 	isAny := strings.EqualFold(host, "anyrouter.top")
-	if (!isAny && !strings.EqualFold(host, "agentrouter.org")) || !strings.HasSuffix(strings.TrimSuffix(parsed.Path, "/"), "/responses") || gjson.GetBytes(body, "model").String() != "gpt-6-astra" {
+	if (!isAny && !strings.EqualFold(host, "agentrouter.org")) || !strings.HasSuffix(strings.TrimSuffix(parsed.Path, "/"), "/responses") {
 		return body
 	}
 	input := gjson.GetBytes(body, "input")
@@ -32,19 +32,30 @@ func NormalizeResponsesHistory(body []byte, endpoint string) []byte {
 			return body
 		}
 	}
+	// Native discovery input is a relay schema constraint, not a model capability.
+	var discovery map[int]string
+	if isAny {
+		discovery = portableResponsesToolSearchRecords(items)
+	}
+	astraHistory := gjson.GetBytes(body, "model").String() == "gpt-6-astra"
 	kept := make([]json.RawMessage, 0, len(items))
 	changed := false
-	for _, item := range items {
+	for i, item := range items {
 		raw := item.Raw
+		if record, ok := discovery[i]; ok {
+			raw = record
+		}
 		switch item.Get("type").String() {
 		case "web_search_call":
-			if isAny {
+			if isAny && astraHistory {
 				if portable, ok := portableResponsesWebSearchRecord(item); ok {
 					raw = portable
 				}
 			}
 		case "reasoning":
-			raw = portableReasoningContent(item)
+			if astraHistory {
+				raw = portableReasoningContent(item)
+			}
 		}
 		changed = changed || raw != item.Raw
 		kept = append(kept, json.RawMessage(raw))

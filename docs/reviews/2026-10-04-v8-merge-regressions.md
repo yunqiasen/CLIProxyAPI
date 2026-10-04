@@ -141,3 +141,11 @@ The browser selected-key probe reached the real V8 `provider-connectivity-test`
 endpoint with HTTP 200 and displayed Reachable, preserving the saved two-key pool.
 Final parent reruns are `full-delivery.log`, `runtime-delivery.log`,
 `ui-parent-final2.log`, `race-final2.log` and `panel-final.log`.
+
+During primary activation, the existing hot-reload container's module proxy
+returned EOF for the newly introduced zeroconf dependency. The supervisor retained
+the old healthy process. The two required module archives were copied from the
+already-tested host Go cache into the container's existing module cache and
+validated with `GOPROXY=off go mod download`. No source/config/image changes were
+needed for the cache repair. This documentation commit triggers a fresh clean
+build after the failed source state, using the normal HEAD watcher.

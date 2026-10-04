@@ -1,21 +1,25 @@
 package executor
 
 import (
+	"net/http/httptest"
+
+	"testing"
+
 	"bytes"
 	"context"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/tidwall/gjson"
 	"io"
 	"net/http"
-	"net/http/httptest"
+
 	"strings"
-	"testing"
+
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 )
 
 func TestCodexExecutorExecute_NonEmptyCompletionOutputHydratesMissingItemID(t *testing.T) {
@@ -209,7 +213,7 @@ func TestCodexExecutorExecuteMissingCompletionIsRequestScoped(t *testing.T) {
 	assertRequestScopedTestError(t, err)
 }
 
-func TestCodexExecutorExecuteStreamMissingCompletionBeforeOutputIsRetryable(t *testing.T) {
+func TestCodexExecutorExecuteStreamMissingCompletionIsRequestScoped(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.5\"}}\n\n"))
@@ -226,8 +230,9 @@ func TestCodexExecutorExecuteStreamMissingCompletionBeforeOutputIsRetryable(t *t
 		Model:   "gpt-5.5",
 		Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
 	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FromString("openai-response"),
-		Stream:       true,
+		SourceFormat:       sdktranslator.FromString("openai-response"),
+		Stream:             true,
+		ExecutionLifecycle: newTerminalFailureLifecycle(),
 	})
 	if err != nil {
 		t.Fatalf("ExecuteStream error: %v", err)
@@ -242,10 +247,10 @@ func TestCodexExecutorExecuteStreamMissingCompletionBeforeOutputIsRetryable(t *t
 	if streamErr == nil {
 		t.Fatal("expected missing-completion stream error, got nil")
 	}
-	if got := statusCodeFromTestError(t, streamErr); got != http.StatusBadGateway {
-		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusBadGateway, streamErr)
+	if got := statusCodeFromTestError(t, streamErr); got != http.StatusRequestTimeout {
+		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusRequestTimeout, streamErr)
 	}
-	assertNotRequestScopedTestError(t, streamErr)
+	assertRequestScopedTestError(t, streamErr)
 }
 
 func TestCodexExecutorExecuteStreamExplicitTerminalFailureIsNotSuccessful(t *testing.T) {
@@ -338,25 +343,21 @@ func TestCodexAutoExecutorHTTPFallbackForwardsSequentialCutoffReasoningSummaryDe
 	}
 }
 
-func TestCodexExecutorTransportFailureRespectsOutputCommitBoundary(t *testing.T) {
+func TestCodexExecutorTransportFailureBeforeTerminalIsRequestScoped(t *testing.T) {
 	tests := []struct {
-		name    string
-		stream  bool
-		partial bool
-		managed bool
+		name   string
+		stream bool
 	}{
 		{name: "non-streaming"},
-		{name: "streaming before output", stream: true},
-		{name: "streaming after output", stream: true, partial: true},
-		{name: "managed streaming", stream: true, managed: true},
+		{name: "streaming", stream: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			created := []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.5\"}}\n\n")
-			if tc.partial {
-				created = append(created, []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")...)
-			}
+			// A visible delta commits output; lifecycle-only frames stay retryable.
+			created = append(created, []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"visible\"}\n\n")...)
+
 			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 				return &http.Response{
 					StatusCode: http.StatusOK,
@@ -373,10 +374,6 @@ func TestCodexExecutorTransportFailureRespectsOutputCommitBoundary(t *testing.T)
 			}}
 			req := cliproxyexecutor.Request{Model: "gpt-5.5", Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`)}
 			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: tc.stream}
-
-			if tc.managed {
-				opts.ExecutionLifecycle = newTerminalFailureLifecycle()
-			}
 
 			var terminalErr error
 			if tc.stream {
@@ -395,19 +392,10 @@ func TestCodexExecutorTransportFailureRespectsOutputCommitBoundary(t *testing.T)
 			if terminalErr == nil {
 				t.Fatal("expected transport failure before terminal event")
 			}
-			wantStatus := http.StatusRequestTimeout
-			recoverable := tc.stream && !tc.partial && !tc.managed
-			if recoverable {
-				wantStatus = http.StatusBadGateway
+			if got := statusCodeFromTestError(t, terminalErr); got != http.StatusRequestTimeout {
+				t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusRequestTimeout, terminalErr)
 			}
-			if got := statusCodeFromTestError(t, terminalErr); got != wantStatus {
-				t.Fatalf("status code = %d, want %d; err=%v", got, wantStatus, terminalErr)
-			}
-			if recoverable {
-				assertNotRequestScopedTestError(t, terminalErr)
-			} else {
-				assertRequestScopedTestError(t, terminalErr)
-			}
+			assertRequestScopedTestError(t, terminalErr)
 		})
 	}
 }
@@ -596,6 +584,17 @@ func TestCodexTerminalFailureErrClassifiesStatus(t *testing.T) {
 			event:      `{"type":"response.failed","response":{"error":{"type":"upstream_error","code":"unknown","message":"Upstream failed."}}}`,
 			wantStatus: http.StatusBadGateway,
 		},
+
+		{
+			name:       "overload stays a bad gateway without buffering",
+			event:      `{"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`,
+			wantStatus: http.StatusBadGateway,
+		},
+		{
+			name:       "model not found with invalid_request_error type maps to 404",
+			event:      `{"type":"error","error":{"type":"invalid_request_error","code":"model_not_found","message":"The model gpt-5.5 does not exist or you do not have access to it."}}`,
+			wantStatus: http.StatusNotFound,
+		},
 	}
 
 	for _, tc := range tests {
@@ -725,5 +724,117 @@ func TestCodexExecutorExecuteStream_EmptyStreamCompletionOutputUsesOutputItemDon
 	gotContent := gjson.GetBytes(completed, "response.output.0.content.0.text").String()
 	if gotContent != "ok" {
 		t.Fatalf("response.output[0].content[0].text = %q, want %q; completed=%s", gotContent, "ok", string(completed))
+	}
+}
+func TestCodexExecutorExecuteStreamMissingCompletionBeforeOutputIsRetryable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.5\"}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var streamErr error
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+		}
+	}
+	if streamErr == nil {
+		t.Fatal("expected missing-completion stream error, got nil")
+	}
+	if got := statusCodeFromTestError(t, streamErr); got != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusBadGateway, streamErr)
+	}
+	assertNotRequestScopedTestError(t, streamErr)
+}
+
+func TestCodexExecutorTransportFailureRespectsOutputCommitBoundary(t *testing.T) {
+	tests := []struct {
+		name    string
+		stream  bool
+		partial bool
+		managed bool
+	}{
+		{name: "non-streaming"},
+		{name: "streaming before output", stream: true},
+		{name: "streaming after output", stream: true, partial: true},
+		{name: "managed streaming", stream: true, managed: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			created := []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.5\"}}\n\n")
+			if tc.partial {
+				created = append(created, []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")...)
+			}
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": {"text/event-stream"}},
+					Body:       io.NopCloser(io.MultiReader(bytes.NewReader(created), unexpectedEOFReader{})),
+					Request:    req,
+				}, nil
+			}))
+
+			executor := NewCodexExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+				"base_url": "http://codex.test",
+				"api_key":  "test",
+			}}
+			req := cliproxyexecutor.Request{Model: "gpt-5.5", Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`)}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: tc.stream}
+
+			if tc.managed {
+				opts.ExecutionLifecycle = newTerminalFailureLifecycle()
+			}
+
+			var terminalErr error
+			if tc.stream {
+				result, errStream := executor.ExecuteStream(ctx, auth, req, opts)
+				if errStream != nil {
+					t.Fatalf("ExecuteStream error: %v", errStream)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						terminalErr = chunk.Err
+					}
+				}
+			} else {
+				_, terminalErr = executor.Execute(ctx, auth, req, opts)
+			}
+			if terminalErr == nil {
+				t.Fatal("expected transport failure before terminal event")
+			}
+			wantStatus := http.StatusRequestTimeout
+			recoverable := tc.stream && !tc.partial && !tc.managed
+			if recoverable {
+				wantStatus = http.StatusBadGateway
+			}
+			if got := statusCodeFromTestError(t, terminalErr); got != wantStatus {
+				t.Fatalf("status code = %d, want %d; err=%v", got, wantStatus, terminalErr)
+			}
+			if recoverable {
+				assertNotRequestScopedTestError(t, terminalErr)
+			} else {
+				assertRequestScopedTestError(t, terminalErr)
+			}
+		})
 	}
 }

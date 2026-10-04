@@ -2,10 +2,9 @@ package auth
 
 import (
 	"context"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"testing"
-
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 )
 
 func TestLookupAPIKeyUpstreamModel(t *testing.T) {
@@ -34,23 +33,19 @@ func TestLookupAPIKeyUpstreamModel(t *testing.T) {
 		input  string
 		want   string
 	}{
-		// Fast path + suffix preservation
+
 		{"alias with suffix", "a1", "g25p(8192)", "gemini-2.5-pro-exp-03-25(8192)"},
 		{"alias without suffix", "a1", "g25p", "gemini-2.5-pro-exp-03-25"},
 
-		// Config suffix takes priority
 		{"config suffix priority", "a1", "g25f(high)", "gemini-2.5-flash(low)"},
 		{"config suffix no user suffix", "a1", "g25f", "gemini-2.5-flash(low)"},
 
-		// Case insensitive
 		{"uppercase alias", "a1", "G25P", "gemini-2.5-pro-exp-03-25"},
 		{"mixed case with suffix", "a1", "G25p(4096)", "gemini-2.5-pro-exp-03-25(4096)"},
 
-		// Direct name lookup
 		{"upstream name direct", "a1", "gemini-2.5-pro-exp-03-25", "gemini-2.5-pro-exp-03-25"},
 		{"upstream name with suffix", "a1", "gemini-2.5-pro-exp-03-25(8192)", "gemini-2.5-pro-exp-03-25(8192)"},
 
-		// Cache miss scenarios
 		{"non-existent auth", "non-existent", "g25p", ""},
 		{"unknown alias", "a1", "unknown-alias", ""},
 		{"empty auth ID", "", "g25p", ""},
@@ -104,12 +99,10 @@ func TestAPIKeyModelAlias_ConfigHotReload(t *testing.T) {
 	ctx := context.Background()
 	_, _ = mgr.Register(ctx, &Auth{ID: "a1", Provider: "gemini", Attributes: map[string]string{"api_key": "k"}})
 
-	// Initial alias
 	if resolved := mgr.lookupAPIKeyUpstreamModel("a1", "g25p"); resolved != "gemini-2.5-pro-exp-03-25" {
 		t.Fatalf("before reload: got %q, want %q", resolved, "gemini-2.5-pro-exp-03-25")
 	}
 
-	// Hot reload with new alias
 	mgr.SetConfig(&internalconfig.Config{
 		GeminiKey: []internalconfig.GeminiKey{
 			{
@@ -119,7 +112,6 @@ func TestAPIKeyModelAlias_ConfigHotReload(t *testing.T) {
 		},
 	})
 
-	// New alias should take effect
 	if resolved := mgr.lookupAPIKeyUpstreamModel("a1", "g25p"); resolved != "gemini-2.5-flash" {
 		t.Fatalf("after reload: got %q, want %q", resolved, "gemini-2.5-flash")
 	}
@@ -293,6 +285,67 @@ func TestResolveAPIKeyModelAliasWithResult_ForceMappingUsesConfigAliasNotRequest
 	}
 }
 
+func TestLookupAPIKeyUpstreamModel_MetaKey(t *testing.T) {
+	cfg := &internalconfig.Config{
+		MetaKey: []internalconfig.MetaKey{
+			{
+				APIKey:  "meta-key",
+				BaseURL: "https://api.meta.ai/v1",
+				Models: []internalconfig.CodexModel{
+					{Name: "muse-spark-1.3", Alias: "muse-latest"},
+				},
+			},
+		},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+
+	ctx := context.Background()
+	auth := &Auth{
+		ID:       "meta-auth-1",
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":   "meta-key",
+			"base_url":  "https://api.meta.ai/v1",
+			"auth_kind": "apikey",
+		},
+	}
+	if _, err := mgr.Register(ctx, auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	resolved := mgr.lookupAPIKeyUpstreamModel("meta-auth-1", "muse-latest")
+	if resolved != "muse-spark-1.3" {
+		t.Fatalf("lookupAPIKeyUpstreamModel() = %q, want muse-spark-1.3", resolved)
+	}
+
+	slowRouting := &apiKeyModelRoutingSnapshot{
+		config:  cfg,
+		aliases: make(apiKeyModelAliasTable),
+	}
+	slowResolved := mgr.applyAPIKeyModelAliasWithRouting(slowRouting, auth, "muse-latest")
+	if slowResolved != "muse-spark-1.3" {
+		t.Fatalf("applyAPIKeyModelAliasWithRouting(slow) = %q, want muse-spark-1.3", slowResolved)
+	}
+
+	aliasResult := mgr.resolveAPIKeyModelAliasWithResult(auth, "muse-latest")
+	if aliasResult.UpstreamModel != "muse-spark-1.3" {
+		t.Fatalf("resolveAPIKeyModelAliasWithResult() upstream = %q, want muse-spark-1.3", aliasResult.UpstreamModel)
+	}
+
+	entries := configuredModelAliasEntries(cfg, auth)
+	found := false
+	for _, e := range entries {
+		if e.GetAlias() == "muse-latest" && e.GetName() == "muse-spark-1.3" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("configuredModelAliasEntries did not contain muse-latest -> muse-spark-1.3: %+v", entries)
+	}
+}
 func TestResolveAPIKeyModelAliasWithResult_MediaProviderForceMapping(t *testing.T) {
 	cfg := &internalconfig.Config{MediaProviders: []internalconfig.MediaProvider{{
 		Name: "Image Relay", Kind: internalconfig.MediaKindImage, BaseURL: "https://images.example/v1",

@@ -13,7 +13,10 @@ func TestSessionDeliversTerminalAfterFullQueue(t *testing.T) {
 		s.dispatch(Message{ID: "r", Type: MessageTypeStreamChunk})
 	}
 	sent := make(chan struct{})
-	go func() { s.dispatch(Message{ID: "r", Type: MessageTypeStreamEnd}); close(sent) }()
+	go func() {
+		s.dispatch(Message{ID: "r", Type: MessageTypeStreamEnd})
+		close(sent)
+	}()
 	// A terminal send must wait for capacity, rather than silently disappear.
 	select {
 	case <-sent:
@@ -37,9 +40,12 @@ func TestSessionDeliversTerminalAfterFullQueue(t *testing.T) {
 
 func TestPendingRequestCancellationUnblocksFullQueue(t *testing.T) {
 	req := &pendingRequest{ch: make(chan Message, 1)}
-	req.deliver(Message{Type: MessageTypeStreamChunk})
+	req.deliver(nil, Message{Type: MessageTypeStreamChunk})
 	finished := make(chan struct{})
-	go func() { req.deliver(Message{Type: MessageTypeStreamEnd}); close(finished) }()
+	go func() {
+		req.deliver(nil, Message{Type: MessageTypeStreamEnd})
+		close(finished)
+	}()
 	req.close()
 	select {
 	case <-finished:
@@ -54,7 +60,7 @@ func TestSessionCleanupRetainsQueuedOutputAndError(t *testing.T) {
 	s := &session{closed: make(chan struct{})}
 	req := &pendingRequest{ch: make(chan Message, 1)}
 	s.pending.Store("r", req)
-	req.deliver(Message{ID: "r", Type: MessageTypeStreamChunk})
+	req.deliver(nil, Message{ID: "r", Type: MessageTypeStreamChunk})
 	s.cleanup(errClosed)
 	first := <-req.ch
 	if first.Type != MessageTypeStreamChunk {
@@ -76,10 +82,13 @@ func TestSessionCleanupRetainsQueuedOutputAndError(t *testing.T) {
 func TestCanceledTerminalDoesNotCloseReusedRequestID(t *testing.T) {
 	s := &session{closed: make(chan struct{})}
 	old := &pendingRequest{ch: make(chan Message, 1)}
-	old.deliver(Message{Type: MessageTypeStreamChunk})
+	old.deliver(nil, Message{Type: MessageTypeStreamChunk})
 	s.pending.Store("same", old)
 	done := make(chan struct{})
-	go func() { s.dispatch(Message{ID: "same", Type: MessageTypeStreamEnd}); close(done) }()
+	go func() {
+		s.dispatch(Message{ID: "same", Type: MessageTypeStreamEnd})
+		close(done)
+	}()
 	// Wait until dispatch is blocked on the old full channel.
 	deadline := time.After(time.Second)
 	for {
@@ -95,7 +104,6 @@ func TestCanceledTerminalDoesNotCloseReusedRequestID(t *testing.T) {
 		}
 	}
 	newer := &pendingRequest{ch: make(chan Message, 1)}
-	newer.initialize()
 	s.pending.Store("same", newer)
 	old.close()
 	<-done

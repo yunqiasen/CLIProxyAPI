@@ -1,13 +1,14 @@
 package management
 
 import (
-	"fmt"
 	"strconv"
+
+	"fmt"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 const configAPIKeyDisablePattern = "*"
@@ -31,8 +32,78 @@ func setConfigAPIKeyExcludedAll(models []string, disable bool) []string {
 	return config.NormalizeExcludedModels(filtered)
 }
 
-func matchesNativeConfigAuthID(idGen *synthesizer.StableIDGenerator, authID, kind, legacyKey string, priority int, proxyURL string, entries []config.NativeAPIKeyEntry, baseURL string) bool {
-	for _, effective := range config.EffectiveNativeAPIKeys(legacyKey, priority, proxyURL, entries) {
+func toggleConfigAPIKeyExcludedAll(cfg *config.Config, auth *coreauth.Auth, disable bool) (bool, error) {
+	if cfg == nil || auth == nil || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(auth.Attributes["source"])), "config") {
+		return false, nil
+	}
+	authID := strings.TrimSpace(auth.ID)
+	if authID == "" {
+		return false, fmt.Errorf("auth id is empty")
+	}
+
+	idGen := synthesizer.NewStableIDGenerator()
+	matches := func(kind string, entry NativeAPIKeyEntryProvider) bool {
+		return matchesNativeConfigAuthID(idGen, authID, kind, entry)
+	}
+	for i := range cfg.GeminiKey {
+		if matches("gemini:apikey", &cfg.GeminiKey[i]) {
+			cfg.GeminiKey[i].ExcludedModels = setConfigAPIKeyExcludedAll(cfg.GeminiKey[i].ExcludedModels, disable)
+			return true, nil
+		}
+	}
+	for i := range cfg.InteractionsKey {
+		if matches("gemini-interactions:apikey", &cfg.InteractionsKey[i]) {
+			cfg.InteractionsKey[i].ExcludedModels = setConfigAPIKeyExcludedAll(cfg.InteractionsKey[i].ExcludedModels, disable)
+			return true, nil
+		}
+	}
+	for i := range cfg.ClaudeKey {
+		if matches("claude:apikey", &cfg.ClaudeKey[i]) {
+			cfg.ClaudeKey[i].ExcludedModels = setConfigAPIKeyExcludedAll(cfg.ClaudeKey[i].ExcludedModels, disable)
+			return true, nil
+		}
+	}
+	for i := range cfg.CodexKey {
+		if matches("codex:apikey", &cfg.CodexKey[i]) {
+			cfg.CodexKey[i].ExcludedModels = setConfigAPIKeyExcludedAll(cfg.CodexKey[i].ExcludedModels, disable)
+			return true, nil
+		}
+	}
+	for i := range cfg.XAIKey {
+		if matches("xai:apikey", &cfg.XAIKey[i]) {
+			cfg.XAIKey[i].ExcludedModels = setConfigAPIKeyExcludedAll(cfg.XAIKey[i].ExcludedModels, disable)
+			return true, nil
+		}
+	}
+	for i := range cfg.MetaKey {
+		if matches("meta:apikey", &cfg.MetaKey[i]) {
+			cfg.MetaKey[i].ExcludedModels = setConfigAPIKeyExcludedAll(cfg.MetaKey[i].ExcludedModels, disable)
+			return true, nil
+		}
+	}
+	for i := range cfg.VertexCompatAPIKey {
+		id, _ := idGen.Next("vertex:apikey", cfg.VertexCompatAPIKey[i].APIKey, cfg.VertexCompatAPIKey[i].BaseURL, cfg.VertexCompatAPIKey[i].ProxyURL)
+		if id == authID {
+			cfg.VertexCompatAPIKey[i].ExcludedModels = setConfigAPIKeyExcludedAll(cfg.VertexCompatAPIKey[i].ExcludedModels, disable)
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+type ExcludedModelsEntry interface {
+	NativeAPIKeyEntryProvider
+}
+
+type NativeAPIKeyEntryProvider interface {
+	GetAPIKey() string
+	GetBaseURL() string
+	GetEffectiveAPIKeys() []config.EffectiveNativeAPIKey
+}
+
+func matchesNativeConfigAuthID(idGen *synthesizer.StableIDGenerator, authID, kind string, entry NativeAPIKeyEntryProvider) bool {
+	baseURL := strings.TrimSpace(entry.GetBaseURL())
+	for _, effective := range entry.GetEffectiveAPIKeys() {
 		if stableID := strings.TrimSpace(effective.AuthID); stableID != "" && stableID == authID {
 			return true
 		}
@@ -47,62 +118,4 @@ func matchesNativeConfigAuthID(idGen *synthesizer.StableIDGenerator, authID, kin
 		}
 	}
 	return false
-}
-
-func toggleConfigAPIKeyExcludedAll(cfg *config.Config, auth *coreauth.Auth, disable bool) (bool, error) {
-	if cfg == nil || auth == nil || !coreauth.IsConfigAPIKeyAuth(auth) {
-		return false, nil
-	}
-	authID := strings.TrimSpace(auth.ID)
-	if authID == "" {
-		return false, fmt.Errorf("auth id is empty")
-	}
-
-	idGen := synthesizer.NewStableIDGenerator()
-
-	for i := range cfg.GeminiKey {
-		entry := &cfg.GeminiKey[i]
-		if matchesNativeConfigAuthID(idGen, authID, "gemini:apikey", entry.APIKey, entry.Priority, entry.ProxyURL, entry.APIKeyEntries, entry.BaseURL) {
-			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
-			return true, nil
-		}
-	}
-	for i := range cfg.InteractionsKey {
-		entry := &cfg.InteractionsKey[i]
-		if matchesNativeConfigAuthID(idGen, authID, "gemini-interactions:apikey", entry.APIKey, entry.Priority, entry.ProxyURL, entry.APIKeyEntries, entry.BaseURL) {
-			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
-			return true, nil
-		}
-	}
-	for i := range cfg.ClaudeKey {
-		entry := &cfg.ClaudeKey[i]
-		if matchesNativeConfigAuthID(idGen, authID, "claude:apikey", entry.APIKey, entry.Priority, entry.ProxyURL, entry.APIKeyEntries, entry.BaseURL) {
-			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
-			return true, nil
-		}
-	}
-	for i := range cfg.CodexKey {
-		entry := &cfg.CodexKey[i]
-		if matchesNativeConfigAuthID(idGen, authID, "codex:apikey", entry.APIKey, entry.Priority, entry.ProxyURL, entry.APIKeyEntries, entry.BaseURL) {
-			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
-			return true, nil
-		}
-	}
-	for i := range cfg.XAIKey {
-		entry := &cfg.XAIKey[i]
-		if matchesNativeConfigAuthID(idGen, authID, "xai:apikey", entry.APIKey, entry.Priority, entry.ProxyURL, entry.APIKeyEntries, entry.BaseURL) {
-			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
-			return true, nil
-		}
-	}
-	for i := range cfg.VertexCompatAPIKey {
-		entry := &cfg.VertexCompatAPIKey[i]
-		id, _ := idGen.Next("vertex:apikey", entry.APIKey, entry.BaseURL, entry.ProxyURL)
-		if id == authID {
-			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
-			return true, nil
-		}
-	}
-
-	return false, nil
 }

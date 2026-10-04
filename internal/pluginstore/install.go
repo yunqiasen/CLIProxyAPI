@@ -56,6 +56,10 @@ func (c Client) Install(ctx context.Context, plugin Plugin, options InstallOptio
 	}
 	release, errRelease := c.FetchLatestRelease(ctx, plugin)
 	if errRelease != nil {
+		var rateLimit *RateLimitError
+		if errors.As(errRelease, &rateLimit) {
+			return InstallResult{}, errRelease
+		}
 		fallbackRelease, errFallback := c.fetchLatestReleaseFromWeb(ctx, plugin, options.GOOS, options.GOARCH)
 		if errFallback != nil {
 			fallbackRelease, errFallback = registryVersionRelease(plugin, options.GOOS, options.GOARCH)

@@ -141,3 +141,13 @@ func TestSanitizeGeminiKeysDeduplicatesByEffectiveKeyIdentity(t *testing.T) {
 		t.Fatalf("sanitized key identities = %#v, want key-a and key-b once", seen)
 	}
 }
+
+func TestEffectiveNativeAPIKeysLegacyEndpointAndExplicitEmptyGroup(t *testing.T) {
+	keys := EffectiveNativeAPIKeys("", 3, "proxy", nil, "https://fixture.example")
+	if len(keys) != 1 || keys[0].Index != -1 || keys[0].APIKey != "" {
+		t.Fatalf("legacy endpoint missing: %#v", keys)
+	}
+	if keys := EffectiveNativeAPIKeys("", 3, "proxy", []NativeAPIKeyEntry{{APIKey: ""}}, "https://fixture.example"); len(keys) != 0 {
+		t.Fatalf("empty group revived: %#v", keys)
+	}
+}

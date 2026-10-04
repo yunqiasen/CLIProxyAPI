@@ -13,15 +13,15 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
-	apiHandlers "github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	openaiHandlers "github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
+	apiHandlers "github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	openaiHandlers "github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 type providerConnectivityClaudeCloak struct {
@@ -270,14 +270,19 @@ func (h *Handler) claudeConnectivityAuth(body providerConnectivityTestRequest) (
 	}
 	if auth == nil {
 		auth = &coreauth.Auth{
-			ID:         "management:claude-connectivity-test",
-			Provider:   "claude",
-			Attributes: map[string]string{},
+			ID:       "management:claude-connectivity-test",
+			Provider: "claude",
+			Attributes: map[string]string{
+				"fingerprint_profile": "claude-code-cli",
+			},
 		}
 	} else {
 		auth = auth.Clone()
 		if auth.Attributes == nil {
 			auth.Attributes = map[string]string{}
+		}
+		if auth.Attributes["fingerprint_profile"] == "" {
+			auth.Attributes["fingerprint_profile"] = "claude-code-cli"
 		}
 	}
 

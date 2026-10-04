@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	claude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/openai/responses"
-	gemini "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/openai/responses"
-	chat "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
+	claude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
+	gemini "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/openai/responses"
+	chat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/openai/responses"
 	"github.com/tidwall/gjson"
 	"strings"
 	"testing"
@@ -25,7 +25,7 @@ func TestApplyPatchBridgeDefinitionsAndRoundTrip(t *testing.T) {
 		if gjson.GetBytes(body, "tools.0.functionDeclarations.0.name").String() != "apply_patch" {
 			t.Fatalf("patch declaration missing: %s", body)
 		}
-		response := gemini.ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-test", raw, body, []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"apply_patch","args":{"input":"*** Begin Patch\n*** End Patch"}}}]},"finishReason":"STOP"}]}`), nil)
+		response := gemini.ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-test", raw, body, []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"apply_patch","args":{"input":"*** Begin Patch\n*** End Patch"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}`), nil)
 		if gjson.GetBytes(response, `output.#(type=="custom_tool_call").input`).String() != "*** Begin Patch\n*** End Patch" {
 			t.Fatalf("patch response not restored: %s", response)
 		}
@@ -61,9 +61,9 @@ func TestApplyPatchStreamingExchange(t *testing.T) {
 					convert = gemini.ConvertGeminiResponseToOpenAIResponses
 					request = gemini.ConvertOpenAIResponsesRequestToGemini
 					if namespace != "" {
-						name = namespace + ".apply_patch"
+						name = namespace + "__apply_patch"
 					}
-					chunks = [][]byte{[]byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + name + `","args":` + string(args) + `}}]},"finishReason":"STOP"}]}`)}
+					chunks = [][]byte{[]byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + name + `","args":` + string(args) + `}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}`)}
 				case "chat":
 					convert = chat.ConvertOpenAIChatCompletionsResponseToOpenAIResponses
 					request = chat.ConvertOpenAIResponsesRequestToOpenAIChatCompletions
@@ -128,7 +128,7 @@ func TestApplyPatchStreamingExchange(t *testing.T) {
 
 func TestGeminiParallelPatchAndFunctionCalls(t *testing.T) {
 	raw := []byte(`{"tools":[{"type":"custom","name":"apply_patch"},{"type":"function","name":"lookup","parameters":{"type":"object"}}]}`)
-	upstream := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"apply_patch","args":{"input":"PATCH_ONE"}}},{"functionCall":{"name":"lookup","args":{"query":"hello"}}},{"functionCall":{"name":"apply_patch","args":{"input":"PATCH_TWO"}}}]},"finishReason":"STOP"}]}`)
+	upstream := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"apply_patch","args":{"input":"PATCH_ONE"}}},{"functionCall":{"name":"lookup","args":{"query":"hello"}}},{"functionCall":{"name":"apply_patch","args":{"input":"PATCH_TWO"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}`)
 	var state any
 	var outputs gjson.Result
 	ids := map[string]bool{}

@@ -14,13 +14,14 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginstore"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -42,6 +43,7 @@ type Handler struct {
 	cfg                     *config.Config
 	configFilePath          string
 	mu                      sync.Mutex
+	authStatusMu            sync.Mutex
 	reloadMu                sync.Mutex
 	reloadGeneration        uint64
 	appliedReloadGeneration uint64
@@ -62,6 +64,8 @@ type Handler struct {
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginReleaseCacheMu    sync.Mutex
 	pluginReleaseCache      map[string]pluginReleaseCacheEntry
+	pluginStoreRateLimiter  *pluginstore.GitHubRateLimiter
+	pluginReleases          pluginReleaseCache
 	quotaRefreshJobs        *quotaRefreshJobStore
 	requestLogIndex         *requestLogIndexManager
 	requestLogIndexError    string
@@ -192,7 +196,7 @@ func (h *Handler) reloadSnapshotConfigLocked() configReloadSnapshot {
 // saveConfigAndSnapshotLocked saves h.cfg and returns a full runtime config snapshot.
 // Callers must hold h.mu.
 func (h *Handler) saveConfigAndSnapshotLocked(c *gin.Context) (configReloadSnapshot, bool) {
-	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
+	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg, c.GetBool(ConfigV8ContextKey)); errSave != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", errSave)})
 		return configReloadSnapshot{}, false
 	}
@@ -497,7 +501,7 @@ func (h *Handler) persist(c *gin.Context) bool {
 // It expects the caller to hold h.mu.
 func (h *Handler) persistLocked(c *gin.Context) bool {
 	// Preserve comments when writing
-	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg, c.GetBool(ConfigV8ContextKey)); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
 	}
@@ -546,4 +550,62 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 	}
 	set(*body.Value)
 	h.persist(c)
+}
+
+// PostManagementPanelUpdate forces a management.html update from the configured panel repository.
+func (h *Handler) PostManagementPanelUpdate(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler_not_initialized"})
+		return
+	}
+
+	h.mu.Lock()
+	cfg := h.cfg
+	configFilePath := h.configFilePath
+	h.mu.Unlock()
+
+	if cfg == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "config_not_loaded"})
+		return
+	}
+	if cfg.RemoteManagement.DisableControlPanel {
+		c.JSON(http.StatusConflict, gin.H{"error": "control_panel_disabled"})
+		return
+	}
+
+	staticDir := managementasset.StaticDir(configFilePath)
+	if strings.TrimSpace(staticDir) == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "static_dir_unavailable"})
+		return
+	}
+
+	if !managementasset.ForceLatestManagementHTML(c.Request.Context(), staticDir, cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "panel_update_failed"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "management panel updated"})
+}
+
+// RequestLogRetentionDays
+func (h *Handler) GetRequestLogRetentionDays(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"request-log-retention-days": h.requestLogRetentionDays()})
+}
+
+func (h *Handler) PutRequestLogRetentionDays(c *gin.Context) {
+	var body struct {
+		Value *int `json:"value"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	if *body.Value < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request-log-retention-days must be greater than or equal to 0"})
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cfg.RequestLogRetentionDays = *body.Value
+	h.persistLocked(c)
 }

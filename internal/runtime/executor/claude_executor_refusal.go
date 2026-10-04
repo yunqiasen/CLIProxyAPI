@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -88,4 +88,18 @@ func claudeSSERefusalError(model string, data []byte) (error, bool) {
 
 func shouldBufferClaudeTranslatedStream(responseFormat sdktranslator.Format, baseURL string) bool {
 	return responseFormat == sdktranslator.FormatOpenAIResponse && !isAnthropicUpstreamBase(baseURL)
+}
+
+// claudeStreamHasInteractiveProgress identifies tool work and generated reasoning.
+func claudeStreamHasInteractiveProgress(line []byte) bool {
+	text := strings.TrimSpace(string(line))
+	if !strings.HasPrefix(text, "data:") {
+		return false
+	}
+	root := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(text, "data:")))
+	if root.Get("type").String() == "content_block_start" {
+		kind := root.Get("content_block.type").String()
+		return kind == "tool_use" || kind == "server_tool_use"
+	}
+	return root.Get("type").String() == "content_block_delta" && root.Get("delta.type").String() == "thinking_delta" && root.Get("delta.thinking").String() != ""
 }

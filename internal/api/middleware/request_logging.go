@@ -14,8 +14,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -327,9 +327,11 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 	method := c.Request.Method
 
 	// Capture headers
-	headers := make(map[string][]string)
-	for key, values := range c.Request.Header {
-		headers[key] = values
+	var headers map[string][]string
+	if c.Request.Header != nil {
+		headers = c.Request.Header.Clone()
+	} else {
+		headers = make(map[string][]string)
 	}
 	if sourceIP := requestLogSourceIP(c); sourceIP != "" {
 		headers["X-CPA-Client-IP"] = []string{sourceIP}
@@ -486,7 +488,7 @@ func decodeCapturedZstdRequestBodyWithLimit(raw []byte, limit int64) ([]byte, bo
 // It skips management endpoints to avoid leaking secrets but allows
 // all other routes, including module-provided ones, to honor request-log.
 func shouldLogRequest(path string) bool {
-	if strings.HasPrefix(path, "/v0/management") || strings.HasPrefix(path, "/management") {
+	if strings.HasPrefix(path, "/v0/management") || strings.HasPrefix(path, "/v8/management") || strings.HasPrefix(path, "/management") {
 		return false
 	}
 

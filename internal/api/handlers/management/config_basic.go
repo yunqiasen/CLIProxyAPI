@@ -11,10 +11,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
@@ -37,6 +36,14 @@ type releaseInfo struct {
 	Name    string `json:"name"`
 }
 
+func setLatestReleaseRequestHeaders(req *http.Request) {
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", latestReleaseUserAgent)
+	if token := util.ResolveGitHubToken(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
 // GetLatestVersion returns the latest release version from GitHub without downloading assets.
 func (h *Handler) GetLatestVersion(c *gin.Context) {
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -54,8 +61,7 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "request_create_failed", "message": err.Error()})
 		return
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", latestReleaseUserAgent)
+	setLatestReleaseRequestHeaders(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -92,42 +98,18 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"latest-version": version})
 }
 
-// PostManagementPanelUpdate forces a management.html update from the configured panel repository.
-func (h *Handler) PostManagementPanelUpdate(c *gin.Context) {
-	if h == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler_not_initialized"})
-		return
-	}
-
-	h.mu.Lock()
-	cfg := h.cfg
-	configFilePath := h.configFilePath
-	h.mu.Unlock()
-
-	if cfg == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "config_not_loaded"})
-		return
-	}
-	if cfg.RemoteManagement.DisableControlPanel {
-		c.JSON(http.StatusConflict, gin.H{"error": "control_panel_disabled"})
-		return
-	}
-
-	staticDir := managementasset.StaticDir(configFilePath)
-	if strings.TrimSpace(staticDir) == "" {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "static_dir_unavailable"})
-		return
-	}
-
-	if !managementasset.ForceLatestManagementHTML(c.Request.Context(), staticDir, cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "panel_update_failed"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "management panel updated"})
-}
-
 func WriteConfig(path string, data []byte) error {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return err
+	}
+	if len(doc.Content) > 0 && config.IsV8ConfigLayout(doc.Content[0]) {
+		var err error
+		data, _, err = config.NormalizeConfigLayout(data, true)
+		if err != nil {
+			return err
+		}
+	}
 	data = config.NormalizeCommentIndentation(data)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
@@ -283,29 +265,6 @@ func (h *Handler) PutRequestLog(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.RequestLog = v })
 }
 
-// RequestLogRetentionDays
-func (h *Handler) GetRequestLogRetentionDays(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"request-log-retention-days": h.cfg.RequestLogRetentionDays})
-}
-
-func (h *Handler) PutRequestLogRetentionDays(c *gin.Context) {
-	var body struct {
-		Value *int `json:"value"`
-	}
-	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
-		return
-	}
-	if *body.Value < 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "request-log-retention-days must be greater than or equal to 0"})
-		return
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.cfg.RequestLogRetentionDays = *body.Value
-	h.persistLocked(c)
-}
-
 // Websocket auth
 func (h *Handler) GetWebsocketAuth(c *gin.Context) {
 	c.JSON(200, gin.H{"ws-auth": h.cfg.WebsocketAuth})
@@ -320,6 +279,14 @@ func (h *Handler) GetRequestRetry(c *gin.Context) {
 }
 func (h *Handler) PutRequestRetry(c *gin.Context) {
 	h.updateIntField(c, func(v int) { h.cfg.RequestRetry = v })
+}
+
+// Max retry credentials
+func (h *Handler) GetMaxRetryCredentials(c *gin.Context) {
+	c.JSON(200, gin.H{"max-retry-credentials": h.cfg.MaxRetryCredentials})
+}
+func (h *Handler) PutMaxRetryCredentials(c *gin.Context) {
+	h.updateIntField(c, func(v int) { h.cfg.MaxRetryCredentials = v })
 }
 
 // Max retry interval

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 )
 
@@ -111,7 +111,8 @@ func TestCredentialCooldownDiagnosticBoundaries(t *testing.T) {
 				t.Fatal("expected error")
 			}
 			code := gjson.Get(err.Error(), "error.code").String()
-			if e, ok := err.(*Error); ok {
+			var e *Error
+			if errors.As(err, &e) {
 				code = e.Code
 			}
 			if code != tc.want {

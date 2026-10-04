@@ -10,9 +10,9 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 func TestGetGroupedNativeKeysIncludesNestedAuthIndexes(t *testing.T) {
@@ -278,7 +278,7 @@ func TestPatchGeminiKeyAcceptsGroupedAndProtocolFields(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	entry := h.cfg.GeminiKey[0]
-	if entry.Name != "gemini-group" || entry.Priority != 6 || len(entry.APIKeyEntries) != 1 || entry.APIKeyEntries[0].APIKey != "gemini-key" || entry.APIKey != "legacy" || entry.Prefix != "gem" || entry.BaseURL != "https://gemini.example" || entry.ProxyURL != "http://group-proxy" || len(entry.Models) != 1 || entry.Models[0].Name != "gemini-model" || entry.Headers["X-Test"] != "value" || len(entry.ExcludedModels) != 1 || entry.ExcludedModels[0] != "excluded" || !entry.DisableCooling {
+	if entry.Name != "gemini-group" || entry.Priority != 6 || len(entry.APIKeyEntries) != 1 || entry.APIKeyEntries[0].APIKey != "gemini-key" || entry.APIKey != "legacy" || entry.Prefix != "gem" || entry.BaseURL != "https://gemini.example" || entry.ProxyURL != "http://group-proxy" || len(entry.Models) != 1 || entry.Models[0].Name != "gemini-model" || entry.Headers["X-Test"] != "value" || len(entry.ExcludedModels) != 1 || entry.ExcludedModels[0] != "excluded" || (entry.DisableCooling == nil || !*entry.DisableCooling) {
 		t.Fatalf("patched Gemini entry = %#v", entry)
 	}
 }
@@ -291,7 +291,7 @@ func TestPatchClaudeKeyAcceptsGroupedAndProtocolFields(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	entry := h.cfg.ClaudeKey[0]
-	if entry.Name != "claude-group" || entry.Priority != 6 || len(entry.APIKeyEntries) != 1 || entry.APIKeyEntries[0].APIKey != "claude-key" || entry.APIKey != "legacy" || entry.Prefix != "claude" || entry.BaseURL != "https://claude.example" || entry.ProxyURL != "http://group-proxy" || len(entry.Models) != 1 || entry.Models[0].Name != "claude-model" || entry.Headers["X-Test"] != "value" || len(entry.ExcludedModels) != 1 || entry.ExcludedModels[0] != "excluded" || !entry.RebuildMidSystemMessage || !entry.DisableCooling || entry.Cloak == nil || entry.Cloak.Mode != "always" || !entry.Cloak.StrictMode || !entry.ExperimentalCCHSigning {
+	if entry.Name != "claude-group" || entry.Priority != 6 || len(entry.APIKeyEntries) != 1 || entry.APIKeyEntries[0].APIKey != "claude-key" || entry.APIKey != "legacy" || entry.Prefix != "claude" || entry.BaseURL != "https://claude.example" || entry.ProxyURL != "http://group-proxy" || len(entry.Models) != 1 || entry.Models[0].Name != "claude-model" || entry.Headers["X-Test"] != "value" || len(entry.ExcludedModels) != 1 || entry.ExcludedModels[0] != "excluded" || !entry.RebuildMidSystemMessage || (entry.DisableCooling == nil || !*entry.DisableCooling) || entry.Cloak == nil || entry.Cloak.Mode != "always" || !entry.Cloak.StrictMode || !entry.ExperimentalCCHSigning {
 		t.Fatalf("patched Claude entry = %#v", entry)
 	}
 }
@@ -304,7 +304,7 @@ func TestPatchCodexKeyAcceptsGroupedAndProtocolFields(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	entry := h.cfg.CodexKey[0]
-	if entry.Name != "codex-group" || entry.Priority != 6 || len(entry.APIKeyEntries) != 1 || entry.APIKeyEntries[0].APIKey != "codex-key" || entry.APIKey != "legacy" || entry.Prefix != "codex" || entry.BaseURL != "https://codex.example" || !entry.Websockets || entry.ProxyURL != "http://group-proxy" || len(entry.Models) != 1 || entry.Models[0].Name != "codex-model" || entry.Headers["X-Test"] != "value" || len(entry.ExcludedModels) != 1 || entry.ExcludedModels[0] != "excluded" || !entry.DisableImageGeneration || !entry.DisableCooling {
+	if entry.Name != "codex-group" || entry.Priority != 6 || len(entry.APIKeyEntries) != 1 || entry.APIKeyEntries[0].APIKey != "codex-key" || entry.APIKey != "legacy" || entry.Prefix != "codex" || entry.BaseURL != "https://codex.example" || !entry.Websockets || entry.ProxyURL != "http://group-proxy" || len(entry.Models) != 1 || entry.Models[0].Name != "codex-model" || entry.Headers["X-Test"] != "value" || len(entry.ExcludedModels) != 1 || entry.ExcludedModels[0] != "excluded" || !entry.DisableImageGeneration || (entry.DisableCooling == nil || !*entry.DisableCooling) {
 		t.Fatalf("patched Codex entry = %#v", entry)
 	}
 }

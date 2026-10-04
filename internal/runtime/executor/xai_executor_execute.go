@@ -9,21 +9,22 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	if opts.Alt == "responses/compact" {
 		return e.executeCompact(ctx, auth, req, opts)
 	}
 	if endpointPath := xaiImageEndpointPath(opts); endpointPath != "" {
-		return e.executeImages(ctx, auth, req, endpointPath)
+		return e.executeImages(ctx, auth, req, opts, endpointPath)
 	}
 	if xaiIsVideoRequest(opts) {
 		return e.executeVideos(ctx, auth, req, opts)
@@ -47,7 +48,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	if err != nil {
 		return resp, err
 	}
-	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID)
+	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID, opts.Headers)
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -84,47 +85,87 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
 	responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
+	namespaceRestorer := newXAINamespaceRestorer(prepared.namespaceTools)
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		if !bytes.HasPrefix(line, xaiDataTag) {
 			continue
 		}
 		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
-		eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
+		prepared.applyPatch.RememberDispatcherEvent(eventData)
+		eventData = namespaceRestorer.restore(eventData)
+		if prepared.webSearchAlias != "" {
+			eventData = restoreXAIClientWebSearchName(eventData, prepared.webSearchAlias)
+		}
 		eventData = responseFilter.apply(eventData)
 		if len(eventData) == 0 {
 			continue
 		}
-		switch gjson.GetBytes(eventData, "type").String() {
-		case "response.output_item.done":
-			xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-		case "response.completed":
-			if detail, ok := helps.ParseCodexUsage(eventData); ok {
-				reporter.Publish(ctx, detail)
+		events, errBridge := prepared.applyPatch.Transform(eventData)
+		if errBridge != nil {
+			errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+			return resp, errBridge
+		}
+		for _, eventData := range events {
+			reporter.ObserveResponseModel(eventData)
+			eventType := gjson.GetBytes(eventData, "type").String()
+			switch eventType {
+			case "response.output_item.done":
+				xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
+			case "response.completed", "response.incomplete":
+				completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+				completedData = xaiNormalizeReasoningSummaryData(completedData)
+				if eventType == "response.completed" {
+					// A truncated turn carries no replayable terminal state, so only a
+					// completed response may refresh the reasoning replay cache.
+					cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
+				}
+				var param any
+				out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
+				if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
+					return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+				}
+				if detail, ok := helps.ParseCodexUsage(eventData); ok {
+					reporter.Publish(ctx, detail)
+				}
+				if prepared.responseFormat == sdktranslator.FormatOpenAIResponse {
+					out = helps.EnsureResponsesUsageDetails(out)
+				}
+				return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 			}
-			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
-			completedData = xaiNormalizeReasoningSummaryData(completedData)
-			cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
-			var param any
-			out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
-			return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 		}
 	}
 
-	return resp, statusErr{code: http.StatusRequestTimeout, msg: "xai stream error: stream disconnected before response.completed"}
+	if errFinish := prepared.applyPatch.Finish(); errFinish != nil {
+		return resp, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+	}
+	return resp, statusErr{code: http.StatusRequestTimeout, msg: "xai stream error: stream disconnected before response.completed or response.incomplete"}
 }
 
 func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	prepared, data, headers, errCompact := e.executeCompactRequest(ctx, auth, req, opts)
-	if errCompact != nil {
-		return resp, errCompact
+	prepared, data, headers, reporter, errCompactRequest := e.executeCompactRequest(ctx, auth, req, opts)
+	if errCompactRequest != nil {
+		return resp, errCompactRequest
 	}
 
+	defer reporter.TrackFailure(ctx, &err)
+	converted, errBridge := prepared.applyPatch.Bridge.TransformNonStream(data)
+	if errBridge != nil {
+		errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		return resp, errBridge
+	}
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, data, &param)
+	out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, converted, &param)
+	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+	}
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
+	if prepared.responseFormat == sdktranslator.FormatOpenAIResponse {
+		out = helps.EnsureResponsesUsageDetails(out)
+	}
 	return cliproxyexecutor.Response{Payload: out, Headers: headers}, nil
 }
 
-func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*xaiPreparedRequest, []byte, http.Header, error) {
+func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*xaiPreparedRequest, []byte, http.Header, *helps.UsageReporter, error) {
 	token, _ := xaiCreds(auth)
 	// Compact must not use xaiChatBaseURL: CLI chat-proxy returns 404 for
 	// /responses/compact and a 404 cools down the whole xAI auth pool.
@@ -133,14 +174,21 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 
 	prepared, err := e.prepareResponsesRequestTo(ctx, req, opts, false, sdktranslator.FormatOpenAIResponse)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	prepared.body, _ = sjson.DeleteBytes(prepared.body, "stream")
 	prepared.body, _ = sjson.DeleteBytes(prepared.body, "tools")
+	// Compact deletes tools after prepareResponsesRequestTo, which can now keep
+	// image_generation and rewrite its forced choice to "required" on grok-4.6+.
+	// Drop the leftover selection so compact does not send tool_choice without tools.
+	prepared.body = normalizeXAIToolChoiceForTools(prepared.body)
 	for _, field := range []string{"max_output_tokens", "temperature", "top_p", "top_k", "stop"} {
 		prepared.body, _ = sjson.DeleteBytes(prepared.body, field)
 	}
 	prepared.body = xaiRemoveInputItemsByType(prepared.body, "compaction_trigger")
+	if previousResponseID := strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String()); previousResponseID != "" {
+		prepared.body, _ = sjson.SetBytes(prepared.body, "previous_response_id", previousResponseID)
+	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -149,11 +197,11 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	requestURL := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(prepared.body))
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	// Official API / custom compact endpoints use standard API headers, not CLI
 	// chat-proxy identity headers (which applyXAIChatHeaders may still attach for OAuth chat).
-	applyXAIHeaders(httpReq, auth, token, false, prepared.sessionID)
+	applyXAIHeaders(httpReq, auth, token, false, prepared.sessionID, opts.Headers)
 	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -161,7 +209,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	defer func() {
 		if errClose := httpResp.Body.Close(); errClose != nil {
@@ -173,28 +221,28 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = xaiStatusErr(httpResp.StatusCode, data)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
-	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
-	reporter.EnsurePublished(ctx)
+	reporter.ObserveResponseModel(data)
 	clearXAIReasoningReplayAfterCompaction(ctx, prepared.replayScope)
-	return prepared, data, httpResp.Header.Clone(), nil
+	return prepared, data, httpResp.Header.Clone(), reporter, nil
 }
 
 func (e *XAIExecutor) executeCompactionTriggerStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-	prepared, data, headers, err := e.executeCompactRequest(ctx, auth, req, opts)
-	if err != nil {
-		return nil, err
+	prepared, data, headers, reporter, errCompactRequest := e.executeCompactRequest(ctx, auth, req, opts)
+	if errCompactRequest != nil {
+		return nil, errCompactRequest
 	}
 
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	headers = headers.Clone()
 	if headers == nil {
 		headers = make(http.Header)
@@ -303,6 +351,7 @@ func xaiBuildCompactionTriggerStreamChunks(prepared *xaiPreparedRequest, compact
 	donePayload, _ = sjson.SetRawBytes(donePayload, "item", item)
 	completedPayload := []byte(`{"type":"response.completed","sequence_number":5}`)
 	completedPayload, _ = sjson.SetRawBytes(completedPayload, "response", completedResponse)
+	completedPayload = helps.EnsureResponsesUsageDetails(completedPayload)
 
 	return [][]byte{
 		xaiBuildSSEFrame("response.created", createdPayload),

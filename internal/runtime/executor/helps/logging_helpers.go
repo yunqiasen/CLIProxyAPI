@@ -13,10 +13,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -57,6 +57,7 @@ type upstreamAttempt struct {
 	bodyHasContent       bool
 	prevWasSSEEvent      bool
 	errorWritten         bool
+	trailingNewlines     int
 }
 
 func requestLogCaptureEnabled(cfg *config.Config) bool {
@@ -402,6 +403,13 @@ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload
 	appendAPIWebsocketTimeline(ginCtx, []byte(builder.String()))
 }
 
+// AppendCodexAPIWebsocketResponse stores a codex upstream websocket response frame and merges any
+// quota event headers carried by the frame into the request log.
+func AppendCodexAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
+	logging.MergeResponseHeaders(ctx, ParseCodexQuotaEventHeaders(payload))
+	AppendAPIWebsocketResponse(ctx, cfg, payload)
+}
+
 // RecordAPIWebsocketError stores an upstream websocket error event in Gin context.
 func RecordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage string, err error) {
 	if !requestLogCaptureEnabled(cfg) || err == nil {
@@ -470,6 +478,17 @@ func ensureResponseIntro(ginCtx *gin.Context, attempt *upstreamAttempt) {
 	if attempt == nil || attempt.response == nil || attempt.responseIntroWritten {
 		return
 	}
+	attempts := getAttempts(ginCtx)
+	for i := len(attempts) - 1; i >= 0; i-- {
+		previousAttempt := attempts[i]
+		if previousAttempt == nil || previousAttempt == attempt || !previousAttempt.responseIntroWritten {
+			continue
+		}
+		if missingNewlines := 2 - previousAttempt.trailingNewlines; missingNewlines > 0 {
+			writeAttemptResponse(ginCtx, attempt, []byte(strings.Repeat("\n", missingNewlines)))
+		}
+		break
+	}
 	writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("=== API RESPONSE %d ===\n", attempt.index)))
 	writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano))))
 	writeAttemptResponse(ginCtx, attempt, []byte("\n"))
@@ -480,6 +499,14 @@ func writeAttemptResponse(ginCtx *gin.Context, attempt *upstreamAttempt, payload
 	if attempt == nil || len(payload) == 0 {
 		return
 	}
+	trailingNewlines := 0
+	for i := len(payload) - 1; i >= 0 && payload[i] == '\n'; i-- {
+		trailingNewlines++
+	}
+	if trailingNewlines == len(payload) {
+		trailingNewlines += attempt.trailingNewlines
+	}
+	attempt.trailingNewlines = trailingNewlines
 	if attempt.responseSource == nil {
 		attempt.responseSource = apiResponseSourceOrNil(ginCtx)
 	}
@@ -523,7 +550,7 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
 		return
 	}
 	var builder strings.Builder
-	for idx, attempt := range attempts {
+	for _, attempt := range attempts {
 		if attempt == nil || attempt.response == nil {
 			continue
 		}
@@ -532,12 +559,9 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
 			continue
 		}
 		builder.WriteString(responseText)
-		if !strings.HasSuffix(responseText, "\n") {
-			builder.WriteString("\n")
-		}
-		if idx < len(attempts)-1 {
-			builder.WriteString("\n")
-		}
+	}
+	if responseText := builder.String(); responseText != "" && !strings.HasSuffix(responseText, "\n") {
+		builder.WriteString("\n")
 	}
 	ginCtx.Set(apiResponseKey, []byte(builder.String()))
 }
@@ -552,52 +576,6 @@ func apiResponseSourceOrNil(ginCtx *gin.Context) *logging.FileBodySource {
 		return nil
 	}
 	return source
-}
-
-// Publication only protects per-context lock initialization; independent
-// requests never serialize their file I/O on this global mutex.
-var websocketTimelinePublicationMu sync.Mutex
-
-func appendAPIWebsocketTimeline(ginCtx *gin.Context, chunk []byte) {
-	if ginCtx == nil {
-		return
-	}
-	data := bytes.TrimSpace(chunk)
-	if len(data) == 0 {
-		return
-	}
-	websocketTimelinePublicationMu.Lock()
-	const lockKey = "CPA_API_WEBSOCKET_TIMELINE_MUTEX"
-	value, exists := ginCtx.Get(lockKey)
-	if !exists {
-		value = &sync.Mutex{}
-		ginCtx.Set(lockKey, value)
-	}
-	websocketTimelinePublicationMu.Unlock()
-	timelineMu := value.(*sync.Mutex)
-	timelineMu.Lock()
-	defer timelineMu.Unlock()
-	if source, ok := apiWebsocketTimelineSource(ginCtx); ok {
-		if errAppend := source.AppendPart(data); errAppend == nil {
-			return
-		} else {
-			log.WithError(errAppend).Warn("failed to append api websocket timeline log part")
-		}
-	}
-	if existing, exists := ginCtx.Get(apiWebsocketTimelineKey); exists {
-		if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
-			combined := make([]byte, 0, len(existingBytes)+len(data)+2)
-			combined = append(combined, existingBytes...)
-			if !bytes.HasSuffix(existingBytes, []byte("\n")) {
-				combined = append(combined, '\n')
-			}
-			combined = append(combined, '\n')
-			combined = append(combined, data...)
-			ginCtx.Set(apiWebsocketTimelineKey, combined)
-			return
-		}
-	}
-	ginCtx.Set(apiWebsocketTimelineKey, bytes.Clone(data))
 }
 
 func apiWebsocketTimelineSource(ginCtx *gin.Context) (*logging.FileBodySource, bool) {
@@ -649,25 +627,6 @@ func writeHeaders(builder *strings.Builder, headers http.Header) {
 			masked := util.MaskSensitiveHeaderValue(key, value)
 			builder.WriteString(fmt.Sprintf("%s: %s\n", key, masked))
 		}
-	}
-}
-
-// RequestLogProviderName returns the configured display name for request-log metadata.
-func RequestLogProviderName(auth *cliproxyauth.Auth) string {
-	if auth == nil {
-		return ""
-	}
-	if auth.Attributes != nil {
-		if name := strings.TrimSpace(auth.Attributes["provider_name"]); name != "" {
-			return name
-		}
-	}
-	label := strings.TrimSpace(auth.Label)
-	switch strings.ToLower(label) {
-	case "claude-apikey", "codex-apikey", "gemini-apikey", "interactions-apikey", "xai-apikey":
-		return ""
-	default:
-		return label
 	}
 }
 
@@ -799,4 +758,61 @@ func CreditsUsed(ctx context.Context) bool {
 		}
 	}
 	return false
+}
+
+// Publication only protects per-context lock initialization; independent
+// requests never serialize their file I/O on this global mutex.
+var websocketTimelinePublicationMu sync.Mutex
+
+func appendAPIWebsocketTimeline(ginCtx *gin.Context, chunk []byte) {
+	if ginCtx == nil {
+		return
+	}
+	data := bytes.TrimSpace(chunk)
+	if len(data) == 0 {
+		return
+	}
+	websocketTimelinePublicationMu.Lock()
+	const lockKey = "CPA_API_WEBSOCKET_TIMELINE_MUTEX"
+	value, exists := ginCtx.Get(lockKey)
+	if !exists {
+		value = &sync.Mutex{}
+		ginCtx.Set(lockKey, value)
+	}
+	websocketTimelinePublicationMu.Unlock()
+	timelineMu := value.(*sync.Mutex)
+	timelineMu.Lock()
+	defer timelineMu.Unlock()
+	if source, ok := apiWebsocketTimelineSource(ginCtx); ok {
+		if errAppend := source.AppendPart(data); errAppend == nil {
+			return
+		}
+	}
+	value, exists = ginCtx.Get(apiWebsocketTimelineKey)
+	if !exists {
+		ginCtx.Set(apiWebsocketTimelineKey, append([]byte(nil), data...))
+		return
+	}
+	timeline, _ := value.([]byte)
+	timeline = append(timeline, data...)
+	ginCtx.Set(apiWebsocketTimelineKey, timeline)
+}
+
+// RequestLogProviderName returns the configured display name for request-log metadata.
+func RequestLogProviderName(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if name := strings.TrimSpace(auth.Attributes["provider_name"]); name != "" {
+			return name
+		}
+	}
+	label := strings.TrimSpace(auth.Label)
+	switch strings.ToLower(label) {
+	case "claude-apikey", "codex-apikey", "gemini-apikey", "interactions-apikey", "xai-apikey":
+		return ""
+	default:
+		return label
+	}
 }

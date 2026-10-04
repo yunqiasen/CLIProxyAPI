@@ -12,17 +12,21 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 type responsesWebsocketForwardOptions struct {
-	toolCacheTurn *responsesWebsocketToolCacheTurn
-	suppressError func(*interfaces.ErrorMessage) bool
+	preserveCompletionOutput func() bool
+	duplexStream             func() bool
+	toolCacheTurn            *responsesWebsocketToolCacheTurn
+	suppressError            func(*interfaces.ErrorMessage) bool
+	keepAliveInterval        *time.Duration
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
@@ -41,6 +45,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	}
 	toolCacheTurn := opts.toolCacheTurn
 	completed := false
+	responseStarted := false
 	completedOutput := []byte("[]")
 	completedResponseID := ""
 	outputItemsByIndex := make(map[int64][]byte)
@@ -49,6 +54,19 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	downstreamSessionKey := ""
 	if c != nil && c.Request != nil {
 		downstreamSessionKey = websocketDownstreamSessionKey(c.Request)
+	}
+
+	var keepAliveTicker *time.Ticker
+	keepAliveInterval := time.Duration(0)
+	if h != nil {
+		keepAliveInterval = handlers.StreamingKeepAliveInterval(h.Cfg)
+	}
+	if opts.keepAliveInterval != nil {
+		keepAliveInterval = *opts.keepAliveInterval
+	}
+	if keepAliveInterval > 0 {
+		keepAliveTicker = time.NewTicker(keepAliveInterval)
+		defer keepAliveTicker.Stop()
 	}
 
 	forwardTerminalError := func(errMsg *interfaces.ErrorMessage) (*interfaces.ErrorMessage, error) {
@@ -85,11 +103,21 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		return errMsg, errTerminate
 	}
 
+	var keepAliveC <-chan time.Time
+	if keepAliveTicker != nil {
+		keepAliveC = keepAliveTicker.C
+	}
+
 	for {
 		select {
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, c.Request.Context().Err()
+		case <-keepAliveC:
+			if errPing := writer.writePing(); errPing != nil {
+				cancel(errPing)
+				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errPing
+			}
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
@@ -99,11 +127,19 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), forwardedError, errForward
 		case chunk, ok := <-data:
 			if !ok {
-				// Producers send errors before closing data. Keep the real error so
-				// credential replay and transport-close handling still run at EOF.
 				if errMsg, pending := handlers.PendingStreamError(errs); pending {
 					forwardedError, errForward := forwardTerminalError(errMsg)
 					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), forwardedError, errForward
+				}
+				if opts.duplexStream != nil && opts.duplexStream() {
+					// A duplex stream ends with its socket, not an individual response.
+					// The data channel may close before select observes its final error.
+					_, errClose := writer.closeWithoutError()
+					cancel(nil)
+					if errClose != nil {
+						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errClose
+					}
+					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, websocket.ErrCloseSent
 				}
 				if !completed {
 					errMsg := &interfaces.ErrorMessage{
@@ -122,12 +158,22 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				cancel(nil)
 				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, nil
 			}
+			if keepAliveTicker != nil && keepAliveInterval > 0 {
+				keepAliveTicker.Reset(keepAliveInterval)
+			}
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
+				if gjson.GetBytes(payloads[i], "type").String() == "response.created" {
+					responseStarted = true
+					completed = false
+					outputItemsByIndex = make(map[int64][]byte)
+					outputItemsFallback = nil
+					pendingToolCallIDs = make(map[string]struct{})
+				}
 				collectResponsesWebsocketOutputItem(payloads[i], outputItemsByIndex, &outputItemsFallback)
 				eventType := gjson.GetBytes(payloads[i], "type").String()
-				if isResponsesWebsocketCompletionEvent(eventType) {
+				if isResponsesWebsocketCompletionEvent(eventType) && (opts.preserveCompletionOutput == nil || !opts.preserveCompletionOutput()) {
 					payloads[i] = restoreResponsesWebsocketCompletionOutput(payloads[i], outputItemsByIndex, outputItemsFallback)
 				}
 				if toolCacheTurn != nil {
@@ -137,7 +183,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				}
 				recordPendingToolCallIDsFromPayload(pendingToolCallIDs, payloads[i])
 				var payloadErrMsg *interfaces.ErrorMessage
-				if eventType == wsEventTypeError {
+				// In Codex duplex mode the executor owns connection termination:
+				// payload errors after response.created are recoverable events;
+				// StreamChunk.Err still arrives through errs and closes the socket.
+				preserveErrorEvent := responseStarted && opts.duplexStream != nil && opts.duplexStream()
+				if eventType == wsEventTypeError && !preserveErrorEvent {
 					payloadErrMsg = responsesWebsocketErrorMessageFromPayload(payloads[i])
 					if h != nil {
 						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), payloadErrMsg)
@@ -208,18 +258,29 @@ func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 // shouldExposeResponsesUpstreamError reports whether a terminal upstream error
 // must reach the downstream client.
 //
-// Expose request-shape failures, exhausted billing budgets, and opted-in first-output
-// timeouts after credential retries finish. Preserve the explicit local timeout reason.
-// Transient credential, rate-limit and transport failures retain reconnect behavior;
-// a fresh connection implies a full context resend.
+// Only request-shape failures are exposed: the client can act on them and no
+// credential rotation or retry can make the request succeed. Credential, quota
+// and transport failures stay silent so the client simply reconnects and retries;
+// a fresh connection carries no server-side transcript, so reconnecting already
+// implies a full context resend.
 func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if errMsg == nil {
 		return false
 	}
+	if coreauth.IsTerminalAuthError(errMsg.Error) {
+		return true
+	}
 	status := responsesWebsocketErrorStatus(errMsg)
-	firstOutputTimeout := status == http.StatusGatewayTimeout && errMsg.Error != nil &&
-		gjson.Get(errMsg.Error.Error(), "error.code").String() == clienterror.CodeUpstreamResponseTimeout
-	return firstOutputTimeout || status == http.StatusPaymentRequired || clienterror.IsRequestFault(status, errMsg.Error)
+	if status == http.StatusGatewayTimeout && errMsg.Error != nil &&
+		gjson.Get(errMsg.Error.Error(), "error.code").String() == clienterror.CodeUpstreamResponseTimeout {
+		// Report the exhausted opt-in watch, not an unexplained reconnect loop.
+		return true
+	}
+	if status == http.StatusPaymentRequired {
+		// Exhausted billing budgets are useful terminal state, not a bare disconnect.
+		return true
+	}
+	return clienterror.IsRequestFault(status, errMsg.Error)
 }
 
 func writeResponsesWebsocketTerminalError(
@@ -551,7 +612,11 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		}
 	}
 
-	body := handlers.BuildErrorResponseBody(status, errText)
+	var errCause error
+	if errMsg != nil {
+		errCause = errMsg.Error
+	}
+	body := handlers.BuildErrorResponseBodyWithError(status, errText, errCause)
 	payload := []byte(`{}`)
 	var errSet error
 	payload, errSet = sjson.SetBytes(payload, "type", wsEventTypeError)

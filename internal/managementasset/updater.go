@@ -17,22 +17,23 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/httpfetch"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpfetch"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
 
 const (
-	defaultManagementReleaseURL  = "https://api.github.com/repos/yunqiasen/Cli-Proxy-API-Management-Center/releases/latest"
+	defaultManagementReleaseURL  = "https://api.github.com/repos/yunqiasen/Cli-Proxy-API-Management-Center/releases"
 	defaultManagementFallbackURL = "https://github.com/yunqiasen/Cli-Proxy-API-Management-Center/releases/latest/download/management.html"
 	managementAssetName          = "management.html"
 	httpUserAgent                = "CLIProxyAPI-management-updater"
 	managementSyncMinInterval    = 30 * time.Second
 	updateCheckInterval          = 3 * time.Hour
-	maxAssetDownloadSize         = 50 << 20 // 10 MB safety limit for management asset downloads
+	maxAssetDownloadSize         = 50 << 20 // 50 MB safety limit for management asset downloads
+	v8ReleaseTagPrefix           = "cpa-ui-v8-"
 )
 
 // ManagementFileName exposes the control panel asset filename.
@@ -139,6 +140,14 @@ type releaseResponse struct {
 	Assets []releaseAsset `json:"assets"`
 }
 
+// releaseListEntry represents a single entry in the GitHub releases list response.
+type releaseListEntry struct {
+	TagName    string         `json:"tag_name"`
+	Prerelease bool           `json:"prerelease"`
+	Draft      bool           `json:"draft"`
+	Assets     []releaseAsset `json:"assets"`
+}
+
 // StaticDir resolves the directory that stores the management control panel asset.
 func StaticDir(configFilePath string) string {
 	if override := strings.TrimSpace(os.Getenv("MANAGEMENT_STATIC_PATH")); override != "" {
@@ -184,6 +193,67 @@ func FilePath(configFilePath string) string {
 		return ""
 	}
 	return filepath.Join(dir, ManagementFileName)
+}
+
+// isDefaultForkRepo reports whether repo refers to (or defaults to) the known
+// fork repository yunqiasen/Cli-Proxy-API-Management-Center, for which V8
+// prerelease channel selection is used instead of the normal latest-release
+// resolution.
+func isDefaultForkRepo(repo string) bool {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return true
+	}
+	parsed, err := url.Parse(repo)
+	if err != nil || parsed.Host == "" {
+		return true
+	}
+	host := strings.ToLower(parsed.Host)
+	parts := strings.Split(strings.Trim(strings.ToLower(parsed.Path), "/"), "/")
+	if host == "api.github.com" && len(parts) > 0 && parts[0] == "repos" {
+		parts = parts[1:]
+	} else if host != "github.com" {
+		return false
+	}
+	if len(parts) < 2 || parts[0] != "yunqiasen" || strings.TrimSuffix(parts[1], ".git") != "cli-proxy-api-management-center" {
+		return false
+	}
+	// Explicit tag pins take precedence over the rolling compatibility channel.
+	if len(parts) >= 4 && parts[2] == "releases" && (parts[3] == "tag" || parts[3] == "tags") {
+		return false
+	}
+	return true
+}
+
+// resolveReleaseListURL converts a fork repository URL into the GitHub API
+// releases-list endpoint (returns an array of releases, newest first).
+func resolveReleaseListURL(repo string) string {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return defaultManagementReleaseURL
+	}
+	parsed, err := url.Parse(repo)
+	if err != nil || parsed.Host == "" {
+		return defaultManagementReleaseURL
+	}
+	host := strings.ToLower(parsed.Host)
+	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
+	if host == "github.com" {
+		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+		if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
+			repoName := strings.TrimSuffix(parts[1], ".git")
+			return fmt.Sprintf("https://api.github.com/repos/%s/%s/releases", parts[0], repoName)
+		}
+	}
+	if host == "api.github.com" {
+		lowered := strings.ToLower(parsed.Path)
+		if idx := strings.Index(lowered, "/releases"); idx >= 0 {
+			parsed.Path = parsed.Path[:idx] + "/releases"
+			return parsed.String()
+		}
+		return parsed.String() + "/releases"
+	}
+	return defaultManagementReleaseURL
 }
 
 // EnsureLatestManagementHTML checks the latest management.html asset and updates the local copy when needed.
@@ -239,7 +309,6 @@ func ensureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 			return nil, nil
 		}
 
-		releaseURL := resolveReleaseURL(panelRepository)
 		client := newHTTPClient(proxyURL)
 
 		localHash, err := fileSHA256(localPath)
@@ -250,8 +319,25 @@ func ensureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 			localHash = ""
 		}
 
-		asset, remoteHash, err := fetchLatestAsset(ctx, client, releaseURL)
+		v8Channel := isDefaultForkRepo(panelRepository)
+
+		var asset *releaseAsset
+		var remoteHash string
+		if v8Channel {
+			listURL := resolveReleaseListURL(panelRepository)
+			asset, remoteHash, err = fetchV8PrereleaseAsset(ctx, client, listURL)
+		} else {
+			releaseURL := resolveReleaseURL(panelRepository)
+			asset, remoteHash, err = fetchLatestAsset(ctx, client, releaseURL)
+		}
+
 		if err != nil {
+			if v8Channel {
+				// V8 channel: never fall back to incompatible V7 stable HTML.
+				// Preserve existing local bundle if present; leave missing file absent.
+				log.WithError(err).Warn("V8 prerelease channel fetch failed; preserving existing local asset if present")
+				return nil, nil
+			}
 			if localFileMissing {
 				log.WithError(err).Warn("failed to fetch latest management release information, trying fallback page")
 				if ensureFallbackManagementHTML(ctx, client, localPath) {
@@ -270,6 +356,10 @@ func ensureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 
 		data, downloadedHash, err := downloadAsset(ctx, client, asset.BrowserDownloadURL)
 		if err != nil {
+			if v8Channel {
+				log.WithError(err).Warn("V8 asset download failed; preserving existing local asset if present")
+				return nil, nil
+			}
 			if localFileMissing {
 				log.WithError(err).Warn("failed to download management asset, trying fallback page")
 				if ensureFallbackManagementHTML(ctx, client, localPath) {
@@ -318,6 +408,9 @@ func ensureFallbackManagementHTML(ctx context.Context, client *http.Client, loca
 	return true
 }
 
+// resolveReleaseURL converts a custom repository URL into a GitHub API
+// releases endpoint. Supports explicit tag URLs; otherwise defaults to
+// /releases/latest.
 func resolveReleaseURL(repo string) string {
 	repo = strings.TrimSpace(repo)
 	if repo == "" {
@@ -331,9 +424,23 @@ func resolveReleaseURL(repo string) string {
 
 	host := strings.ToLower(parsed.Host)
 	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
+	lowered := strings.ToLower(parsed.Path)
 
 	if host == "api.github.com" {
-		if !strings.HasSuffix(strings.ToLower(parsed.Path), "/releases/latest") {
+		// Accept explicit tag URLs as-is.
+		if strings.Contains(lowered, "/releases/tags/") {
+			return parsed.String()
+		}
+		// Already ends with /releases/latest.
+		if strings.HasSuffix(lowered, "/releases/latest") {
+			return parsed.String()
+		}
+		// Already ends with /releases (list endpoint).
+		if strings.HasSuffix(lowered, "/releases") {
+			return parsed.String() + "/latest"
+		}
+		// No releases segment yet.
+		if !strings.Contains(lowered, "/releases") {
 			parsed.Path = parsed.Path + "/releases/latest"
 		}
 		return parsed.String()
@@ -343,11 +450,66 @@ func resolveReleaseURL(repo string) string {
 		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
 		if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
 			repoName := strings.TrimSuffix(parts[1], ".git")
+			// Support explicit tag URLs: /org/repo/releases/tag/{tag}
+			if len(parts) >= 5 &&
+				strings.EqualFold(parts[2], "releases") &&
+				(strings.EqualFold(parts[3], "tag") || strings.EqualFold(parts[3], "tags")) {
+				return fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", parts[0], repoName, parts[4])
+			}
 			return fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", parts[0], repoName)
 		}
 	}
 
 	return defaultManagementReleaseURL
+}
+
+// fetchV8PrereleaseAsset lists GitHub releases (newest first) and selects the
+// latest published (non-draft) prerelease whose tag starts with cpa-ui-v8-
+// and whose asset name is exactly management.html. The digest is retained for
+// verification.
+func fetchV8PrereleaseAsset(ctx context.Context, client *http.Client, listURL string) (*releaseAsset, string, error) {
+	if strings.TrimSpace(listURL) == "" {
+		listURL = defaultManagementReleaseURL
+	}
+
+	headers := map[string]string{
+		"Accept":     "application/vnd.github+json",
+		"User-Agent": httpUserAgent,
+	}
+	if token := util.ResolveGitHubToken(); token != "" {
+		headers["Authorization"] = "Bearer " + token
+	}
+
+	data, err := httpfetch.GetBytes(ctx, client, listURL, headers, 0)
+	if err != nil {
+		return nil, "", fmt.Errorf("fetch release list: %w", err)
+	}
+
+	var releases []releaseListEntry
+	if err = json.Unmarshal(data, &releases); err != nil {
+		return nil, "", fmt.Errorf("decode release list: %w", err)
+	}
+
+	for i := range releases {
+		rel := &releases[i]
+		if rel.Draft {
+			continue
+		}
+		if !rel.Prerelease {
+			continue
+		}
+		if !strings.HasPrefix(rel.TagName, v8ReleaseTagPrefix) {
+			continue
+		}
+		for j := range rel.Assets {
+			asset := &rel.Assets[j]
+			if asset.Name == managementAssetName {
+				return asset, parseDigest(asset.Digest), nil
+			}
+		}
+	}
+
+	return nil, "", fmt.Errorf("no published prerelease with tag prefix %s and asset %s found", v8ReleaseTagPrefix, managementAssetName)
 }
 
 func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL string) (*releaseAsset, string, error) {
@@ -359,9 +521,8 @@ func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL strin
 		"Accept":     "application/vnd.github+json",
 		"User-Agent": httpUserAgent,
 	}
-	gitURL := strings.ToLower(strings.TrimSpace(os.Getenv("GITSTORE_GIT_URL")))
-	if tok := strings.TrimSpace(os.Getenv("GITSTORE_GIT_TOKEN")); tok != "" && strings.Contains(gitURL, "github.com") {
-		headers["Authorization"] = "Bearer " + tok
+	if token := util.ResolveGitHubToken(); token != "" {
+		headers["Authorization"] = "Bearer " + token
 	}
 
 	data, err := httpfetch.GetBytes(ctx, client, releaseURL, headers, 0)

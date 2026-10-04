@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 func TestAPIKeyClientProviderLoadIncludesMediaAuthCounts(t *testing.T) {

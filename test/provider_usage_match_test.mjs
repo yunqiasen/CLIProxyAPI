@@ -46,7 +46,11 @@ const mustContain = [
 ];
 
 for (const token of mustContain) {
-  assert.equal(source.includes(token), true, `${token} not found`);
+  // V8 renamed the usage endpoint; retain the legacy regression token and
+  // require its routed V8 equivalent rather than dropping coverage.
+  const present = source.includes(token) ||
+    (token === 'api-key-usage' && source.includes('/observability/usage/api-keys'));
+  assert.equal(present, true, `${token} not found`);
 }
 
 const mustNotContain = [

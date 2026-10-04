@@ -9,6 +9,7 @@ type NativeAPIKeyEntry struct {
 	APIKey   string `yaml:"api-key" json:"api-key"`
 	Priority *int   `yaml:"priority,omitempty" json:"priority,omitempty"`
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+	BaseURL  string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
 }
 
 // EffectiveNativeAPIKey contains the resolved per-key routing values used at runtime.
@@ -17,11 +18,12 @@ type EffectiveNativeAPIKey struct {
 	APIKey   string
 	Priority int
 	ProxyURL string
+	BaseURL  string
 	Index    int
 }
 
 // EffectiveNativeAPIKeys resolves grouped credentials, falling back to the legacy key.
-func EffectiveNativeAPIKeys(legacyKey string, defaultPriority int, defaultProxy string, entries []NativeAPIKeyEntry) []EffectiveNativeAPIKey {
+func EffectiveNativeAPIKeys(legacyKey string, defaultPriority int, defaultProxy string, entries []NativeAPIKeyEntry, baseURLs ...string) []EffectiveNativeAPIKey {
 	out := make([]EffectiveNativeAPIKey, 0, len(entries))
 	seen := make(map[string]struct{}, len(entries))
 	defaultProxy = strings.TrimSpace(defaultProxy)
@@ -42,16 +44,21 @@ func EffectiveNativeAPIKeys(legacyKey string, defaultPriority int, defaultProxy 
 		if proxyURL == "" {
 			proxyURL = defaultProxy
 		}
-		out = append(out, EffectiveNativeAPIKey{AuthID: strings.TrimSpace(entries[index].AuthID), APIKey: key, Priority: priority, ProxyURL: proxyURL, Index: index})
+		baseURL := strings.TrimSpace(entries[index].BaseURL)
+		out = append(out, EffectiveNativeAPIKey{AuthID: strings.TrimSpace(entries[index].AuthID), APIKey: key, Priority: priority, ProxyURL: proxyURL, BaseURL: baseURL, Index: index})
 	}
 	if len(out) > 0 {
 		return out
 	}
 	legacyKey = strings.TrimSpace(legacyKey)
 	if legacyKey == "" {
-		return nil
+		// A legacy endpoint may supply authentication through headers or a local proxy.
+		// Explicit empty credential groups still represent removal, not an anonymous route.
+		if len(entries) != 0 || len(baseURLs) == 0 || strings.TrimSpace(baseURLs[0]) == "" {
+			return nil
+		}
 	}
-	return []EffectiveNativeAPIKey{{APIKey: legacyKey, Priority: defaultPriority, ProxyURL: defaultProxy, Index: -1}}
+	return []EffectiveNativeAPIKey{{APIKey: legacyKey, Priority: defaultPriority, ProxyURL: defaultProxy, BaseURL: "", Index: -1}}
 }
 
 // NativeAPIKeyConfigEntry exposes the shared identity fields of grouped native providers.

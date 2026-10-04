@@ -12,14 +12,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // The proxy fixture preserves the actual provider URL without using the network.
@@ -79,7 +79,8 @@ func TestAnyRouterChannelCapacityDoesNotBlockOtherSessions(t *testing.T) {
 			}
 			manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
 			manager.SetConfig(cfg)
-			manager.SetRetryConfig(2, 0, 30)
+			// V8 counts additional retry rounds; use one round to test each key once.
+			manager.SetRetryConfig(0, 0, 30)
 			manager.RegisterExecutor(runtimeexecutor.NewCodexExecutor(cfg))
 			for _, a := range auths {
 				registry.GetGlobalRegistry().RegisterClient(a.ID, "codex", []*registry.ModelInfo{{ID: "cpa-6a"}})
@@ -135,7 +136,7 @@ func TestAnyRouterChannelCapacityDoesNotBlockOtherSessions(t *testing.T) {
 			}
 			var streamStatus cliproxyexecutor.StatusError
 			if !errors.As(err, &streamStatus) || streamStatus.StatusCode() != 502 {
-				t.Fatalf("stream capacity status = %v, want 502 after SSE failure", err)
+				t.Fatalf("stream capacity status = %v (%#v), want 502 after SSE failure", err, streamStatus)
 			}
 			mu.Lock()
 			streamKeys := append([]string(nil), streamCapacityKeys...)

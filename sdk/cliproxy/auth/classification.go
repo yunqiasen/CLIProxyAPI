@@ -17,6 +17,7 @@ const (
 	AttributeAuthKind                           = "auth_kind"
 	AttributeCodexAlphaSearch                   = "codex_alpha_search"
 	AttributeCodexDisableImageGeneration        = "disable_image_generation"
+	AttributeCodexDisableCloaking               = "codex_disable_cloaking"
 	AttributeResponsesFirstOutputTimeoutSeconds = "responses_first_output_timeout_seconds"
 	AttributeConfigIndex                        = "config_index"
 	AttributePath                               = "path"
@@ -38,11 +39,11 @@ func (a *Auth) AuthKind() string {
 	if kind := normalizeAuthKind(authMetadataString(a, AttributeAuthKind)); kind != "" {
 		return kind
 	}
-	if authAttribute(a, AttributeAPIKey) != "" {
-		return AuthKindAPIKey
-	}
 	if authHasOAuthMetadata(a) {
 		return AuthKindOAuth
+	}
+	if authAttribute(a, AttributeAPIKey) != "" {
+		return AuthKindAPIKey
 	}
 	return ""
 }
@@ -66,6 +67,9 @@ func (a *Auth) AuthSourceKind() string {
 		}
 		if normalized := normalizeAuthSourceKind(source); normalized != "" {
 			return normalized
+		}
+		if strings.HasPrefix(sourceLower, "config") {
+			return AuthSourceConfig
 		}
 		return AuthSourceFile
 	}

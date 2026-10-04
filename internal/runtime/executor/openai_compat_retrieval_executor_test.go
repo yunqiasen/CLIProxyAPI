@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	auth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	ex "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	tr "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	auth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	ex "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	tr "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func TestRetrievalRateLimitInformsSharedScheduler(t *testing.T) {

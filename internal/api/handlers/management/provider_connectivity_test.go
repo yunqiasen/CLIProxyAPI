@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
 
@@ -93,8 +93,8 @@ func TestProviderConnectivityTestClaudeUsesExecutorCompatibilityAndPinnedAuth(t 
 	if got := seenHeader.Get("x-api-key"); got != "" {
 		t.Fatalf("x-api-key = %q, want selected bearer credential only", got)
 	}
-	if got := seenHeader.Get("User-Agent"); !strings.HasPrefix(got, "claude-cli/2.1.220") {
-		t.Fatalf("User-Agent = %q, want Claude Code 2.1.220", got)
+	if got := seenHeader.Get("User-Agent"); !strings.HasPrefix(got, "claude-cli/2.1.280") {
+		t.Fatalf("User-Agent = %q, want Claude Code 2.1.280", got)
 	}
 	if got := seenHeader.Get("X-App"); got != "cli" {
 		t.Fatalf("X-App = %q, want cli", got)
@@ -111,7 +111,7 @@ func TestProviderConnectivityTestClaudeUsesExecutorCompatibilityAndPinnedAuth(t 
 	if got := gjson.GetBytes(seenBody, "model").String(); got != "claude-test" {
 		t.Fatalf("upstream model = %q, want claude-test", got)
 	}
-	if got := gjson.GetBytes(seenBody, "system.0.text").String(); !strings.Contains(got, "cc_version=2.1.220") {
+	if got := gjson.GetBytes(seenBody, "system.0.text").String(); !strings.Contains(got, "cc_version=2.1.280") {
 		t.Fatalf("Claude Code billing identity missing from body: %s", seenBody)
 	}
 }
@@ -145,7 +145,7 @@ func TestProviderConnectivityTestClaudeUsesUnsavedFormOverrides(t *testing.T) {
 	if errTest != nil || status != http.StatusOK || response.StatusCode != http.StatusOK {
 		t.Fatalf("response=%#v status=%d err=%v", response, status, errTest)
 	}
-	if got := gjson.GetBytes(seenBody, "system.0.text").String(); !strings.Contains(got, "cc_version=2.1.220") {
+	if got := gjson.GetBytes(seenBody, "system.0.text").String(); !strings.Contains(got, "cc_version=2.1.280") {
 		t.Fatalf("unsaved cloak override was not applied: %s", seenBody)
 	}
 }

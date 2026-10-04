@@ -37,7 +37,12 @@ func NormalizeResponsesHistory(body []byte, endpoint string) []byte {
 	if isAny {
 		discovery = portableResponsesToolSearchRecords(items)
 	}
-	astraHistory := gjson.GetBytes(body, "model").String() == "gpt-6-astra"
+	model := gjson.GetBytes(body, "model").String()
+	modelName := model
+	if suffix := strings.LastIndex(modelName, "-"); suffix > 0 {
+		modelName = modelName[:suffix]
+	}
+	astraHistory := model == "gpt-6-astra" || strings.HasPrefix(modelName, "gpt-6-astra")
 	kept := make([]json.RawMessage, 0, len(items))
 	changed := false
 	for i, item := range items {

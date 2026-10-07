@@ -76,7 +76,8 @@ type SDKConfig struct {
 
 // ClientConfig configures client-facing compatibility behavior.
 type ClientConfig struct {
-	Codex CodexClientConfig `yaml:"codex" json:"codex"`
+	ModelCatalog ModelCatalogPolicy `yaml:"model-catalog,omitempty" json:"model-catalog,omitempty"`
+	Codex        CodexClientConfig  `yaml:"codex" json:"codex"`
 }
 
 // CodexClientConfig configures Codex client compatibility and the model catalog.

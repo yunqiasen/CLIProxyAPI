@@ -11,6 +11,7 @@ type SDKConfig = internalconfig.SDKConfig
 type Config = internalconfig.Config
 
 type ClientConfig = internalconfig.ClientConfig
+type ModelCatalogPolicy = internalconfig.ModelCatalogPolicy
 type CodexClientConfig = internalconfig.CodexClientConfig
 type StreamingConfig = internalconfig.StreamingConfig
 type ClaudeCodeConfig = internalconfig.ClaudeCodeConfig

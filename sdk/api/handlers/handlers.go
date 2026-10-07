@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -361,6 +362,7 @@ func setGenerateMetadata(meta map[string]any, rawJSON []byte) {
 // It holds a pool of clients to interact with the backend service and manages
 // load balancing, client selection, and configuration.
 type BaseAPIHandler struct {
+	catalogPolicy atomic.Pointer[config.ModelCatalogPolicy]
 	// AuthManager manages auth lifecycle and execution in the new architecture.
 	AuthManager *coreauth.Manager
 
@@ -385,10 +387,9 @@ type BaseAPIHandler struct {
 // Returns:
 //   - *BaseAPIHandler: A new API handlers instance
 func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *BaseAPIHandler {
-	return &BaseAPIHandler{
-		Cfg:         cfg,
-		AuthManager: authManager,
-	}
+	h := &BaseAPIHandler{AuthManager: authManager}
+	h.UpdateClients(cfg)
+	return h
 }
 
 // UpdateClients updates the handlers' client list and configuration.
@@ -397,7 +398,29 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 // Parameters:
 //   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
-func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) { h.Cfg = cfg }
+func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) {
+	h.Cfg = cfg
+	var policy config.ModelCatalogPolicy
+	if cfg != nil {
+		policy = cfg.Client.ModelCatalog
+	}
+	normalized, err := policy.Normalized()
+	if err == nil {
+		h.catalogPolicy.Store(&normalized)
+	}
+}
+
+// CatalogDisplayPolicy returns a snapshot independent of concurrent reloads.
+func (h *BaseAPIHandler) CatalogDisplayPolicy() config.ModelCatalogPolicy {
+	if h != nil {
+		if p := h.catalogPolicy.Load(); p != nil {
+			clone, _ := p.Normalized()
+			return clone
+		}
+	}
+	p, _ := (config.ModelCatalogPolicy{}).Normalized()
+	return p
+}
 
 // SetPluginHost configures the optional plugin interceptor host.
 func (h *BaseAPIHandler) SetPluginHost(host PluginInterceptorHost) {

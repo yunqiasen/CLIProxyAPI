@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelcatalog"
 	"maps"
 	"net/http"
 	"strings"
@@ -719,6 +721,14 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 			}
 		}
 		lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
+	}
+
+	original := body
+	body = modelcatalog.Transform(body, h.CatalogDisplayPolicy())
+	if !bytes.Equal(original, body) {
+		for _, name := range []string{"Content-Length", "ETag", "Content-MD5", "Digest"} {
+			c.Writer.Header().Del(name)
+		}
 	}
 
 	if c.Writer.Header().Get("Content-Type") == "" {

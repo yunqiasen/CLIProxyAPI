@@ -312,6 +312,10 @@ POST /v1/audio/transcriptions
 4. 推送到分支（`git push origin feature/amazing-feature`）
 5. 打开 Pull Request
 
+## 原生模型列表展示管理
+
+在「中心信息 → 模型列表 → 管理展示」手动配置全局隐藏、恢复、通配符、置顶和升降序。隐藏仅影响公开列表，已知模型名仍可直接调用；未配置时保持现状，无需安装插件。详见[配置与兼容说明](docs/native-model-catalog.md)。
+
 ## Fork 与分支规范
 
 这个仓库按 `router-for-me/CLIProxyAPI` 的 fork 来维护。

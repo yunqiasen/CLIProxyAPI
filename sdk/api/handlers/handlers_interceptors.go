@@ -683,6 +683,11 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 		}
 	}
 
+	if c.Request != nil && c.Request.Context().Value(modelCatalogCaptureKey{}) == true {
+		c.Data(http.StatusOK, "application/json; charset=utf-8", body)
+		return
+	}
+
 	rawResponseHeaders := http.Header{
 		"Content-Type": []string{"application/json; charset=utf-8"},
 	}

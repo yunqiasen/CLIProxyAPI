@@ -321,6 +321,14 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
+## Native Model Catalog Display
+
+Center Info → Model List → Manage Display provides global, manual model hiding,
+restoration, wildcard rules, ordered pinning and optional ascending/descending
+sorting. Hidden models remain directly callable; unconfigured installations keep
+their existing catalog behavior. No plugin is required. See [configuration and
+compatibility](docs/native-model-catalog.md).
+
 ## Fork And Branch Workflow
 
 This repository is maintained as a fork of `router-for-me/CLIProxyAPI`.

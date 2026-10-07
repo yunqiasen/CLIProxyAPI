@@ -165,7 +165,9 @@ func Transform(body []byte, p config.ModelCatalogPolicy) []byte {
 	if err != nil {
 		return body
 	}
-	if key == "data" {
+	var hasMore bool
+	knownClaude := json.Unmarshal(root["has_more"], &hasMore) == nil && string(root["has_more"]) != "null"
+	if key == "data" && knownClaude {
 		for _, field := range []string{"first_id", "last_id"} {
 			if _, exists := root[field]; !exists {
 				continue
@@ -196,4 +198,69 @@ func compact(v any) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
+}
+
+// Entry describes a catalog item without exposing provider credentials.
+type Entry struct {
+	ID          string   `json:"id"`
+	Label       string   `json:"label"`
+	Format      string   `json:"format"`
+	Hidden      bool     `json:"hidden"`
+	HiddenRules []string `json:"hidden_rules"`
+	PinnedRules []string `json:"pinned_rules"`
+	Position    int      `json:"position"`
+}
+
+// View is the backend-owned preview shared with management clients.
+type View struct {
+	Format           string                    `json:"format"`
+	Policy           config.ModelCatalogPolicy `json:"policy"`
+	Entries          []Entry                   `json:"entries"`
+	VisibleIDs       []string                  `json:"visible_ids"`
+	Counts           Counts                    `json:"counts"`
+	ModelSortEnabled bool                      `json:"model_sort_enabled"`
+}
+
+type Counts struct {
+	Total   int `json:"total"`
+	Visible int `json:"visible"`
+	Hidden  int `json:"hidden"`
+}
+
+// Inspect computes the same curation as Transform while retaining hidden entries.
+func Inspect(body []byte, p config.ModelCatalogPolicy, format string) (View, error) {
+	p, err := p.Normalized()
+	if err != nil {
+		return View{}, err
+	}
+	_, _, items, err := parse(body)
+	if err != nil {
+		return View{}, err
+	}
+	rows := curate(items, p)
+	result := View{Format: format, Policy: p, Entries: make([]Entry, 0, len(items)), VisibleIDs: make([]string, 0, len(rows)), Counts: Counts{Total: len(items), Visible: len(rows), Hidden: len(items) - len(rows)}}
+	positions := make(map[int]int, len(rows))
+	for i, row := range rows {
+		positions[row.index] = i
+		result.VisibleIDs = append(result.VisibleIDs, row.id)
+	}
+	for _, row := range items {
+		hiddenRules, pinnedRules := matching(p.Hidden, row), matching(p.Pinned, row)
+		position, visible := positions[row.index]
+		if !visible {
+			position = -1
+		}
+		label := row.id
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal(row.raw, &fields)
+		for _, key := range []string{"display_name", "displayName", "name"} {
+			var text string
+			if json.Unmarshal(fields[key], &text) == nil && text != "" {
+				label = text
+				break
+			}
+		}
+		result.Entries = append(result.Entries, Entry{ID: row.id, Label: label, Format: format, Hidden: !visible, HiddenRules: hiddenRules, PinnedRules: pinnedRules, Position: position})
+	}
+	return result, nil
 }

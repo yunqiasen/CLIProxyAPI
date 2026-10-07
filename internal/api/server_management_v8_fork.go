@@ -5,6 +5,8 @@ import "github.com/gin-gonic/gin"
 // registerManagementV8ForkRoutes retains fork operations on the authenticated
 // v8 group. Configuration writes inherit the group's v8 migration context.
 func (s *Server) registerManagementV8ForkRoutes(v8 *gin.RouterGroup) {
+	v8.GET("/models/catalog", s.modelCatalogInventory)
+	v8.POST("/models/catalog/preview", s.modelCatalogPreview)
 	v8.POST("/provider-connectivity-test", s.mgmt.ProviderConnectivityTest)
 	v8.POST("/quota-refresh-jobs", s.mgmt.StartQuotaRefreshJob)
 	v8.GET("/quota-refresh-jobs/:id", s.mgmt.GetQuotaRefreshJob)

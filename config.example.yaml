@@ -274,6 +274,11 @@ requests:
 
 # Client-facing compatibility settings apply to both OAuth and API-key routes.
 client:
+  # Discovery only: known hidden models remain callable. Rules are global and manual.
+  model-catalog:
+    order: preserve # preserve (default), asc, desc
+    hidden: [] # Exact client-facing IDs or * patterns, including future matches
+    pinned: [] # Ordered IDs/patterns; hiding wins over pinning
   codex:
     # When false (default), only models that natively declare freeform apply_patch advertise it.
     # When true, non-template and bridged models supported by every routing executor also advertise "freeform".

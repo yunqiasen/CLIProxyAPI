@@ -1754,3 +1754,46 @@ func TestApplyRequestInterceptors_ReadOnlyInterceptorDoesNotReallocatePayload_Is
 		t.Fatal("applyRequestInterceptorsBeforeAuth reallocated opts.OriginalRequest when interceptor did not mutate body")
 	}
 }
+
+func TestModelCatalogNativePolicyRunsAfterPluginsAndInvalidatesBodyHeaders(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{Client: sdkconfig.ClientConfig{ModelCatalog: sdkconfig.ModelCatalogPolicy{Order: "asc", Hidden: []string{"plugin-hidden"}}}}, nil)
+	completed := 0
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			headers := cloneHeader(req.ResponseHeaders)
+			for _, name := range []string{"Content-Length", "ETag", "Content-MD5", "Digest"} {
+				headers.Set(name, "stale")
+			}
+			headers.Set("X-Plugin-Catalog", "preserved")
+			return pluginapi.ResponseInterceptResponse{Headers: headers, Body: []byte(`{"data":[{"id":"z"},{"id":"plugin-hidden"},{"id":"a"}]}`)}
+		},
+		completeRequest: func(_ context.Context, completion pluginapi.RequestCompletion) {
+			if completion.Outcome != pluginapi.RequestCompletionSucceeded {
+				t.Error("plugin lifecycle failed")
+			}
+			completed++
+		},
+	})
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest("GET", "/v1/models", nil)
+	handler.WriteModelListResponse(ctx, "openai", []byte(`{"data":[{"id":"removed-by-plugin"}]}`))
+	if rec.Body.String() != `{"data":[{"id":"a"},{"id":"z"}]}` {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+	for _, name := range []string{"Content-Length", "ETag", "Content-MD5", "Digest"} {
+		if rec.Header().Get(name) != "" {
+			t.Fatalf("stale %s retained", name)
+		}
+	}
+	if rec.Header().Get("X-Plugin-Catalog") != "preserved" || completed != 1 {
+		t.Fatal("plugin header or lifecycle lost")
+	}
+	// Trusted inventory capture uses the original builder, not either presentation stage.
+	body, status := CaptureModelCatalog(ctx, func(c *gin.Context) {
+		handler.WriteModelListResponse(c, "openai", []byte(`{"data":[{"id":"removed-by-plugin"}]}`))
+	})
+	if status != 200 || string(body) != `{"data":[{"id":"removed-by-plugin"}]}` || completed != 1 {
+		t.Fatalf("capture=%d %s completed=%d", status, body, completed)
+	}
+}

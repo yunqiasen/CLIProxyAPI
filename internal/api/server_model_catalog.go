@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -32,8 +33,11 @@ func (s *Server) modelCatalogView(c *gin.Context, preview bool) {
 		err := decoder.Decode(&input)
 		if err == nil {
 			var extra any
-			if decoder.Decode(&extra) != io.EOF {
-				err = io.ErrUnexpectedEOF
+			if trailingErr := decoder.Decode(&extra); trailingErr != io.EOF {
+				err = trailingErr
+				if err == nil {
+					err = errors.New("unexpected trailing JSON value")
+				}
 			}
 		}
 		if err != nil || input.Policy == nil {

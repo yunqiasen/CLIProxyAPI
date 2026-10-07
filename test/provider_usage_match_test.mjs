@@ -4,6 +4,10 @@ import fs from 'node:fs';
 const source = fs.readFileSync(new URL('../static/management.html', import.meta.url), 'utf8');
 
 const mustContain = [
+  '/models/catalog',
+  '/config/client/model-catalog',
+  'model_catalog.manage_display',
+  'mc-hidden-rules',
   'api-key-usage',
   'success_details',
   'failure_details',

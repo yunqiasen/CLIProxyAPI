@@ -40,7 +40,11 @@ A hide-all rule returns an empty list, not a request-denial policy.
 The editor uses a management-only inventory rather than the filtered public list.
 It retains hidden entries, displays the matching rules and previews the native
 result on the backend. Save persists only this policy; Cancel does not persist.
-Settings reload without recompilation or a container restart.
+Settings reload without recompilation or a container restart. Save is enabled after
+a draft edit. If a persisted policy is still awaiting runtime activation, the
+editor keeps a backend draft preview and offers **Refresh** to check activation
+without repeating the write. Refresh also retries failed inventory reads. Starting
+a new draft clears the previous save status so it is not presented as applied.
 
 For an exact hide rule, restore removes the matching rule. For wildcard-hidden
 entries, edit the shown matching rules explicitly: removing a wildcard can reveal
@@ -104,3 +108,6 @@ upstreams, and concurrent policy snapshots. UI coverage verifies serialization,
 draft actions, connection isolation and localized controls; browser acceptance
 covers interactive hiding/restoration and ordering with fixture configuration.
 The production configuration is not edited for these tests.
+
+See [verification and review dispositions](native-model-catalog-verification.md)
+for the recorded test coverage and reviewed edge cases.

@@ -99,3 +99,42 @@ func TestModelCatalogManagementInventoryAndPreview(t *testing.T) {
 		t.Fatalf("preview mutated state or public bypass=%s", rec.Body.String())
 	}
 }
+
+func TestModelCatalogGrokInventoryUsesGrokBuilder(t *testing.T) {
+	cfg, err := config.ParseConfigBytes([]byte("api-keys: [catalog-key]\nremote-management: {secret-key: catalog-manager}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newTestServerWithConfig(t, cfg, WithLocalManagementPassword("catalog-manager"))
+	registerCatalogFixtures(t, "catalog-grok-label", "openai", &registry.ModelInfo{ID: "grok-fixture", DisplayName: "Grok Display Label", ContextLength: 32768})
+	public := catalogRequest(t, server, "GET", "/v1/models", "", "catalog-key", "User-Agent", "grok-shell/1.0")
+	if public.Code != 200 || !strings.Contains(public.Body.String(), `"api_backend":"responses"`) || !strings.Contains(public.Body.String(), `"context_window":32768`) {
+		t.Fatalf("grok public=%s", public.Body.String())
+	}
+	for _, tc := range []struct{ method, path, body string }{
+		{"GET", "/v8/management/models/catalog?format=grok", ""},
+		{"POST", "/v8/management/models/catalog/preview", `{"format":"grok","policy":{}}`},
+	} {
+		rec := catalogRequest(t, server, tc.method, tc.path, tc.body, "catalog-manager")
+		var view struct{ Entries []struct{ ID, Label string } }
+		if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Code != 200 || len(view.Entries) != 1 || view.Entries[0].ID != "grok-fixture" || view.Entries[0].Label != "Grok Display Label" {
+			t.Fatalf("grok inventory lost builder metadata: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestModelCatalogInventoryWithNilPluginMap(t *testing.T) {
+	cfg, err := config.ParseConfigBytes([]byte("api-keys: [catalog-key]\nremote-management: {secret-key: catalog-manager}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Plugins.Configs = nil
+	server := newTestServerWithConfig(t, cfg, WithLocalManagementPassword("catalog-manager"))
+	rec := catalogRequest(t, server, "GET", "/v8/management/models/catalog", "", "catalog-manager")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"model_sort_enabled":false`) {
+		t.Fatalf("nil plugin map: %d %s", rec.Code, rec.Body.String())
+	}
+}

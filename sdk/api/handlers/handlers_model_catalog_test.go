@@ -43,3 +43,32 @@ func TestModelCatalogConcurrentReloadUsesWholeSnapshot(t *testing.T) {
 		t.Fatal("snapshot aliases runtime policy")
 	}
 }
+
+func TestModelCatalogCaptureImplementsOptionalWriterMethods(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest("GET", "/v1/models", nil)
+	var closed <-chan bool
+	body, status := handlers.CaptureModelCatalog(c, func(copied *gin.Context) {
+		conn, reader, err := copied.Writer.Hijack()
+		if err == nil || conn != nil || reader != nil {
+			t.Fatal("capture must not hijack the real connection")
+		}
+		if copied.Writer.Pusher() != nil {
+			t.Fatal("capture must not push real responses")
+		}
+		closed = copied.Writer.CloseNotify()
+		if closed == nil {
+			t.Fatal("missing capture lifecycle channel")
+		}
+		copied.Data(200, "application/json", []byte(`{"data":[]}`))
+	})
+	if status != 200 || string(body) != `{"data":[]}` || rec.Body.Len() != 0 {
+		t.Fatal("capture leaked to the real writer")
+	}
+	select {
+	case <-closed:
+	default:
+		t.Fatal("capture lifecycle was not released")
+	}
+}

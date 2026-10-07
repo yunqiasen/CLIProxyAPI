@@ -3488,7 +3488,7 @@ func TestHomeApplyPatchCapabilityForModel(t *testing.T) {
 }
 
 // newHomeCatalogClient serves the existing Home models protocol without new metadata.
-func newHomeCatalogClient(t *testing.T, payload string) *home.Client {
+func newHomeCatalogClient(t *testing.T, payload string, observers ...func([]byte)) *home.Client {
 	t.Helper()
 	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
 	if errListen != nil {
@@ -3532,6 +3532,9 @@ func newHomeCatalogClient(t *testing.T, payload string) *home.Client {
 						if errUnmarshal := json.Unmarshal(args[1], &request); errUnmarshal != nil || request.Type != "models" {
 							t.Errorf("unexpected Home request %q: %v", args[1], errUnmarshal)
 							return
+						}
+						for _, observe := range observers {
+							observe(args[1])
 						}
 						response = fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)
 					}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/mediarouting"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -625,6 +626,11 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time) (priorityAuths, selectorAuths []*Auth, err error) {
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
 	schedulerAcross := m.pluginSchedulerWantsAcrossPrioritiesLocked()
+	// Match the weighted scheduler: an excluded high-priority key must not
+	// hide positive-weight keys in lower tiers on route-aware media paths.
+	if _, weighted := selector.(*WeightedRoundRobinSelector); weighted {
+		auths = positiveWeightAuths(auths)
+	}
 
 	if !sessionAffinity && !schedulerAcross {
 		priorityAuths, err = m.availableAuthsForRouteModel(auths, provider, routeModel, now)
@@ -1005,6 +1011,10 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 }
 
 func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
+	if _, _, mediaRoute := mediarouting.ParseSelectionKey(routeModel); mediaRoute {
+		_, _, supported := m.mediaOperationRoute(auth, routeModel)
+		return supported
+	}
 	if registryRef == nil || auth == nil {
 		return true
 	}
@@ -1724,6 +1734,9 @@ func (m *Manager) advanceSyncedVersion(version uint64) {
 }
 
 func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) bool {
+	if _, _, mediaRoute := mediarouting.ParseSelectionKey(routeModel); mediaRoute {
+		return true
+	}
 	if auth == nil || strings.TrimSpace(routeModel) == "" {
 		return false
 	}

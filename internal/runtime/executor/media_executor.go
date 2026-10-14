@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/mediarouting"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -90,7 +90,12 @@ func (e *MediaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		operationPath = expandMediaPathModel(operation.Path, upstreamModel)
 	}
 
-	payload, contentType, errPayload := prepareMediaPayload(req.Payload, opts.Headers.Get("Content-Type"), payloadOperation, upstreamModel)
+	wireRequest, errAdapt := helps.AdaptMediaRequest(provider, operation, upstreamModel, req.Payload, opts.Headers.Get("Content-Type"))
+	if errAdapt != nil {
+		return resp, errAdapt
+	}
+	payloadOperation.RequestFormat = wireRequest.RequestFormat
+	payload, contentType, errPayload := prepareMediaPayload(wireRequest.Payload, wireRequest.ContentType, payloadOperation, upstreamModel)
 	if errPayload != nil {
 		return resp, errPayload
 	}
@@ -110,6 +115,15 @@ func (e *MediaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if errSubmit != nil {
 		return resp, errSubmit
 	}
+	taskID := ""
+	if operation.Async != nil {
+		taskID = strings.TrimSpace(gjson.GetBytes(body, operation.Async.TaskIDPath).String())
+	}
+	defer func() {
+		if err != nil {
+			err = &helps.MediaCommittedError{TaskID: taskID, Cause: err}
+		}
+	}()
 	normalizeOperation := operation
 	if operation.Async != nil {
 		body, headers, err = e.pollAsyncOperation(ctx, httpClient, auth, apiKey, baseURL, operation, body)
@@ -120,6 +134,15 @@ func (e *MediaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			normalizeOperation.ResultPath = resultPath
 		}
 	}
+	envelope := body
+	adaptedBody, adapted, errAdaptResult := helps.AdaptMediaResult(wireRequest, body, headers)
+	if errAdaptResult != nil {
+		return resp, statusErr{code: http.StatusBadGateway, msg: errAdaptResult.Error()}
+	}
+	body = adaptedBody
+	if adapted {
+		normalizeOperation.ResponseFormat = config.MediaResponsePassthrough
+	}
 	body, err = normalizeMediaResponse(normalizeOperation, body)
 	if err != nil {
 		return resp, err
@@ -127,13 +150,18 @@ func (e *MediaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if normalizeOperation.ResponseFormat == config.MediaResponseJSONURL || normalizeOperation.ResponseFormat == config.MediaResponseJSONBase64 {
 		headers.Set("Content-Type", "application/json")
 	}
+	resultState, errResult := helps.InspectMediaResult(provider.Kind, normalizeOperation, envelope, body, headers)
+	if errResult != nil {
+		return resp, statusErr{code: http.StatusBadGateway, msg: errResult.Error()}
+	}
+	headers.Set(helps.MediaResultHeader, resultState)
 	// Response normalization can change the payload size; never forward the
 	// submit/poll Content-Length for the rewritten body.
 	headers.Del("Content-Length")
 	headers.Set("Content-Length", strconv.Itoa(len(body)))
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	reporter.EnsurePublished(ctx)
-	return cliproxyexecutor.Response{Payload: body, Headers: headers}, nil
+	return cliproxyexecutor.Response{Payload: body, Headers: headers, Metadata: map[string]any{cliproxyexecutor.MediaResultMetadataKey: resultState}}, nil
 }
 
 func resolveMediaOperation(provider *config.MediaProvider, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (config.MediaOperation, string, error) {
@@ -346,6 +374,11 @@ func (e *MediaExecutor) executeHTTPRequest(ctx context.Context, client *http.Cli
 	}
 	if errRead != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		// A successful HTTP status acknowledges the submission even when its
+		// response body is truncated. Replaying may create a second paid job.
+		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+			return nil, headers, &helps.MediaCommittedError{Cause: errRead}
+		}
 		return nil, headers, errRead
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
@@ -368,6 +401,9 @@ func mediaApplicationError(body []byte) error {
 	okResult := gjson.GetBytes(body, "ok")
 	successFailed := successResult.Raw == "false" || okResult.Raw == "false"
 	status := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "status").String()))
+	if status == "" {
+		status = strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "state").String()))
+	}
 	statusFailed := mediaApplicationFailureStatus(status)
 	explicitSuccess := successResult.Raw == "true" || okResult.Raw == "true" || mediaApplicationSuccessStatus(status)
 	errorResult := gjson.GetBytes(body, "error")
@@ -743,19 +779,7 @@ func (e *MediaExecutor) resolveProvider(auth *cliproxyauth.Auth) *config.MediaPr
 }
 
 func resolveMediaModel(provider *config.MediaProvider, requested string) string {
-	requested = thinking.ParseSuffix(strings.TrimSpace(requested)).ModelName
-	if provider == nil || requested == "" {
-		return requested
-	}
-	for i := range provider.Models {
-		model := provider.Models[i]
-		if strings.EqualFold(strings.TrimSpace(model.Alias), requested) || strings.EqualFold(strings.TrimSpace(model.Name), requested) {
-			if name := strings.TrimSpace(model.Name); name != "" {
-				return name
-			}
-		}
-	}
-	return requested
+	return mediarouting.ResolveModel(provider, requested)
 }
 
 func mediaCredentials(auth *cliproxyauth.Auth, provider *config.MediaProvider) (baseURL, apiKey string) {

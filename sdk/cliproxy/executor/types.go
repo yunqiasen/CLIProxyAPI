@@ -36,6 +36,9 @@ const MediaOperationMetadataKey = "media_operation"
 // MediaModelMetadataKey stores the client-requested media model without using it for auth selection.
 const MediaModelMetadataKey = "media_model"
 
+// MediaResultMetadataKey carries executor-validated media completion, not an upstream header.
+const MediaResultMetadataKey = "media_result"
+
 // GenerateMetadataKey stores whether the client requested actual generation for usage logs.
 // Missing or true means generation is enabled; only an explicit false disables generation.
 const GenerateMetadataKey = "generate"

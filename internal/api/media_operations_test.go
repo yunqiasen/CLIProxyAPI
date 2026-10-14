@@ -35,6 +35,7 @@ func newMediaOperationTestContext(t *testing.T, server *Server, method, path, co
 func registerMediaOperationRuntime(t *testing.T, cfg *config.Config, provider config.MediaProvider, keys ...string) *coreauth.Manager {
 	t.Helper()
 	manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
+	manager.SetConfig(cfg)
 	providerKey := util.MediaProviderKey(provider.Kind, provider.Name)
 	manager.RegisterExecutor(runtimeexecutor.NewMediaExecutor(providerKey, cfg))
 	for i, key := range keys {

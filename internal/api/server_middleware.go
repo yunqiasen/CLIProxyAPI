@@ -18,6 +18,7 @@ var corsExposedResponseHeaders = []string{
 	logging.CPATraceIDHeader,
 	"X-CPA-VERSION",
 	"X-CPA-COMMIT",
+	"X-CPA-Media-Result",
 	"X-CPA-BUILD-DATE",
 	"X-CPA-SUPPORT-PLUGIN",
 	"X-CPA-HOME-VERSION",

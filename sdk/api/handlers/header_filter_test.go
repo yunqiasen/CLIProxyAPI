@@ -57,3 +57,12 @@ func TestFilterUpstreamHeaders_ReturnsNilWhenAllHeadersBlocked(t *testing.T) {
 		t.Fatalf("expected nil when all headers are filtered, got %#v", filtered)
 	}
 }
+
+func TestFilterUpstreamHeadersBlocksSpoofedMediaResult(t *testing.T) {
+	for _, name := range []string{"X-CPA-Media-Result", "x-cpa-media-result"} {
+		filtered := FilterUpstreamHeaders(http.Header{name: {"completed"}})
+		if len(filtered) > 0 {
+			t.Fatalf("accepted upstream completion marker: %v", filtered)
+		}
+	}
+}

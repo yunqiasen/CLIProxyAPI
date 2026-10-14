@@ -101,6 +101,38 @@ func (h *Handler) PutMediaProviders(c *gin.Context) {
 	}
 }
 
+// PostMediaProvider appends one provider atomically without replacing concurrent edits.
+func (h *Handler) PostMediaProvider(c *gin.Context) {
+	var provider config.MediaProvider
+	if err := c.ShouldBindJSON(&provider); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	// A create request always receives new identities, never borrowed auth indexes.
+	provider.AuthID = ""
+	for i := range provider.APIKeyEntries {
+		provider.APIKeyEntries[i].AuthID = ""
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		h.cfg = &config.Config{}
+	}
+	providers := append(append([]config.MediaProvider(nil), h.cfg.MediaProviders...), provider)
+	if err := validateMediaProviders(providers); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	candidate := &config.Config{MediaProviders: providers}
+	candidate.SanitizeMediaProviders()
+	if len(candidate.MediaProviders) != len(providers) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid media provider"})
+		return
+	}
+	h.cfg.MediaProviders = prepareMediaProviderAuthIDs(h.cfg.MediaProviders, candidate.MediaProviders)
+	h.persistLocked(c)
+}
+
 // PatchMediaProviders replaces one media provider. PUT remains the preferred full-list operation.
 func (h *Handler) PatchMediaProviders(c *gin.Context) {
 	var body struct {
@@ -468,6 +500,11 @@ func validateMediaProviders(providers []config.MediaProvider) error {
 	seenProviders := make(map[string]int, len(providers))
 	for i := range providers {
 		provider := providers[i]
+		switch strings.ToLower(strings.TrimSpace(provider.Adapter)) {
+		case "", "auto", "passthrough", "cloudflare-workers-ai", "mimo-audio":
+		default:
+			return fmt.Errorf("media-providers[%d].adapter is invalid", i)
+		}
 		kind := strings.ToLower(strings.TrimSpace(provider.Kind))
 		if kind != config.MediaKindImage && kind != config.MediaKindVideo && kind != config.MediaKindAudio {
 			return fmt.Errorf("media-providers[%d].kind is invalid", i)
@@ -488,6 +525,9 @@ func validateMediaProviders(providers []config.MediaProvider) error {
 		seenKeys := make(map[string]int, len(provider.APIKeyEntries))
 		for j := range provider.APIKeyEntries {
 			entry := provider.APIKeyEntries[j]
+			if err := config.ValidateCredentialWeight(entry.Weight); err != nil {
+				return fmt.Errorf("media-providers[%d].api-key-entries[%d].weight: %w", i, j, err)
+			}
 			key := strings.TrimSpace(entry.APIKey)
 			if key == "" {
 				return fmt.Errorf("media-providers[%d].api-key-entries[%d].api-key is required", i, j)

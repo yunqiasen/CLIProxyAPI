@@ -44,8 +44,8 @@ func validateCredentialWeightYAML(data []byte) error {
 			}
 			continue
 		}
-		if name == "openai-compatibility" {
-			if errValidate := validateOpenAICompatibilityWeightNodes(value); errValidate != nil {
+		if name == "openai-compatibility" || name == "media-providers" {
+			if errValidate := validateNestedCredentialWeightNodes(value, name); errValidate != nil {
 				return errValidate
 			}
 		}
@@ -88,7 +88,7 @@ func validateWeightMappingNode(mapping *yaml.Node, path string) error {
 	return nil
 }
 
-func validateOpenAICompatibilityWeightNodes(sequence *yaml.Node) error {
+func validateNestedCredentialWeightNodes(sequence *yaml.Node, family string) error {
 	if sequence == nil || sequence.Kind != yaml.SequenceNode {
 		return nil
 	}
@@ -100,7 +100,7 @@ func validateOpenAICompatibilityWeightNodes(sequence *yaml.Node) error {
 			if provider.Content[index].Value != "api-key-entries" {
 				continue
 			}
-			path := fmt.Sprintf("openai-compatibility[%d].api-key-entries", providerIndex)
+			path := fmt.Sprintf("%s[%d].api-key-entries", family, providerIndex)
 			if errValidate := validateWeightSequenceNode(provider.Content[index+1], path); errValidate != nil {
 				return errValidate
 			}
@@ -157,5 +157,13 @@ func (cfg *Config) ValidateCredentialWeights() error {
 			}
 		}
 	}
+	for providerIndex := range cfg.MediaProviders {
+		for keyIndex, entry := range cfg.MediaProviders[providerIndex].APIKeyEntries {
+			if errValidate := ValidateCredentialWeight(entry.Weight); errValidate != nil {
+				return fmt.Errorf("media-providers[%d].api-key-entries[%d].weight: %w", providerIndex, keyIndex, errValidate)
+			}
+		}
+	}
+
 	return nil
 }

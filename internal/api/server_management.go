@@ -168,6 +168,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/openai-compatibility", s.mgmt.DeleteOpenAICompat)
 
 		mgmt.GET("/media-providers", s.mgmt.GetMediaProviders)
+		mgmt.POST("/media-providers", s.mgmt.PostMediaProvider)
 		mgmt.PUT("/media-providers", s.mgmt.PutMediaProviders)
 		mgmt.PATCH("/media-providers", s.mgmt.PatchMediaProviders)
 		mgmt.DELETE("/media-providers", s.mgmt.DeleteMediaProviders)

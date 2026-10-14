@@ -3,6 +3,8 @@ package handlers
 import (
 	"net/http"
 	"strings"
+
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 // gatewayHeaderPrefixes lists header name prefixes injected by known AI gateway
@@ -44,6 +46,7 @@ var cpaReservedResponseHeaders = map[string]struct{}{
 	"Access-Control-Expose-Headers":    {},
 	"Access-Control-Max-Age":           {},
 	"X-Cpa-Trace-Id":                   {},
+	"X-Cpa-Media-Result":               {},
 }
 
 // IsCPAReservedResponseHeader reports whether a downstream response header is managed by CPA.
@@ -121,4 +124,18 @@ func WriteUpstreamHeaders(dst http.Header, src http.Header) {
 			dst.Add(key, v)
 		}
 	}
+}
+
+// WithMediaResultHeader exposes only the executor's validated completion state.
+// It runs after upstream/plugin filtering, independently of header passthrough.
+func WithMediaResultHeader(headers http.Header, metadata map[string]any) http.Header {
+	state, _ := metadata[coreexecutor.MediaResultMetadataKey].(string)
+	switch state {
+	case "completed", "pending", "unverified":
+		if headers == nil {
+			headers = make(http.Header)
+		}
+		headers.Set("X-CPA-Media-Result", state)
+	}
+	return headers
 }

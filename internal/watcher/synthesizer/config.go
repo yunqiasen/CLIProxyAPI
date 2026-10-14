@@ -402,6 +402,7 @@ func (s *ConfigSynthesizer) synthesizeMediaProviders(ctx *SynthesisContext) []*c
 			if priority != 0 || entry.Priority != nil || provider.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(priority)
 			}
+			addWeightToAttrs(entry.Weight, attrs)
 			addConfigHeadersToAttrs(provider.Headers, attrs)
 			metadata := map[string]any{}
 			if provider.DisableCooling {

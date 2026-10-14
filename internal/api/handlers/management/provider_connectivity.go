@@ -32,6 +32,9 @@ type providerConnectivityClaudeCloak struct {
 }
 
 type providerConnectivityTestRequest struct {
+	MediaConfig             json.RawMessage                  `json:"media_config"`
+	MediaOperation          string                           `json:"media_operation"`
+	MediaRequest            *mediaConnectivityRequest        `json:"media_request"`
 	OpenAIConfig            json.RawMessage                  `json:"openai_config"`
 	CodexConfig             json.RawMessage                  `json:"codex_config"`
 	Provider                string                           `json:"provider"`
@@ -71,6 +74,12 @@ func (h *Handler) ProviderConnectivityTest(c *gin.Context) {
 
 func (h *Handler) performProviderConnectivityTest(ctx context.Context, body providerConnectivityTestRequest) (providerConnectivityTestResponse, int, error) {
 	provider := strings.ToLower(strings.TrimSpace(body.Provider))
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if provider == "media" {
+		return h.performMediaConnectivityTest(ctx, body)
+	}
 	requestedModel := strings.TrimSpace(body.Model)
 	if requestedModel == "" {
 		return providerConnectivityTestResponse{}, http.StatusBadRequest, fmt.Errorf("missing model")

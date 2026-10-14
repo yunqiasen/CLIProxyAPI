@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/mediarouting"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	sdkhandlers "github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -76,11 +77,12 @@ func (s *Server) handleMediaOperationFor(c *gin.Context, kind, operationName str
 		requestPath = c.Request.URL.Path
 	}
 	metadata := map[string]any{
-		coreexecutor.MediaKindMetadataKey:      kind,
-		coreexecutor.MediaOperationMetadataKey: operationName,
-		coreexecutor.MediaModelMetadataKey:     requestedModel,
-		coreexecutor.RequestPathMetadataKey:    requestPath,
-		coreexecutor.RequestedModelMetadataKey: requestedModel,
+		coreexecutor.MediaKindMetadataKey:          kind,
+		coreexecutor.MediaOperationMetadataKey:     operationName,
+		coreexecutor.MediaModelMetadataKey:         requestedModel,
+		coreexecutor.RequestPathMetadataKey:        requestPath,
+		coreexecutor.RequestedModelMetadataKey:     requestedModel,
+		coreexecutor.AuthSelectionModelMetadataKey: mediarouting.SelectionKey(operationName, requestedModel),
 	}
 	if requestedModel != "" {
 		logging.SetGinRequestModel(c, requestedModel)
@@ -90,7 +92,7 @@ func (s *Server) handleMediaOperationFor(c *gin.Context, kind, operationName str
 		ctx = context.Background()
 	}
 	ctx = context.WithValue(ctx, "gin", c)
-	req := coreexecutor.Request{Payload: body}
+	req := coreexecutor.Request{Model: requestedModel, Payload: body}
 	if c.Request != nil {
 		req.Payload = body
 	}
@@ -109,7 +111,8 @@ func (s *Server) handleMediaOperationFor(c *gin.Context, kind, operationName str
 		return
 	}
 
-	sdkhandlers.WriteUpstreamHeaders(c.Writer.Header(), resp.Headers)
+	responseHeaders := sdkhandlers.WithMediaResultHeader(sdkhandlers.FilterUpstreamHeaders(resp.Headers), resp.Metadata)
+	sdkhandlers.WriteUpstreamHeaders(c.Writer.Header(), responseHeaders)
 	if c.Writer.Header().Get("Content-Type") == "" {
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "multipart/") {
 			c.Header("Content-Type", "application/json")
@@ -231,69 +234,15 @@ func mediaProviderKey(provider *config.MediaProvider) string {
 }
 
 func findMediaOperation(provider *config.MediaProvider, requested string) (config.MediaOperation, bool) {
-	if provider == nil {
-		return config.MediaOperation{}, false
-	}
-	requested = normalizeMediaOperationName(requested)
-	for i := range provider.Operations {
-		operation := provider.Operations[i]
-		if normalizeMediaOperationName(operation.Name) == requested {
-			return operation, true
-		}
-	}
-	for i := range provider.Operations {
-		operation := provider.Operations[i]
-		if normalizeMediaOperationName(operation.Capability) == requested {
-			return operation, true
-		}
-	}
-	return config.MediaOperation{}, false
-}
-
-func normalizeMediaOperationName(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	value = strings.ReplaceAll(value, "_", "-")
-	return value
+	return mediarouting.FindOperation(provider, requested)
 }
 
 func mediaOperationAcceptsModel(provider *config.MediaProvider, operation config.MediaOperation, requested string) bool {
-	requested = strings.TrimSpace(requested)
-	if operation.ModelMode == config.MediaModelNone {
-		// A model-free operation still must not capture a request that explicitly
-		// names a model served by another provider, so only accept the request when
-		// the provider declares no models or declares the requested one.
-		if requested == "" || len(provider.Models) == 0 {
-			return true
-		}
-		return mediaProviderDeclaresModel(provider, requested)
-	}
-	if requested == "" {
-		return operation.ModelMode != config.MediaModelRequired || strings.TrimSpace(operation.Model) != ""
-	}
-	if strings.TrimSpace(operation.Model) != "" || len(provider.Models) == 0 {
-		return true
-	}
-	capability := config.MediaOperationCapability(operation)
-	for i := range provider.Models {
-		model := provider.Models[i]
-		if !strings.EqualFold(strings.TrimSpace(model.Name), requested) && !strings.EqualFold(strings.TrimSpace(model.Alias), requested) {
-			continue
-		}
-		if capability == "" || len(model.Capabilities) == 0 || config.HasMediaCapability(model, capability) {
-			return true
-		}
-	}
-	return false
+	return mediarouting.AcceptsModel(provider, operation, requested)
 }
 
 func mediaProviderDeclaresModel(provider *config.MediaProvider, requested string) bool {
-	for i := range provider.Models {
-		model := provider.Models[i]
-		if strings.EqualFold(strings.TrimSpace(model.Name), requested) || strings.EqualFold(strings.TrimSpace(model.Alias), requested) {
-			return true
-		}
-	}
-	return false
+	return mediarouting.DeclaresModel(provider, requested)
 }
 
 func mediaRequestedModel(body []byte, contentType string, query url.Values) string {

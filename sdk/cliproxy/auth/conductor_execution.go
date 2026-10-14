@@ -648,6 +648,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if isCredentialScopedError(errExec) {
 					result.CredentialScope = true
 				}
+				if isRequestStopError(errExec) {
+					m.recordAvailabilityNeutralResult(execCtx, result)
+					return cliproxyexecutor.Response{}, errExec
+				}
 				action, okAction := matchRequestScopedErrorAction(auth, errExec, m.runtimeConfigSnapshot())
 				applyRequestScopedActionToResult(action, okAction, &result)
 				if isResponsesCompactAvailabilityNeutralError(execOpts, errExec, result.Error) {

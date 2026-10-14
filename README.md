@@ -220,7 +220,7 @@ Revert the feature commits, restore the previous management UI bundle, and remov
 
 ## Media Providers
 
-The forked management panel adds dedicated **Image Providers**, **Video Providers**, and **Audio Providers** entries. All three use the shared `media-providers` configuration and the same provider workflow as OpenAI-compatible providers: display name, Base URL, prefix, shared headers, provider priority, cooldown control, multiple keys, per-key priority/proxy, model aliases, and connectivity testing.
+The forked management panel adds dedicated **Image Providers**, **Video Providers**, and **Audio Providers** entries. All three use the shared `media-providers` configuration and the same provider workflow as OpenAI-compatible providers: display name, Base URL, prefix, shared headers, provider priority, cooldown control, multiple keys, per-key priority/weight/proxy, model aliases, and connectivity testing.
 
 ```yaml
 request-log: true # required for structured successful-request history and provider totals
@@ -280,12 +280,14 @@ Operation controls:
 - `async` submits once and polls the configured task endpoint with the same selected credential until a success/failure status is reached.
 - Omit `api-key-entries` for upstreams that do not use credentials. Providers with multiple keys use the existing priority, retry, cooldown, and failover scheduler.
 
-Existing image models under `openai-compatibility` keep working unchanged. Move one only when it needs the dedicated media operation controls. See the complete image/video/audio examples in [`config.example.yaml`](config.example.yaml). Management CRUD is available at `/v0/management/media-providers`.
+Existing image models under `openai-compatibility` keep working unchanged. Move one only when it needs the dedicated media operation controls. See the complete image/video/audio examples in [`config.example.yaml`](config.example.yaml). Management CRUD is available at `/v8/management/media-providers`, with `/v0/management/media-providers` retained for legacy clients.
 
 `request-log: true` enables structured successful-request records used by the request-log page and provider success totals. `request-log-retention-days` controls their retention (`7` by default, `0` forever). Failed attempts continue to feed live retry statistics even when structured request logging is off.
 The media form has two separate test buttons: per-key upstream testing and **Test CPA API**, which calls the public CPA route with the selected operation/model and writes a structured request log. The request-log table shows both the requested model and the concrete provider name, including model-free operations as `无需模型`.
 
 Hot-reload edits to a provider name, Base URL, key, model, or operation retain each existing key's stable identity and success/failure totals. A newly added key receives its own independent usage identity.
+
+Media probes now share the production executor and test one selected key with the unsaved draft. Cloudflare Workers AI and MiMo audio have explicit protocol adapters. Completion validation rejects empty/pending results without treating optional empty base64 fields beside valid URLs as errors. Accepted tasks are not resubmitted after polling or result failures. See [Media Provider Compatibility](docs/media-provider-compatibility.md) for routing, adapters and the MiMo transcription template.
 
 ## Management API
 

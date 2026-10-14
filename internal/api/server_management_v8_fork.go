@@ -20,6 +20,7 @@ func (s *Server) registerManagementV8ForkRoutes(v8 *gin.RouterGroup) {
 	v8.POST("/auth-files/download-zip", s.mgmt.DownloadAuthFilesZip)
 	v8.POST("/management-panel/update", s.mgmt.PostManagementPanelUpdate)
 	v8.GET("/media-providers", s.mgmt.GetMediaProviders)
+	v8.POST("/media-providers", s.mgmt.PostMediaProvider)
 	v8.PUT("/media-providers", s.mgmt.PutMediaProviders)
 	v8.PATCH("/media-providers", s.mgmt.PatchMediaProviders)
 	v8.DELETE("/media-providers", s.mgmt.DeleteMediaProviders)

@@ -202,6 +202,9 @@ func (m *Manager) ResolveExecutionModel(auth *Auth, routeModel string) string {
 }
 
 func (m *Manager) selectionModelForAuth(auth *Auth, routeModel string) string {
+	if _, state, ok := m.mediaOperationRoute(auth, routeModel); ok {
+		return state
+	}
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	if strings.TrimSpace(requestedModel) == "" {
 		requestedModel = strings.TrimSpace(routeModel)
@@ -272,6 +275,9 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 }
 
 func (m *Manager) stateModelForExecution(auth *Auth, routeModel, upstreamModel string, pooled bool) string {
+	if _, state, ok := m.mediaOperationRoute(auth, routeModel); ok {
+		return state
+	}
 	if auth != nil && auth.Attributes != nil {
 		if homeModel := strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]); homeModel != "" {
 			if resolved := strings.TrimSpace(upstreamModel); resolved != "" {
@@ -330,6 +336,9 @@ func (m *Manager) preparedExecutionModelsWithAlias(auth *Auth, routeModel string
 
 func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
 	routing := m.loadAPIKeyModelRouting()
+	if model, _, ok := m.mediaOperationRoute(auth, routeModel); ok {
+		return []string{model}, false, OAuthModelAliasResult{}, routing
+	}
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	aliasResult := m.resolveExecutionAliasResultForRequestedWithRouting(routing, auth, requestedModel)
 	if aliasResult.ForceMapping && auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes[homeForceMappingAttributeKey]), "true") {

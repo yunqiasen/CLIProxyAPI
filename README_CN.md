@@ -211,7 +211,7 @@ claude-api-key:
 
 ## 媒体供应商
 
-二开管理面板在 AI 供应商下新增独立的**图片供应商**、**视频供应商**、**音频供应商**入口。三类入口共用 `media-providers` 配置，操作方式和 OpenAI 兼容供应商保持一致：供应商名称、Base URL、前缀、共享请求头、供应商优先级、冷却控制、多 Key、Key 独立优先级/代理、模型别名和连接测试。
+二开管理面板在 AI 供应商下新增独立的**图片供应商**、**视频供应商**、**音频供应商**入口。三类入口共用 `media-providers` 配置，操作方式和 OpenAI 兼容供应商保持一致：供应商名称、Base URL、前缀、共享请求头、供应商优先级、冷却控制、多 Key、Key 独立优先级/权重/代理、模型别名和连接测试。
 
 ```yaml
 request-log: true # 结构化成功请求历史和供应商统计需要开启此项
@@ -271,12 +271,14 @@ POST /v1/audio/transcriptions
 - `async` 先提交任务，再用同一个 Key 轮询任务接口，直到命中成功或失败状态。
 - 上游不使用凭证时省略 `api-key-entries`。多 Key 供应商复用现有的优先级、重试、冷却和故障切换逻辑。
 
-原有 `openai-compatibility` 图片模型继续正常使用。只有需要媒体专属操作配置时再迁移。完整图片/视频/音频示例见 [`config.example.yaml`](config.example.yaml)，管理 CRUD 接口为 `/v0/management/media-providers`。
+原有 `openai-compatibility` 图片模型继续正常使用。只有需要媒体专属操作配置时再迁移。完整图片/视频/音频示例见 [`config.example.yaml`](config.example.yaml)，管理 CRUD 接口为 `/v8/management/media-providers`，保留 `/v0/management/media-providers` 兼容已有客户端。
 
 `request-log: true` 用于生成请求日志页面和供应商成功统计所需的结构化成功请求记录。`request-log-retention-days` 控制保留时长（默认 `7` 天，`0` 为永久）；即使关闭结构化请求日志，失败重试仍计入实时统计。
 媒体供应商表单里的两个测试按钮职责不同：每个 Key 的“测试”只测上游；**测试 CPA API** 会带着当前选择的操作/模型调用 CPA 对外接口，并写入结构化请求日志。请求日志表同时显示请求模型和具体供应商；不需要模型的接口显示为 `无需模型`。
 
 管理面板热加载保存供应商名称、Base URL、Key、模型或操作配置时，会保留已有 Key 的稳定身份以及成功/失败统计；新增 Key 会创建独立统计身份。
+
+媒体测试复用正式执行器，使用草稿配置测试单个选中 Key。新增 Cloudflare Workers AI、MiMo 音频协议适配。空结果和等待中的任务单独判定，合法 URL 旁的空 base64 字段保留兼容；任务已受理后，轮询或结果处理失败会停止重提。路由、协议和 MiMo 识别模板见 [媒体供应商兼容说明](docs/media-provider-compatibility.md)。
 
 ## 管理 API 文档
 

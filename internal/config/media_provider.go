@@ -43,6 +43,7 @@ type MediaProvider struct {
 	// AuthID is an internal stable runtime identity retained across management edits.
 	AuthID         string `yaml:"auth-id,omitempty" json:"auth-index,omitempty"`
 	Name           string `yaml:"name" json:"name"`
+	Adapter        string `yaml:"adapter,omitempty" json:"adapter,omitempty"`
 	Kind           string `yaml:"kind" json:"kind"`
 	BaseURL        string `yaml:"base-url" json:"base-url"`
 	Priority       int    `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -65,6 +66,7 @@ type MediaAPIKeyEntry struct {
 	AuthID   string `yaml:"auth-id,omitempty" json:"auth-index,omitempty"`
 	APIKey   string `yaml:"api-key" json:"api-key"`
 	Priority *int   `yaml:"priority,omitempty" json:"priority,omitempty"`
+	Weight   *int   `yaml:"weight,omitempty" json:"weight,omitempty"`
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
 }
 
@@ -183,6 +185,7 @@ func (cfg *Config) SanitizeMediaProviders() {
 		provider := cfg.MediaProviders[i]
 		provider.AuthID = strings.TrimSpace(provider.AuthID)
 		provider.Name = strings.TrimSpace(provider.Name)
+		provider.Adapter = strings.ToLower(strings.TrimSpace(provider.Adapter))
 		provider.Kind = strings.ToLower(strings.TrimSpace(provider.Kind))
 		provider.BaseURL = strings.TrimRight(strings.TrimSpace(provider.BaseURL), "/")
 		provider.Prefix = normalizeModelPrefix(provider.Prefix)

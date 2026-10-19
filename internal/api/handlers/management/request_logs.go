@@ -192,6 +192,10 @@ func (h *Handler) GetRequestLogs(c *gin.Context) {
 		return
 	}
 
+	if c.Request.Context().Err() != nil {
+		return
+	}
+
 	dir := h.logDirectory()
 	if strings.TrimSpace(dir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
@@ -232,6 +236,9 @@ func (h *Handler) GetRequestLogs(c *gin.Context) {
 			c.JSON(http.StatusOK, response)
 			return
 		}
+		if c.Request.Context().Err() != nil {
+			return
+		}
 		storageError = fmt.Sprintf("failed to list sqlite request logs: %v", errList)
 	} else if startupError != "" {
 		storageError = fmt.Sprintf("failed to open sqlite request log store: %s", startupError)
@@ -258,6 +265,9 @@ func (h *Handler) GetRequestLogs(c *gin.Context) {
 		filtered := make([]requestLogCandidate, 0, len(candidates))
 		lowerQuery := strings.ToLower(query)
 		for _, candidate := range candidates {
+			if c.Request.Context().Err() != nil {
+				return
+			}
 			parsed, errParse := parseRequestLogFile(candidate)
 			if errParse != nil {
 				if strings.Contains(strings.ToLower(candidate.name), lowerQuery) || strings.Contains(strings.ToLower(errParse.Error()), lowerQuery) {
@@ -283,6 +293,9 @@ func (h *Handler) GetRequestLogs(c *gin.Context) {
 
 	items := make([]requestLogListItem, 0, end-offset)
 	for _, candidate := range candidates[offset:end] {
+		if c.Request.Context().Err() != nil {
+			return
+		}
 		parsed, errParse := parseRequestLogFile(candidate)
 		if errParse != nil {
 			items = append(items, requestLogListItem{

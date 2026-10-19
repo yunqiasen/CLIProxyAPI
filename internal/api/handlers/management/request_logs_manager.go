@@ -317,5 +317,11 @@ func (m *requestLogIndexManager) sync(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := m.store.backfillSearch(ctx, m.batchSize); err != nil {
+		return err
+	}
+	if err := m.store.pruneSearchTexts(ctx); err != nil {
+		return err
+	}
 	return errors.Join(parseErrors...)
 }

@@ -44,6 +44,7 @@ func openRequestLogStore(logDir string) (*requestLogStore, error) {
 	path := filepath.Join(logDir, requestLogDBFilename)
 	query := url.Values{}
 	query.Add("_pragma", "busy_timeout(5000)")
+	query.Set("_txlock", "immediate")
 	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -124,7 +125,10 @@ CREATE INDEX IF NOT EXISTS idx_request_log_entries_success ON request_log_entrie
 	if err != nil {
 		return err
 	}
-	return s.ensureSchemaColumns(ctx)
+	if err := s.ensureSchemaColumns(ctx); err != nil {
+		return err
+	}
+	return s.ensureSearchSchema(ctx)
 }
 
 func (s *requestLogStore) ensureSchemaColumns(ctx context.Context) error {
@@ -218,7 +222,7 @@ type requestLogExecer interface {
 }
 
 func (s *requestLogStore) upsertParsed(ctx context.Context, parsed parsedRequestLog, candidate requestLogCandidate) error {
-	return upsertParsedWithExecer(ctx, s.db, parsed, candidate)
+	return s.upsertParsedBatch(ctx, []parsedRequestLogCandidate{{parsed: parsed, candidate: candidate}})
 }
 
 func upsertParsedWithExecer(ctx context.Context, execer requestLogExecer, parsed parsedRequestLog, candidate requestLogCandidate) error {
@@ -309,6 +313,13 @@ func (s *requestLogStore) upsertParsedBatch(ctx context.Context, batch []parsedR
 		if err := upsertParsedWithExecer(ctx, tx, item.parsed, item.candidate); err != nil {
 			return err
 		}
+		parsed := item.parsed
+		if err := upsertRequestLogSearch(ctx, tx, parsed.ID, []string{parsed.prompt, parsed.output, parsed.error, parsed.promptMetadata.SystemPrompt}); err != nil {
+			return err
+		}
+	}
+	if err := updateRequestLogSearchReady(ctx, tx); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -447,15 +458,47 @@ type requestLogQueryOptions struct {
 }
 
 func (s *requestLogStore) list(ctx context.Context, opts requestLogQueryOptions) ([]requestLogListItem, int, error) {
-	where, args := requestLogWhereClause(opts.Query)
-	countQuery := "SELECT COUNT(1) FROM request_log_entries" + where
-	var total int
-	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+	// Readiness, count and page must observe one snapshot while the indexer writes.
+	// ReadOnly selects a deferred transaction instead of reserving the writer lock.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
 		return nil, 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	where, args := requestLogWhereClause(opts.Query)
+	var total int
+	indexed := false
+	if strings.TrimSpace(opts.Query) != "" {
+		var err error
+		indexed, err = requestLogSearchReady(ctx, tx)
+		if err != nil {
+			return nil, 0, fmt.Errorf("read request log search readiness: %w", err)
+		}
+	}
+	if indexed {
+		ids, count, err := requestLogSearchPage(ctx, tx, opts)
+		if err != nil {
+			return nil, 0, fmt.Errorf("search request log page: %w", err)
+		}
+		total = count
+		if len(ids) == 0 {
+			return []requestLogListItem{}, total, nil
+		}
+		where = " WHERE id IN (" + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + ")"
+		args = make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+		opts.Offset = 0
+	} else {
+		countQuery := "SELECT COUNT(1) FROM request_log_entries" + where
+		if err := tx.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
 	}
 	queryArgs := append([]any{}, args...)
 	queryArgs = append(queryArgs, opts.Limit, opts.Offset)
-	rows, err := s.db.QueryContext(ctx, `SELECT COALESCE(id, ''), COALESCE(name, ''), COALESCE(size, 0), COALESCE(modified, 0), COALESCE(timestamp_text, ''), COALESCE(url, ''), COALESCE(method, ''), COALESCE(model, ''), COALESCE(NULLIF(TRIM(provider_name), ''), COALESCE(provider, '')), COALESCE(auth_id, ''), COALESCE(auth_type, ''), COALESCE(upstream_url, ''), COALESCE(upstream_model, ''), COALESCE(channel_model, ''), COALESCE(ip, ''), COALESCE(ip_location, ''), COALESCE(status, 0), COALESCE(success, 0), COALESCE(prompt_preview, ''), COALESCE(output_preview, ''), COALESCE(error_preview, ''), COALESCE(tool_preview, ''), COALESCE(system_prompt_preview, ''), COALESCE(called_tools_preview, ''), COALESCE(session_id, ''), COALESCE(thread_id, ''), COALESCE(turn_id, ''), COALESCE(has_error, 0) FROM request_log_entries`+where+` ORDER BY timestamp_unix DESC, name DESC LIMIT ? OFFSET ?`, queryArgs...)
+	rows, err := tx.QueryContext(ctx, `SELECT COALESCE(id, ''), COALESCE(name, ''), COALESCE(size, 0), COALESCE(modified, 0), COALESCE(timestamp_text, ''), COALESCE(url, ''), COALESCE(method, ''), COALESCE(model, ''), COALESCE(NULLIF(TRIM(provider_name), ''), COALESCE(provider, '')), COALESCE(auth_id, ''), COALESCE(auth_type, ''), COALESCE(upstream_url, ''), COALESCE(upstream_model, ''), COALESCE(channel_model, ''), COALESCE(ip, ''), COALESCE(ip_location, ''), COALESCE(status, 0), COALESCE(success, 0), COALESCE(prompt_preview, ''), COALESCE(output_preview, ''), COALESCE(error_preview, ''), COALESCE(tool_preview, ''), COALESCE(system_prompt_preview, ''), COALESCE(called_tools_preview, ''), COALESCE(session_id, ''), COALESCE(thread_id, ''), COALESCE(turn_id, ''), COALESCE(has_error, 0) FROM request_log_entries`+where+` ORDER BY timestamp_unix DESC, name DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -523,10 +566,25 @@ func (s *requestLogStore) detailWithCutoff(ctx context.Context, id string, cutof
 }
 
 func (s *requestLogStore) export(ctx context.Context, w io.Writer, opts requestLogQueryOptions, format string) error {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
 	where, args := requestLogWhereClause(opts.Query)
+	if strings.TrimSpace(opts.Query) != "" {
+		ready, err := requestLogSearchReady(ctx, tx)
+		if err != nil {
+			return fmt.Errorf("read request log export search readiness: %w", err)
+		}
+		if ready {
+			matches, matchArgs := requestLogIndexedMatchQuery(opts.Query)
+			where, args = " WHERE id IN ("+matches+")", matchArgs
+		}
+	}
 	queryArgs := append([]any{}, args...)
 	queryArgs = append(queryArgs, opts.Limit, opts.Offset)
-	rows, err := s.db.QueryContext(ctx, `SELECT COALESCE(id, ''), COALESCE(timestamp_text, ''), COALESCE(url, ''), COALESCE(method, ''), COALESCE(model, ''), COALESCE(NULLIF(TRIM(provider_name), ''), COALESCE(provider, '')), COALESCE(upstream_url, ''), COALESCE(upstream_model, ''), COALESCE(channel_model, ''), COALESCE(ip, ''), COALESCE(ip_location, ''), COALESCE(status, 0), COALESCE(success, 0), COALESCE(prompt, ''), COALESCE(output, ''), COALESCE(error, ''), COALESCE(system_prompt, ''), COALESCE(called_tools_preview, ''), COALESCE(session_id, ''), COALESCE(thread_id, ''), COALESCE(turn_id, '') FROM request_log_entries`+where+` ORDER BY timestamp_unix DESC, name DESC LIMIT ? OFFSET ?`, queryArgs...)
+	rows, err := tx.QueryContext(ctx, `SELECT COALESCE(id, ''), COALESCE(timestamp_text, ''), COALESCE(url, ''), COALESCE(method, ''), COALESCE(model, ''), COALESCE(NULLIF(TRIM(provider_name), ''), COALESCE(provider, '')), COALESCE(upstream_url, ''), COALESCE(upstream_model, ''), COALESCE(channel_model, ''), COALESCE(ip, ''), COALESCE(ip_location, ''), COALESCE(status, 0), COALESCE(success, 0), COALESCE(prompt, ''), COALESCE(output, ''), COALESCE(error, ''), COALESCE(system_prompt, ''), COALESCE(called_tools_preview, ''), COALESCE(session_id, ''), COALESCE(thread_id, ''), COALESCE(turn_id, '') FROM request_log_entries`+where+` ORDER BY timestamp_unix DESC, name DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		return err
 	}

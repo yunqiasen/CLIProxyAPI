@@ -307,3 +307,92 @@ func TestObservationIntegrityInterruptedDetailDoesNotAwaitRawLog(t *testing.T) {
 		}
 	}
 }
+
+func TestObservationIntegrityListReadsOnlyRequestedPagePreviews(t *testing.T) {
+	h, store := observationHandlerFixture(t)
+	stamp := time.Now().Add(-time.Minute)
+	for i := 1; i <= 20; i++ {
+		id, trace := fmt.Sprintf("raw-%d", i), fmt.Sprintf("trace-%d", i)
+		ts := stamp.Add(time.Duration(i) * time.Second)
+		insertObservationRaw(t, store, id, trace, "fixture prompt", ts, 200, true)
+		if i == 19 {
+			insertTestObservation(t, store, makeRecord("call-19", trace, requestlog.Succeeded, ts))
+		}
+	}
+
+	// Reading an off-page preview fails deterministically, representing expensive
+	// overflow pages in a wide production log row without timing assertions.
+	rows, err := store.db.Query(`PRAGMA table_info(request_log_entries)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var columns []string
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, kind string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		if name == "prompt_preview" {
+			columns = append(columns, `CASE WHEN id IN ('raw-20','raw-19') THEN prompt_preview ELSE json_extract('off-page preview read', '$') END AS prompt_preview`)
+		} else {
+			columns = append(columns, fmt.Sprintf("%q", name))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`ALTER TABLE request_log_entries RENAME TO saved_route_entries;
+CREATE VIEW request_log_entries AS SELECT ` + strings.Join(columns, ", ") + ` FROM saved_route_entries;`); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := observationHTTP(t, h, "/v8/management/request-logs?view=routes&limit=2", "")
+	items, total := decodeObservationList(t, rec)
+	if total != 20 || len(items) != 2 || items[0].ID != "raw-20" || items[1].ID != "call-19" {
+		t.Fatalf("page read unrelated wide rows: total=%d items=%+v response=%s", total, items, rec.Body.String())
+	}
+}
+
+func TestObservationIntegrityRouteCandidatesUseCoveringIndex(t *testing.T) {
+	store := openRouteTestStore(t)
+	stamp := time.Now()
+	insertObservationRaw(t, store, "indexed-raw", "indexed-trace", "fixture", stamp, 200, true)
+	cutoff := stamp.Add(-time.Hour).Unix()
+	for _, test := range []struct{ query, state string }{{"", ""}, {"", "failed"}, {"alias", ""}, {"alias", "failed"}} {
+		t.Run(test.query+"/"+test.state, func(t *testing.T) {
+			query, args, err := routeRowsQuery(context.Background(), store.db, test.query, test.state, &cutoff, "", routeIdentityProjection)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows, err := store.db.Query("EXPLAIN QUERY PLAN "+query, args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = rows.Close() }()
+			covered := false
+			var plan []string
+			for rows.Next() {
+				var id, parent, unused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+					t.Fatal(err)
+				}
+				plan = append(plan, detail)
+				covered = covered || strings.Contains(detail, " r USING COVERING INDEX ")
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			if !covered {
+				t.Fatalf("candidate selection reads wide raw rows instead of covering metadata: %s", strings.Join(plan, "\n"))
+			}
+		})
+	}
+}

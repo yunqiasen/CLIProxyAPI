@@ -260,6 +260,8 @@ func (s *requestLogStore) ensureObservationSchema(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx, `
 CREATE INDEX IF NOT EXISTS idx_request_log_entries_trace ON request_log_entries(trace_id);
+CREATE INDEX IF NOT EXISTS idx_request_log_entries_route_page ON request_log_entries(timestamp_unix DESC, id DESC, trace_id, status, success, has_error);
+CREATE INDEX IF NOT EXISTS idx_request_log_entries_route_id ON request_log_entries(id, timestamp_unix, trace_id, status, success, has_error);
 
 CREATE TABLE IF NOT EXISTS request_log_observations (
   id TEXT PRIMARY KEY,
@@ -447,9 +449,16 @@ func validObservationState(state string) bool {
 
 const legacyObservationStateSQL = `CASE WHEN COALESCE(r.status,0) = 499 THEN 'canceled' WHEN COALESCE(r.success,0) != 0 AND COALESCE(r.has_error,0) = 0 THEN 'succeeded' ELSE 'failed' END`
 
-// routeRowsQuery selects one representative transport file for each observation.
-// Filters and pagination operate on the logical union, never on a pre-paged search.
-func routeRowsQuery(ctx context.Context, reader requestLogReader, query, state string, cutoff *int64, id string) (string, []any, error) {
+type routeRowProjection uint8
+
+const (
+	routeIdentityProjection routeRowProjection = iota
+	routeMetadataProjection
+)
+
+// routeRowsQuery uses the same filters for compact identity selection and final
+// metadata hydration. Only the latter joins a representative transport file.
+func routeRowsQuery(ctx context.Context, reader requestLogReader, query, state string, cutoff *int64, id string, projection routeRowProjection) (string, []any, error) {
 	if !validObservationState(state) {
 		return "", nil, fmt.Errorf("invalid request state")
 	}
@@ -498,8 +507,12 @@ func routeRowsQuery(ctx context.Context, reader requestLogReader, query, state s
 		obsWhere += ` AND (EXISTS (SELECT 1 FROM request_log_entries matched JOIN raw_matches m ON m.id = matched.id WHERE o.trace_id != '' AND matched.trace_id = o.trace_id) OR (` + routeMetadataMatch(query, &obsArgs) + `))`
 		rawWhere += ` AND r.id IN (SELECT id FROM raw_matches)`
 	}
-	// No body fields participate in the outer projection, including metadata-only detail.
-	obsQuery := `SELECT
+	// Counts and sorting use only covering-index columns. Even previews in the
+	// wide raw table may require walking megabytes of preceding body overflow.
+	obsQuery := `SELECT o.id, o.timestamp_unix AS ts_unix FROM request_log_observations o WHERE 1=1` + obsWhere
+	rawQuery := `SELECT r.id, r.timestamp_unix AS ts_unix FROM request_log_entries r WHERE 1=1` + rawWhere
+	if projection == routeMetadataProjection {
+		obsQuery = `SELECT
  o.id, o.trace_id, o.timestamp, o.timestamp_unix AS ts_unix, o.url, o.method, o.model,
  o.provider, o.auth_id, o.upstream_model, o.ip, o.session_id,
  o.state, o.phase, o.error_kind, o.recovered, o.attempt_count, o.attempts_truncated,
@@ -517,7 +530,7 @@ func routeRowsQuery(ctx context.Context, reader requestLogReader, query, state s
  SELECT chosen.id FROM request_log_entries chosen WHERE o.trace_id != '' AND chosen.trace_id = o.trace_id
  ORDER BY chosen.timestamp_unix DESC, chosen.name DESC, chosen.id DESC LIMIT 1)
  WHERE 1=1` + obsWhere
-	rawQuery := `SELECT
+		rawQuery = `SELECT
  r.id, COALESCE(r.trace_id,''), COALESCE(r.timestamp_text,''), r.timestamp_unix,
  COALESCE(r.url,''), COALESCE(r.method,''), COALESCE(r.model,''),
  COALESCE(NULLIF(TRIM(r.provider_name),''),r.provider,''), COALESCE(r.auth_id,''),
@@ -530,6 +543,7 @@ func routeRowsQuery(ctx context.Context, reader requestLogReader, query, state s
  COALESCE(r.auth_type,''), COALESCE(r.upstream_url,''), COALESCE(r.channel_model,''),
  COALESCE(r.ip_location,''), COALESCE(r.thread_id,''), COALESCE(r.turn_id,'')
  FROM request_log_entries r WHERE 1=1` + rawWhere
+	}
 	args := append(prefixArgs, obsArgs...)
 	args = append(args, rawArgs...)
 	return prefix + `SELECT * FROM (` + obsQuery + ` UNION ALL ` + rawQuery + `)`, args, nil
@@ -567,34 +581,45 @@ func scanRouteItem(scanner interface{ Scan(...any) error }, extra ...any) (reque
 }
 
 func listRouteRows(ctx context.Context, reader requestLogReader, opts requestLogQueryOptions, state string, cutoff *int64) ([]requestLogRouteListItem, int, error) {
-	query, args, err := routeRowsQuery(ctx, reader, opts.Query, state, cutoff, "")
+	query, args, err := routeRowsQuery(ctx, reader, opts.Query, state, cutoff, "", routeIdentityProjection)
 	if err != nil {
 		return nil, 0, err
 	}
 	pageArgs := append(append([]any{}, args...), opts.Limit, opts.Offset)
-	rows, err := reader.QueryContext(ctx, `SELECT route_page.*, COUNT(*) OVER() FROM (`+query+`) route_page ORDER BY ts_unix DESC, id DESC LIMIT ? OFFSET ?`, pageArgs...)
+	rows, err := reader.QueryContext(ctx, `SELECT route_page.id, COUNT(*) OVER() FROM (`+query+`) route_page ORDER BY ts_unix DESC, id DESC LIMIT ? OFFSET ?`, pageArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer func() { _ = rows.Close() }()
-	// Count the logical union once in SQLite; transfer only the requested page.
-	// The shared-text match is not repeated for ordinary nonempty pages.
-	items := make([]requestLogRouteListItem, 0, min(opts.Limit, 200))
+	// Count matching identities once, then hydrate only the requested page in
+	// the same read transaction. Full-text matching is not repeated per item.
+	ids := make([]string, 0, min(opts.Limit, 200))
 	total := 0
 	for rows.Next() {
-		item, err := scanRouteItem(rows, &total)
-		if err != nil {
+		var id string
+		if err := rows.Scan(&id, &total); err != nil {
 			return nil, 0, err
 		}
-		items = append(items, item)
+		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
 	}
-	if len(items) == 0 && opts.Offset > 0 {
+	if err := rows.Close(); err != nil {
+		return nil, 0, err
+	}
+	if len(ids) == 0 && opts.Offset > 0 {
 		if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM (`+query+`)`, args...).Scan(&total); err != nil {
 			return nil, 0, err
 		}
+	}
+	items := make([]requestLogRouteListItem, 0, len(ids))
+	for _, id := range ids {
+		item, err := readRouteListItem(ctx, reader, id, cutoff)
+		if err != nil {
+			return nil, 0, err
+		}
+		items = append(items, item)
 	}
 	return items, total, nil
 }
@@ -608,12 +633,16 @@ func (s *requestLogStore) listRoutes(ctx context.Context, opts requestLogQueryOp
 	return listRouteRows(ctx, tx, opts, state, cutoff)
 }
 
-func routeMetadata(ctx context.Context, reader requestLogReader, id string, cutoff *int64) (requestLogRouteMetadata, error) {
-	query, args, err := routeRowsQuery(ctx, reader, "", "", cutoff, id)
+func readRouteListItem(ctx context.Context, reader requestLogReader, id string, cutoff *int64) (requestLogRouteListItem, error) {
+	query, args, err := routeRowsQuery(ctx, reader, "", "", cutoff, id, routeMetadataProjection)
 	if err != nil {
-		return requestLogRouteMetadata{}, err
+		return requestLogRouteListItem{}, err
 	}
-	item, err := scanRouteItem(reader.QueryRowContext(ctx, query+` LIMIT 1`, args...))
+	return scanRouteItem(reader.QueryRowContext(ctx, query+` LIMIT 1`, args...))
+}
+
+func routeMetadata(ctx context.Context, reader requestLogReader, id string, cutoff *int64) (requestLogRouteMetadata, error) {
+	item, err := readRouteListItem(ctx, reader, id, cutoff)
 	if err != nil {
 		return requestLogRouteMetadata{}, err
 	}

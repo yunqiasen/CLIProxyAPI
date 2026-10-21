@@ -48,6 +48,7 @@ Offline tests exercise active-to-terminal identity, retry recovery, same-key rep
 - Detail adds attempts array and retains full prompt/output/tools/error metadata.
 - UNION query: observations LEFT JOIN raw entries by exact trace_id + raw-only legacy rows. No duplicates.
 - Uses existing compact/shared-body indexed search for body matching. No full-body rescan.
+- Count and paginate compact identifiers before loading previews for the selected page. Time-ordered and ID-lookup covering indexes include trace/state metadata, keeping both ordinary and searched candidate scans off wide raw rows. Detail hydration stays in the same read transaction as selection.
 - `observation_warning` string in list response when capture/write gaps exist.
 - Raw detail absent before final index returns observation with empty content, not 404.
 - `metadata_only=true` on a route detail returns metadata and attempts without loading bodies. `raw_log_pending` distinguishes delayed full-content indexing from logging being disabled.
@@ -77,3 +78,19 @@ The independent Standards reviewer reported no documented-rule violations and tw
 The independent Spec reviewer reported zero missing, incorrect, or unrequested requirements in the reviewed backend/UI diff. Both reviewer processes completed successfully. The parent checked and resolved the two Standards findings; no second delegated review or inference-routing change was introduced.
 
 Remaining actionable findings: Standards 0; Spec 0. Local commits and clean-commit runtime verification follow the delivery procedure in the implementation plan; no remote delivery is implied.
+
+## Large-history delivery correction
+
+The initial live delivery check exposed an unfiltered routes list exceeding eight
+seconds on 21,941 raw rows (a 4.2 GB SQLite file), despite the small-fixture checks
+passing. The window count was materializing every raw preview before pagination;
+reading late columns also traversed wide-row overflow pages. Search ID lookups
+needed their own covering metadata index rather than the raw primary-key index.
+
+The corrected path counts/sorts identifiers and hydrates only the selected page,
+without changing matching, totals, state filters, raw logs, retention, or routing.
+An off-page preview view fails deterministically if unrelated wide rows are read;
+query-plan regressions cover filtered/unfiltered and searched identity selection.
+The same final API/browser/restart fixtures and full Go checks are repeated for
+this correction. Live timings and final runtime revision remain in the delivery
+evidence rather than requiring another source reload to update this document.

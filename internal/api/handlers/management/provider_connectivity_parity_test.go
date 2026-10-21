@@ -120,19 +120,29 @@ func TestProviderConnectivityCodexDraftOverridesRoutingWithoutChangingSavedState
 
 func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 	for _, scenario := range []struct {
-		host     string
-		resource bool
-		masked   bool
-		anyItems bool
+		host      string
+		resource  bool
+		masked    bool
+		anyItems  bool
+		requestID bool
+		model     string
 	}{
 		{host: "anyrouter.top"},
 		{host: "anyrouter.top", anyItems: true},
 		{host: "agentrouter.org"},
 		{host: "agentrouter.org", resource: true},
 		{host: "agentrouter.org", resource: true, masked: true},
+		{host: "agentrouter.org", resource: true, requestID: true, model: "gpt-6.1-sol"},
+		{host: "agentrouter.org", requestID: true, model: "gpt-6.1-sol"},
 	} {
 		host := scenario.host
-		t.Run(fmt.Sprintf("%s/resource_%t/masked_%t/items_%t", host, scenario.resource, scenario.masked, scenario.anyItems), func(t *testing.T) {
+		model, alias := scenario.model, "cpa-6a"
+		if model == "" {
+			model = "gpt-6-astra"
+		} else {
+			alias = "cpa-6s"
+		}
+		t.Run(fmt.Sprintf("%s/resource_%t/masked_%t/items_%t/request_id_%t", host, scenario.resource, scenario.masked, scenario.anyItems, scenario.requestID), func(t *testing.T) {
 			var requests [][]byte
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				b, _ := io.ReadAll(r.Body)
@@ -143,7 +153,7 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 				if r.Header.Get("Authorization") != "Bearer selected-key" {
 					t.Error("wrong key")
 				}
-				if gjson.GetBytes(b, "model").String() != "gpt-6-astra" || gjson.GetBytes(b, "reasoning.effort").String() != "high" || gjson.GetBytes(b, "max_output_tokens").Exists() {
+				if gjson.GetBytes(b, "model").String() != model || gjson.GetBytes(b, "reasoning.effort").String() != "high" || gjson.GetBytes(b, "max_output_tokens").Exists() {
 					t.Error("probe/production preparation differs")
 				}
 				if scenario.anyItems {
@@ -167,6 +177,9 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 					}
 					if scenario.masked {
 						message = "OpenAI Responses bad request: " + strings.Replace(message, "Azure", "***", 1)
+					}
+					if scenario.requestID {
+						message = strings.Replace(message, " [trace_id", " (request id: fixture) [trace_id", 1)
 					}
 					_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"type": "invalid_request_error", "code": nil, "param": "", "message": message}})
 					return
@@ -196,6 +209,9 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 			}
 			if scenario.resource {
 				history = strings.Replace(history, `"id":"rs_foreign"`, `"id":"rs_foreign","content":[{"type":"reasoning_text","text":"retained reasoning"}]`, 1)
+				if model != "gpt-6-astra" {
+					history = strings.Replace(history, `"content":[{"type":"reasoning_text"`, `"summary":[{"type":"summary_text"`, 1)
+				}
 			}
 			if host == "agentrouter.org" {
 				history = strings.TrimSuffix(history, "]") + `,{"type":"web_search_call","id":"ws_parity","status":"completed","action":{"type":"open_page","url":"https://example.test/retained-parity-search"},"results":[{"text":"retained parity search"}]}]`
@@ -203,7 +219,7 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 			if scenario.anyItems {
 				history = `[{"type":"message","id":"msg_agent","role":"assistant","content":"Keep prior answer"},{"type":"function_call","id":"fc_agent","name":"fixture","call_id":"keep_call","arguments":"{}"},{"type":"function_call_output","id":"fco_old","call_id":"keep_call","output":"Keep result"},{"role":"user","content":"Continue"}]`
 			}
-			cfg := &config.Config{CodexKey: []config.CodexKey{{Name: "fixture", APIKey: "selected-key", BaseURL: "http://" + host + "/v1", ProxyURL: upstream.URL, DisableImageGeneration: true, Models: []config.CodexModel{{Name: "gpt-6-astra", Alias: "cpa-6a", Thinking: &registry.ThinkingSupport{Levels: []string{"high"}}}}}}, Payload: config.PayloadConfig{OverrideRaw: []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: "cpa-6a", Protocol: "codex", FromProtocol: sdktranslator.FormatOpenAIResponse.String()}}, Params: map[string]any{"input": history}}}}}
+			cfg := &config.Config{CodexKey: []config.CodexKey{{Name: "fixture", APIKey: "selected-key", BaseURL: "http://" + host + "/v1", ProxyURL: upstream.URL, DisableImageGeneration: true, Models: []config.CodexModel{{Name: model, Alias: alias, Thinking: &registry.ThinkingSupport{Levels: []string{"high"}}}}}}, Payload: config.PayloadConfig{OverrideRaw: []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: alias, Protocol: "codex", FromProtocol: sdktranslator.FormatOpenAIResponse.String()}}, Params: map[string]any{"input": history}}}}}
 			auths, err := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{Config: cfg, Now: time.Now(), IDGenerator: synthesizer.NewStableIDGenerator()})
 			if err != nil {
 				t.Fatal(err)
@@ -215,10 +231,10 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 			if _, err = m.Register(context.Background(), a); err != nil {
 				t.Fatal(err)
 			}
-			registry.GetGlobalRegistry().RegisterClient(a.ID, "codex", []*registry.ModelInfo{{ID: "cpa-6a"}})
+			registry.GetGlobalRegistry().RegisterClient(a.ID, "codex", []*registry.ModelInfo{{ID: alias}})
 			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(a.ID) })
-			payload := []byte(`{"model":"cpa-6a","input":"Hi","max_output_tokens":256,"stream":true,"store":false,"reasoning":{"effort":"low"}}`)
-			stream, err := m.ExecuteStream(context.Background(), []string{"codex"}, coreexecutor.Request{Model: "cpa-6a(high)", Payload: payload}, coreexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: payload, Stream: true, Metadata: map[string]any{coreexecutor.RequestedModelMetadataKey: "cpa-6a(high)", coreexecutor.RequestPathMetadataKey: "/v1/responses"}})
+			payload := []byte(`{"model":"` + alias + `","input":"Hi","max_output_tokens":256,"stream":true,"store":false,"reasoning":{"effort":"low"}}`)
+			stream, err := m.ExecuteStream(context.Background(), []string{"codex"}, coreexecutor.Request{Model: alias + "(high)", Payload: payload}, coreexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: payload, Stream: true, Metadata: map[string]any{coreexecutor.RequestedModelMetadataKey: alias + "(high)", coreexecutor.RequestPathMetadataKey: "/v1/responses"}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -227,7 +243,7 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 			}
 			productionCalls := len(requests)
 			h := &Handler{cfg: cfg, authManager: m}
-			raw, _ := json.Marshal(map[string]any{"provider": "codex", "auth_index": a.EnsureIndex(), "model": "cpa-6a(high)"})
+			raw, _ := json.Marshal(map[string]any{"provider": "codex", "auth_index": a.EnsureIndex(), "model": alias + "(high)"})
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
 			c.Request = httptest.NewRequest("POST", "/v0/management/provider-connectivity-test", bytes.NewReader(raw))

@@ -248,3 +248,85 @@ readable reasoning and function/custom-tool results survive all 84 client turns.
 The pre-repair helpers fail this matrix; `ae3933b5` passes without additional production
 changes. See [the acceptance contract](any-agent-responses-compatibility.md#acceptance-conversation-and-channel-compatibility)
 for the exact scenarios and limits.
+
+## October 21: request-ID metadata and Sol conversation switching
+
+Review baseline: `53d8336261cbb436f69e42addb7f80a5a44f91ff`.
+
+The original upstream response is retained in local request `a26b6308`, not only
+quoted in a user prompt. At 15:32:01 +08:00, `cpa-6s` resolved to AgentRouter's
+`gpt-6.1-sol` and returned HTTP 400 with request ID
+`20261021073158346501676MSvAiaYZ` and trace
+`968823f431986387c18884d75f28b92f`. Its message has the new suffix:
+
+```text
+The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. (request id: ...) [trace_id=...]
+```
+
+Only one upstream attempt was recorded. The existing anchored recognizer allowed
+an optional trace ID but not the preceding request ID, so the one-shot recovery
+was skipped. A differential fixture changes only that suffix: with the request ID
+both Sol and Astra skip recovery on the baseline; without it both enter recovery.
+The minimal reproduction needs only an assistant message with a historical item
+ID. The full captured request had 155 items: 72 messages, 25 reasoning items,
+29 function calls and 29 matching outputs, with one remaining opaque reasoning
+item. It contained no stored parent reference, item reference or compaction.
+
+The shared recognizer now accepts an optional nonempty alphanumeric/underscore/
+hyphen request ID before the optional trace ID, for the exact Agent resource and
+named-encryption errors. Anchored message matching, endpoint, error type, empty
+code/parameter and referenced-item validation remain intact. Additional prose,
+malformed metadata, unknown errors and unrelated endpoints do not enable repair.
+This is a model-independent error-envelope repair, not a new model-name rule.
+
+The existing shared recovery still makes at most one same-key retry before output,
+retains readable summaries, messages, tool call IDs/arguments/results and search
+records, and preserves the remote-reference and compaction boundaries. It changes
+only the outbound copy; it does not reset the client's conversation, alter provider
+configuration/priority or add a second scheduler. Repeated rejection and errors
+after real text, reasoning or tool output remain failures rather than replaying
+already-visible work.
+
+### Regression scope
+
+The new regressions first fail against the baseline and then pass with the shared
+recognizer change. They cover HTTP 400, SSE failed terminals, native WebSocket,
+production/selected-key management-probe parity, and rate limit followed by
+another credential's resource rejection. Existing Astra coverage remains active.
+The public HTTP/SSE/downstream-WebSocket matrix adds another 84 client turns using
+Agent `cpa-6s`/Sol and Any `cpa-6a`/Astra: continuing, switching both directions,
+returning to a channel, concurrent independent sessions, and retained history
+copied into a fresh client session. Terminal, identity and history assertions are
+unchanged. These are local protocol tests, not a claim about live upstream capacity.
+
+```sh
+go test ./internal/runtime/executor/helps ./internal/runtime/executor \
+  ./internal/api/handlers/management ./test \
+  -run 'AgentRequestID|AgentSol|ConversationSwitch.*Contract|CodexAgentMessageOnlySSERecoveryBoundaries|CodexWebsocketAnyAgentHistoryCompatibility|ProviderConnectivityAndProductionShareAnyAgentPipeline' \
+  -count=1
+```
+
+### Plugin disposition for this incident
+
+- `codex-switch-guard`: native per-item ownership and precise rejected-state
+  recovery already own this responsibility. A second ownership store, route lock
+  or blanket conflict response is not part of this repair.
+- `codex-app-multisession-compat`: retain its orphan-output boundary cases as a
+  reference. All 29 captured function outputs have preceding matching calls, so
+  this incident does not establish a missing delegation-normalization feature.
+- `codexreflow`: existing framing and terminal validation remain in use. Extra
+  inference rounds and replay caches are unrelated to this pre-output HTTP 400.
+- `cpa-scheduled-tests`: excluded as requested. No scheduled inference is added.
+
+A separate-process replay uses the sanitized 155-item captured shape and a
+loopback upstream only. The copied baseline deployment returns the same 400 after
+one attempt in all 12 HTTP/SSE/resource/encryption and client/probe combinations.
+The candidate passes 21 checks: 12 successful one-shot recoveries plus repeated
+failure and post-output no-replay checks. The full Go suite, affected race suite
+(`-count=3`), server build and management-bundle regression also pass. No live
+upstream generation probe, provider edit or plugin installation is part of this
+verification.
+
+Independent Standards and Spec reviews completed against the fixed baseline with
+zero findings on either axis. The complete diff was also inspected before local
+delivery; no provider settings or unrelated plugin-host changes are included.

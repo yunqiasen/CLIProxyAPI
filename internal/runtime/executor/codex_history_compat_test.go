@@ -167,6 +167,8 @@ func TestCodexAgentSignatureRecoveryKeepsReadableReasoning(t *testing.T) {
 const agentMessageOnlySignatureRejection = `{"error":{"type":"invalid_request_error","code":null,"param":"","message":"OpenAI Responses bad request: The encrypted content for item rs_foreign could not be verified. Reason: Encrypted content could not be decrypted or parsed. [trace_id=fixture]"}}`
 const agentResourceMismatchRejection = `{"error":{"type":"invalid_request_error","code":null,"param":"","message":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. [trace_id=fixture]"}}`
 const agentMaskedResourceMismatchRejection = `{"error":{"type":"invalid_request_error","param":"","message":"OpenAI Responses bad request: The requested item was created under a different *** OpenAI resource. Use the same resource that created the item to access it. [trace_id=fixture]"}}`
+const agentRequestIDResourceRejection = `{"error":{"message":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. (request id: 20261021073158346501676MSvAiaYZ) [trace_id=968823f431986387c18884d75f28b92f]","type":"invalid_request_error","param":"","code":null}}`
+
 const completedHistoryResponse = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"status\":\"completed\",\"output\":[]}}\n\n"
 
 func TestCodexAgentMessageOnlySSERecoveryBoundaries(t *testing.T) {
@@ -174,6 +176,8 @@ func TestCodexAgentMessageOnlySSERecoveryBoundaries(t *testing.T) {
 		{"encrypted", agentMessageOnlySignatureRejection},
 		{"resource", agentResourceMismatchRejection},
 		{"masked-resource", agentMaskedResourceMismatchRejection},
+		{"resource-request-id", agentRequestIDResourceRejection},
+		{"encrypted-request-id", strings.Replace(agentMessageOnlySignatureRejection, " [trace_id", " (request id: fixture) [trace_id", 1)},
 		{"web-search-resource", agentMaskedResourceMismatchRejection},
 		{"encrypted-web-search", agentMessageOnlySignatureRejection},
 		{"any-items", anyHistoricalItemRejection},
@@ -212,6 +216,9 @@ func TestCodexAgentMessageOnlySSERecoveryBoundaries(t *testing.T) {
 					if scenario.name == "encrypted-web-search" {
 						req.Payload = bytes.Replace(req.Payload, []byte(`{"role":"user"`), []byte(`{"type":"web_search_call","id":"ws_foreign","status":"completed","action":{"type":"search","query":"preserved search"}},{"role":"user"`), 1)
 					}
+					if strings.HasSuffix(scenario.name, "-request-id") {
+						req.Model = "gpt-6.1-sol"
+					}
 					opts := coreexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: stream}
 					e := NewCodexExecutor(&config.Config{})
 					failed := false
@@ -243,22 +250,29 @@ func TestCodexAgentMessageOnlySSERecoveryBoundaries(t *testing.T) {
 
 func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 	for _, route := range []struct {
-		host     string
-		source   sdktranslator.Format
-		resource bool
-		masked   bool
-		anyItems bool
+		host      string
+		source    sdktranslator.Format
+		resource  bool
+		masked    bool
+		anyItems  bool
+		requestID bool
 	}{
-		{"anyrouter.top", sdktranslator.FormatOpenAIResponse, false, false, false},
-		{"anyrouter.top", sdktranslator.FormatOpenAIResponse, false, false, true},
-		{"agentrouter.org", sdktranslator.FormatOpenAIResponse, false, false, false},
-		{"agentrouter.org", sdktranslator.FormatOpenAIResponse, true, false, false},
-		{"agentrouter.org", sdktranslator.FormatOpenAIResponse, true, true, false},
-		{"anyrouter.top", sdktranslator.FromString(codexOpenAIImageSourceFormat), false, false, false},
+		{host: "anyrouter.top", source: sdktranslator.FormatOpenAIResponse},
+		{host: "anyrouter.top", source: sdktranslator.FormatOpenAIResponse, anyItems: true},
+		{host: "agentrouter.org", source: sdktranslator.FormatOpenAIResponse},
+		{host: "agentrouter.org", source: sdktranslator.FormatOpenAIResponse, resource: true},
+		{host: "agentrouter.org", source: sdktranslator.FormatOpenAIResponse, resource: true, masked: true},
+		{host: "anyrouter.top", source: sdktranslator.FromString(codexOpenAIImageSourceFormat)},
+		{host: "agentrouter.org", source: sdktranslator.FormatOpenAIResponse, resource: true, requestID: true},
+		{host: "agentrouter.org", source: sdktranslator.FormatOpenAIResponse, requestID: true},
 	} {
 		host := route.host
+		model := "gpt-6-astra"
+		if route.requestID {
+			model = "gpt-6.1-sol"
+		}
 		for _, stream := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/%s/resource_%t/masked_%t/items_%t/stream_%t", host, route.source, route.resource, route.masked, route.anyItems, stream), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/%s/resource_%t/masked_%t/items_%t/request_id_%t/stream_%t", host, route.source, route.resource, route.masked, route.anyItems, route.requestID, stream), func(t *testing.T) {
 				var calls atomic.Int32
 				upgrader := websocket.Upgrader{}
 				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -273,6 +287,9 @@ func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 							return
 						}
 						attempt := calls.Add(1)
+						if gjson.GetBytes(b, "model").String() != model || r.Header.Get("Authorization") != "Bearer fixture" {
+							t.Error("websocket model or selected key changed")
+						}
 						if route.source.String() == codexOpenAIImageSourceFormat {
 							if gjson.GetBytes(b, "input.0.type").String() != "web_search_call" {
 								t.Error("direct image source history was normalized")
@@ -291,6 +308,9 @@ func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 								if route.masked {
 									rejection = agentMaskedResourceMismatchRejection
 								}
+							}
+							if route.requestID {
+								rejection = strings.Replace(rejection, " [trace_id", " (request id: fixture) [trace_id", 1)
 							}
 							_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status":400,`+strings.TrimPrefix(rejection, "{")))
 							continue
@@ -334,7 +354,7 @@ func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 				if route.anyItems {
 					first = `{"type":"message","id":"msg_agent","role":"assistant","content":[{"type":"output_text","text":"Earlier answer"}]}`
 				}
-				req := coreexecutor.Request{Model: "gpt-6-astra", Payload: []byte(`{"model":"gpt-6-astra","input":[` + first + `,{"role":"user","content":"continue"}]}`)}
+				req := coreexecutor.Request{Model: model, Payload: []byte(`{"model":"` + model + `","input":[` + first + `,{"role":"user","content":"continue"}]}`)}
 				a := &coreauth.Auth{ID: "websocket-history", Provider: "codex", ProxyURL: proxy.URL, Attributes: map[string]string{"api_key": "fixture", "base_url": "http://" + host + "/v1"}}
 				e := NewCodexWebsocketsExecutor(&config.Config{})
 				opts := coreexecutor.Options{SourceFormat: route.source, Stream: stream}

@@ -9,10 +9,14 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-var agentSignatureRejection = regexp.MustCompile(`^(?:OpenAI Responses bad request: )?The encrypted content for item (rs_[A-Za-z0-9_-]+) could not be verified\. Reason: Encrypted content could not be decrypted or parsed\.(?: \[trace_id=[A-Za-z0-9_-]+\])?$`)
+// Agent appends relay request metadata to the upstream message. Keep both the
+// message and diagnostic suffix anchored rather than accepting arbitrary prose.
+const agentRejectionMetadataSuffix = `(?: \(request id: [A-Za-z0-9_-]+\))?(?: \[trace_id=[A-Za-z0-9_-]+\])?$`
+
+var agentSignatureRejection = regexp.MustCompile(`^(?:OpenAI Responses bad request: )?The encrypted content for item (rs_[A-Za-z0-9_-]+) could not be verified\. Reason: Encrypted content could not be decrypted or parsed\.` + agentRejectionMetadataSuffix)
 
 // Agent sometimes masks the resource vendor as "***" in this exact error.
-var agentResourceRejection = regexp.MustCompile(`^(?:OpenAI Responses bad request: )?The requested item was created under a different (?:Azure|\*{3}) OpenAI resource\. Use the same resource that created the item to access it\.(?: \[trace_id=[A-Za-z0-9_-]+\])?$`)
+var agentResourceRejection = regexp.MustCompile(`^(?:OpenAI Responses bad request: )?The requested item was created under a different (?:Azure|\*{3}) OpenAI resource\. Use the same resource that created the item to access it\.` + agentRejectionMetadataSuffix)
 
 type agentSignatureRejectionKind uint8
 

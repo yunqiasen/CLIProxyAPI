@@ -29,6 +29,17 @@ import (
 // Exercise the public HTTP contract with client-retained output, rather than
 // calling the recovery helper or constructing an already-repaired conversation.
 func TestCodexConversationSwitchContract(t *testing.T) {
+	testCodexConversationSwitchContract(t, "gpt-6-astra", "agentrouter.org", "The requested item was created under a different *** OpenAI resource. Use the same resource that created the item to access it. [trace_id=contract]")
+}
+
+func TestCodexConversationSwitchSolRequestIDContract(t *testing.T) {
+	testCodexConversationSwitchContract(t, "gpt-6.1-sol", "cpa-6s", "The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. (request id: 20261021073158346501676MSvAiaYZ) [trace_id=968823f431986387c18884d75f28b92f]")
+}
+
+func testCodexConversationSwitchContract(t *testing.T, agentModel, agentAlias, agentRejection string) {
+	t.Helper()
+	models := map[string]string{"agentrouter.org": agentModel, "anyrouter.top": "gpt-6-astra"}
+	aliases := map[string]string{"agentrouter.org": agentAlias, "anyrouter.top": "cpa-6a"}
 	gin.SetMode(gin.TestMode)
 	for _, transport := range []string{"http", "sse", "websocket"} {
 		stream := transport != "http"
@@ -48,7 +59,7 @@ func TestCodexConversationSwitchContract(t *testing.T) {
 					if host != "agentrouter.org" && host != "anyrouter.top" {
 						t.Errorf("unexpected route: %s", host)
 					}
-					if r.Header.Get("Authorization") != "Bearer "+host+"-selected" || gjson.GetBytes(body, "model").String() != "gpt-6-astra" {
+					if r.Header.Get("Authorization") != "Bearer "+host+"-selected" || gjson.GetBytes(body, "model").String() != models[host] {
 						t.Error("selected key or resolved upstream model changed")
 					}
 					items := gjson.GetBytes(body, "input").Array()
@@ -103,7 +114,7 @@ func TestCodexConversationSwitchContract(t *testing.T) {
 						}
 					}
 					if bound {
-						message := "The requested item was created under a different *** OpenAI resource. Use the same resource that created the item to access it. [trace_id=contract]"
+						message := agentRejection
 						if host == "anyrouter.top" {
 							message = "bad response status code 400 (request id: contract)"
 						}
@@ -136,7 +147,7 @@ func TestCodexConversationSwitchContract(t *testing.T) {
 				t.Cleanup(upstream.Close)
 				cfg := &config.Config{}
 				for _, host := range []string{"agentrouter.org", "anyrouter.top"} {
-					cfg.CodexKey = append(cfg.CodexKey, config.CodexKey{Name: host, BaseURL: "http://" + host + "/v1", ProxyURL: upstream.URL, Models: []config.CodexModel{{Name: "gpt-6-astra", Alias: host}}, APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: host + "-selected"}}})
+					cfg.CodexKey = append(cfg.CodexKey, config.CodexKey{Name: host, BaseURL: "http://" + host + "/v1", ProxyURL: upstream.URL, Models: []config.CodexModel{{Name: models[host], Alias: aliases[host]}}, APIKeyEntries: []config.NativeAPIKeyEntry{{APIKey: host + "-selected"}}})
 				}
 				auths, err := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{Config: cfg, Now: time.Now(), IDGenerator: synthesizer.NewStableIDGenerator()})
 				if err != nil || len(auths) != 2 {
@@ -148,7 +159,7 @@ func TestCodexConversationSwitchContract(t *testing.T) {
 				manager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(cfg))
 				for _, auth := range auths {
 					host := strings.TrimSuffix(strings.TrimPrefix(auth.Attributes["base_url"], "http://"), "/v1")
-					registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: host}})
+					registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: aliases[host]}})
 					t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
 					if _, err = manager.Register(context.Background(), auth); err != nil {
 						t.Fatal(err)
@@ -185,7 +196,7 @@ func TestCodexConversationSwitchContract(t *testing.T) {
 								history = append(history, json.RawMessage(fmt.Sprintf(`{"type":"message","id":"msg_user_%s","role":"user","content":%q}`, marker+"_"+turn, turn)))
 							}
 							before, _ := json.Marshal(history)
-							payloadBody := map[string]any{"model": host, "stream": stream, "store": false, "prompt_cache_key": clientSession, "input": history, "tools": []any{map[string]any{"type": "function", "name": "lookup", "parameters": map[string]any{"type": "object"}}, map[string]any{"type": "custom", "name": "apply_patch"}}}
+							payloadBody := map[string]any{"model": aliases[host], "stream": stream, "store": false, "prompt_cache_key": clientSession, "input": history, "tools": []any{map[string]any{"type": "function", "name": "lookup", "parameters": map[string]any{"type": "object"}}, map[string]any{"type": "custom", "name": "apply_patch"}}}
 							if transport == "websocket" {
 								payloadBody["type"] = "response.create"
 							}

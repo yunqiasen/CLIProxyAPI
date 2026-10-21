@@ -24,15 +24,20 @@ import (
 const agentResourceSwitchRejection = `{"error":{"type":"invalid_request_error","code":null,"param":"","message":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. [trace_id=fixture]"}}`
 
 func TestAgentRateLimitSwitchKeepsPortableConversation(t *testing.T) {
-	testAgentRateLimitSwitchKeepsPortableConversation(t, agentResourceSwitchRejection)
+	testAgentRateLimitSwitchKeepsPortableConversation(t, agentResourceSwitchRejection, "gpt-6-astra", "cpa-6a")
 }
 
 func TestAgentRateLimitSwitchWithMaskedResourceKeepsPortableConversation(t *testing.T) {
 	rejection := `{"error":{"message":"OpenAI Responses bad request: The requested item was created under a different *** OpenAI resource. Use the same resource that created the item to access it. [trace_id=fixture]","param":"","type":"invalid_request_error"}}`
-	testAgentRateLimitSwitchKeepsPortableConversation(t, rejection)
+	testAgentRateLimitSwitchKeepsPortableConversation(t, rejection, "gpt-6-astra", "cpa-6a")
 }
 
-func testAgentRateLimitSwitchKeepsPortableConversation(t *testing.T, rejection string) {
+func TestAgentSolRateLimitSwitchWithRequestIDKeepsPortableConversation(t *testing.T) {
+	rejection := strings.Replace(agentResourceSwitchRejection, " [trace_id", " (request id: fixture) [trace_id", 1)
+	testAgentRateLimitSwitchKeepsPortableConversation(t, rejection, "gpt-6.1-sol", "cpa-6s")
+}
+
+func testAgentRateLimitSwitchKeepsPortableConversation(t *testing.T, rejection, model, alias string) {
 	t.Helper()
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
@@ -45,6 +50,9 @@ func testAgentRateLimitSwitchKeepsPortableConversation(t *testing.T, rejection s
 					t.Error(errRead)
 					w.WriteHeader(http.StatusBadRequest)
 					return
+				}
+				if gjson.GetBytes(body, "model").String() != model {
+					t.Error("resolved upstream model changed")
 				}
 				mu.Lock()
 				calls[key]++
@@ -86,7 +94,7 @@ func testAgentRateLimitSwitchKeepsPortableConversation(t *testing.T, rejection s
 			lowPriority := 9
 			cfg := &config.Config{CodexKey: []config.CodexKey{{
 				Name: "AgentRouter", BaseURL: "http://agentrouter.org/v1", ProxyURL: upstream.URL,
-				Models: []config.CodexModel{{Name: "gpt-6-astra", Alias: "cpa-6a"}},
+				Models: []config.CodexModel{{Name: model, Alias: alias}},
 				APIKeyEntries: []config.NativeAPIKeyEntry{
 					{APIKey: "rate-limited-key", Priority: &highPriority},
 					{APIKey: "portable-recovery-key", Priority: &lowPriority},
@@ -101,14 +109,14 @@ func testAgentRateLimitSwitchKeepsPortableConversation(t *testing.T, rejection s
 			manager.SetRetryConfig(2, 0, 2)
 			manager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(cfg))
 			for _, auth := range auths {
-				registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: "cpa-6a"}})
+				registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: alias}})
 				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
 				if _, err = manager.Register(context.Background(), auth); err != nil {
 					t.Fatal(err)
 				}
 			}
 
-			payload := []byte(`{"model":"cpa-6a","store":false,"stream":` + fmt.Sprint(stream) + `,"prompt_cache_key":"same-conversation","input":[` +
+			payload := []byte(`{"model":"` + alias + `","store":false,"stream":` + fmt.Sprint(stream) + `,"prompt_cache_key":"same-conversation","input":[` +
 				`{"type":"reasoning","id":"rs_foreign_one","encrypted_content":"opaque-state-one","summary":[{"type":"summary_text","text":"keep summary one"}]},` +
 				`{"type":"reasoning","id":"rs_foreign_two","encrypted_content":"opaque-state-two","summary":[{"type":"summary_text","text":"keep summary two"}]},` +
 				`{"type":"message","id":"msg_foreign","role":"assistant","content":[{"type":"output_text","text":"keep answer"}]},` +
@@ -116,7 +124,7 @@ func testAgentRateLimitSwitchKeepsPortableConversation(t *testing.T, rejection s
 				`{"type":"function_call_output","id":"fco_foreign","call_id":"call_keep","output":"keep result"},` +
 				`{"type":"web_search_call","id":"ws_keep","status":"completed","action":{"type":"search","query":"keep query"}},` +
 				`{"type":"message","id":"msg_current","role":"user","content":"continue"}]}`)
-			req := cliproxyexecutor.Request{Model: "cpa-6a", Payload: payload}
+			req := cliproxyexecutor.Request{Model: alias, Payload: payload}
 			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: payload, Stream: stream}
 			var output string
 			if stream {

@@ -18,8 +18,17 @@ import (
 )
 
 func TestAgentAstraReportedErrors(t *testing.T) {
+	testAgentReportedErrors(t, "gpt-6-astra", []string{"reasoning-content", "resource", "prefixed-resource", "masked-resource", "prefixed-masked-resource", "encrypted", "prefixed-encrypted"})
+}
+
+func TestAgentSolRequestIDReportedErrors(t *testing.T) {
+	testAgentReportedErrors(t, "gpt-6.1-sol", []string{"resource-request-id", "prefixed-resource-request-id", "masked-resource-request-id", "encrypted-request-id"})
+}
+
+func testAgentReportedErrors(t *testing.T, model string, kinds []string) {
+	t.Helper()
 	for _, stream := range []bool{false, true} {
-		for _, kind := range []string{"reasoning-content", "resource", "prefixed-resource", "masked-resource", "prefixed-masked-resource", "encrypted", "prefixed-encrypted"} {
+		for _, kind := range kinds {
 			name := kind
 			if stream {
 				name += "/stream"
@@ -29,13 +38,16 @@ func TestAgentAstraReportedErrors(t *testing.T) {
 				if kind == "reasoning-content" {
 					reasoning = `{"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"portable reasoning"}]}`
 				}
-				raw := []byte(`{"model":"gpt-6-astra","input":[` + reasoning + `,{"role":"user","content":"continue"},{"type":"function_call","name":"fixture","call_id":"call_1","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":"retained result"}]}`)
+				raw := []byte(`{"model":"` + model + `","input":[` + reasoning + `,{"role":"user","content":"continue"},{"type":"function_call","name":"fixture","call_id":"call_1","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":"retained result"}]}`)
 				calls := 0
 				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					calls++
 					body, _ := io.ReadAll(r.Body)
 					if !strings.HasSuffix(r.URL.Path, "/responses") {
 						t.Errorf("wrong upstream protocol %s", r.URL.Path)
+					}
+					if gjson.GetBytes(body, "model").String() != model {
+						t.Error("resolved model changed")
 					}
 					if r.Header.Get("Authorization") != "Bearer one-fixture-key" {
 						t.Error("key changed")
@@ -56,6 +68,9 @@ func TestAgentAstraReportedErrors(t *testing.T) {
 						if strings.HasPrefix(kind, "prefixed") {
 							message = "OpenAI Responses bad request: " + message
 						}
+						if strings.HasSuffix(kind, "-request-id") {
+							message += " (request id: 20261021073158346501676MSvAiaYZ)"
+						}
 						message += " [trace_id=fixture]"
 					}
 					if message != "" {
@@ -73,7 +88,7 @@ func TestAgentAstraReportedErrors(t *testing.T) {
 				defer upstream.Close()
 				a := &auth.Auth{ID: "single-agent-key", Provider: "codex", ProxyURL: upstream.URL, Attributes: map[string]string{"api_key": "one-fixture-key", "base_url": "http://agentrouter.org/v1"}}
 				opts := ex.Options{SourceFormat: tr.FormatOpenAIResponse, Stream: stream}
-				req := ex.Request{Model: "gpt-6-astra", Payload: raw}
+				req := ex.Request{Model: model, Payload: raw}
 				executor := NewCodexExecutor(&config.Config{})
 				executeAgentAstraFixture(t, executor, a, req, opts)
 				want := 2

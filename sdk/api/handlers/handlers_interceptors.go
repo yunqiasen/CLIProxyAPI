@@ -14,6 +14,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelcatalog"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/requestlog"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -113,6 +114,7 @@ func webSocketResponseObserversEnabled(host PluginInterceptorHost) bool {
 }
 
 type requestLifecycleTracker struct {
+	observation  *requestlog.Request
 	once         sync.Once
 	ctx          context.Context
 	host         PluginInterceptorHost
@@ -140,6 +142,14 @@ func (h *BaseAPIHandler) newRequestLifecycleTracker(ctx context.Context, sourceF
 	}
 }
 
+func (t *requestLifecycleTracker) observe(ctx context.Context) context.Context {
+	ctx, t.observation = requestlog.Start(ctx, t.completion.RequestID, t.completion.RequestedModel)
+	t.ctx = ctx
+	metadata := logging.GetClientRequestMetadata(ctx)
+	t.observation.Session(metadata.SessionID, metadata.ParentSessionID)
+	return ctx
+}
+
 func (t *requestLifecycleTracker) requestID() string {
 	if t == nil {
 		return ""
@@ -152,6 +162,11 @@ func (t *requestLifecycleTracker) complete(outcome pluginapi.RequestCompletionOu
 		return
 	}
 	t.once.Do(func() {
+		state := string(outcome)
+		if outcome == pluginapi.RequestCompletionRejected {
+			state = requestlog.Failed
+		}
+		t.observation.Finish(state, statusCode, err)
 		completion := t.completion
 		completion.Outcome = outcome
 		completion.StatusCode = statusCode

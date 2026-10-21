@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/requestlog"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
@@ -25,6 +26,7 @@ import (
 )
 
 func newUpstreamAttemptContext(ctx context.Context) context.Context {
+	ctx = requestlog.WithAttempt(ctx)
 	ctx = logging.WithFreshResponseHeadersHolder(ctx)
 	return cliproxyexecutor.WithUpstreamAttemptTracker(ctx)
 }
@@ -71,6 +73,7 @@ func markUpstreamExecutionAttempt(err error) error {
 }
 
 func markUpstreamExecutionAttemptFromContext(ctx context.Context, err error) error {
+	requestlog.FromContext(ctx).Failure(err)
 	if err == nil || !cliproxyexecutor.UpstreamAttempted(ctx) {
 		return err
 	}
@@ -340,6 +343,15 @@ func isRequestTerminatedError(err error) bool {
 }
 
 func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExecutor, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, requestedModel string) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
+	if observer := requestlog.FromContext(ctx); observer != nil {
+		authID, _ := opts.Metadata[cliproxyexecutor.SelectedAuthMetadataKey].(string)
+		observer.SelectRoute(requestlog.Attempt{Provider: provider, AuthID: authID, Model: req.Model})
+		session, _ := opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey].(string)
+		parent, _ := opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey].(string)
+		if session != "" {
+			observer.Session(session, parent)
+		}
+	}
 	if opts.RequestAfterAuthInterceptor == nil {
 		return req, opts, nil
 	}
@@ -1491,6 +1503,7 @@ func (m *Manager) prepareHomeRequestAuth(ctx context.Context, executor ProviderE
 	auth := selection.CloneAuth()
 	prepared, errPrepare := m.prepareHomeAuthSnapshot(ctx, executor, auth)
 	if errPrepare != nil {
+		observeAuthPreparationFailure(ctx, auth, selection.Provider, errPrepare)
 		warnLogHomeCredentialFailure(ctx, "request_auth_preparation", selection.Provider, auth, errPrepare)
 	}
 	return prepared, errPrepare
@@ -1543,7 +1556,20 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 		return auth, nil
 	}
 
-	return m.PrepareRequestAuth(ctx, preparer, auth)
+	prepared, err := m.PrepareRequestAuth(ctx, preparer, auth)
+	if err != nil {
+		observeAuthPreparationFailure(ctx, auth, auth.Provider, err)
+	}
+	return prepared, err
+}
+
+func observeAuthPreparationFailure(ctx context.Context, auth *Auth, provider string, err error) {
+	observer := requestlog.FromContext(ctx)
+	if observer == nil || auth == nil {
+		return
+	}
+	observer.SelectRoute(requestlog.Attempt{Provider: provider, AuthID: auth.ID, Model: coreusage.RequestedModelAliasFromContext(ctx)})
+	observer.Failure(err)
 }
 
 // PrepareRequestAuth prepares a registered credential using the same serialization

@@ -128,6 +128,9 @@ CREATE INDEX IF NOT EXISTS idx_request_log_entries_success ON request_log_entrie
 	if err := s.ensureSchemaColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureObservationSchema(ctx); err != nil {
+		return err
+	}
 	return s.ensureSearchSchema(ctx)
 }
 
@@ -251,8 +254,8 @@ INSERT INTO request_log_entries (
   prompt, output, error, system_prompt,
   available_tools_json, mcps_json, skills_json, called_tools_json, prompt_metadata_json, request_metadata_json,
   prompt_preview, output_preview, error_preview, tool_preview, system_prompt_preview, called_tools_preview,
-  session_id, thread_id, turn_id, has_error, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  session_id, thread_id, turn_id, has_error, trace_id, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   name=excluded.name,
   raw_log_path=excluded.raw_log_path,
@@ -295,8 +298,9 @@ ON CONFLICT(id) DO UPDATE SET
   thread_id=excluded.thread_id,
   turn_id=excluded.turn_id,
   has_error=excluded.has_error,
+  trace_id=excluded.trace_id,
   updated_at=excluded.updated_at
-	`, item.ID, item.Name, candidate.path, item.Size, item.Modified, item.Timestamp, candidate.logTime.Unix(), item.URL, item.Method, item.Model, requestLogParserRevision, protocolProvider, providerName, item.AuthID, item.AuthType, item.UpstreamURL, item.UpstreamModel, item.ChannelModel, item.IP, item.IPLocation, item.Status, success, parsed.prompt, parsed.output, parsed.error, parsed.promptMetadata.SystemPrompt, string(availableTools), string(mcps), string(skills), string(calledTools), string(promptMetadata), string(requestMetadata), item.PromptPreview, item.OutputPreview, item.ErrorPreview, item.ToolPreview, item.SystemPromptPreview, item.CalledToolsPreview, item.SessionID, item.ThreadID, item.TurnID, hasError, now, now)
+	`, item.ID, item.Name, candidate.path, item.Size, item.Modified, item.Timestamp, candidate.logTime.Unix(), item.URL, item.Method, item.Model, requestLogParserRevision, protocolProvider, providerName, item.AuthID, item.AuthType, item.UpstreamURL, item.UpstreamModel, item.ChannelModel, item.IP, item.IPLocation, item.Status, success, parsed.prompt, parsed.output, parsed.error, parsed.promptMetadata.SystemPrompt, string(availableTools), string(mcps), string(skills), string(calledTools), string(promptMetadata), string(requestMetadata), item.PromptPreview, item.OutputPreview, item.ErrorPreview, item.ToolPreview, item.SystemPromptPreview, item.CalledToolsPreview, item.SessionID, item.ThreadID, item.TurnID, hasError, parsed.traceID, now, now)
 	return err
 }
 
@@ -545,9 +549,13 @@ func (s *requestLogStore) detail(ctx context.Context, id string) (requestLogDeta
 }
 
 func (s *requestLogStore) detailWithCutoff(ctx context.Context, id string, cutoff *int64) (requestLogDetail, error) {
+	return readRequestLogDetail(ctx, s.db, id, cutoff)
+}
+
+func readRequestLogDetail(ctx context.Context, reader requestLogReader, id string, cutoff *int64) (requestLogDetail, error) {
 	cutoffSQL, cutoffArgs := requestLogCutoffSQL(cutoff)
 	args := append([]any{id}, cutoffArgs...)
-	row := s.db.QueryRowContext(ctx, `SELECT COALESCE(id, ''), COALESCE(name, ''), COALESCE(size, 0), COALESCE(modified, 0), COALESCE(timestamp_text, ''), COALESCE(url, ''), COALESCE(method, ''), COALESCE(model, ''), COALESCE(NULLIF(TRIM(provider_name), ''), COALESCE(provider, '')), COALESCE(auth_id, ''), COALESCE(auth_type, ''), COALESCE(upstream_url, ''), COALESCE(upstream_model, ''), COALESCE(channel_model, ''), COALESCE(ip, ''), COALESCE(ip_location, ''), COALESCE(status, 0), COALESCE(success, 0), COALESCE(prompt_preview, ''), COALESCE(output_preview, ''), COALESCE(error_preview, ''), COALESCE(tool_preview, ''), COALESCE(system_prompt_preview, ''), COALESCE(called_tools_preview, ''), COALESCE(session_id, ''), COALESCE(thread_id, ''), COALESCE(turn_id, ''), COALESCE(has_error, 0), COALESCE(prompt, ''), COALESCE(output, ''), COALESCE(error, ''), COALESCE(system_prompt, ''), COALESCE(available_tools_json, '[]'), COALESCE(mcps_json, '[]'), COALESCE(skills_json, '[]'), COALESCE(called_tools_json, '[]'), COALESCE(prompt_metadata_json, '{}'), COALESCE(request_metadata_json, '{}') FROM request_log_entries WHERE id = ?`+cutoffSQL, args...)
+	row := reader.QueryRowContext(ctx, `SELECT COALESCE(id, ''), COALESCE(name, ''), COALESCE(size, 0), COALESCE(modified, 0), COALESCE(timestamp_text, ''), COALESCE(url, ''), COALESCE(method, ''), COALESCE(model, ''), COALESCE(NULLIF(TRIM(provider_name), ''), COALESCE(provider, '')), COALESCE(auth_id, ''), COALESCE(auth_type, ''), COALESCE(upstream_url, ''), COALESCE(upstream_model, ''), COALESCE(channel_model, ''), COALESCE(ip, ''), COALESCE(ip_location, ''), COALESCE(status, 0), COALESCE(success, 0), COALESCE(prompt_preview, ''), COALESCE(output_preview, ''), COALESCE(error_preview, ''), COALESCE(tool_preview, ''), COALESCE(system_prompt_preview, ''), COALESCE(called_tools_preview, ''), COALESCE(session_id, ''), COALESCE(thread_id, ''), COALESCE(turn_id, ''), COALESCE(has_error, 0), COALESCE(prompt, ''), COALESCE(output, ''), COALESCE(error, ''), COALESCE(system_prompt, ''), COALESCE(available_tools_json, '[]'), COALESCE(mcps_json, '[]'), COALESCE(skills_json, '[]'), COALESCE(called_tools_json, '[]'), COALESCE(prompt_metadata_json, '{}'), COALESCE(request_metadata_json, '{}') FROM request_log_entries WHERE id = ?`+cutoffSQL, args...)
 	var detail requestLogDetail
 	var success, hasError int
 	var availableToolsJSON, mcpsJSON, skillsJSON, calledToolsJSON, promptMetadataJSON, requestMetadataJSON string

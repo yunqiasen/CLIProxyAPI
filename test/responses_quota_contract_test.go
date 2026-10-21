@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/requestlog"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
@@ -82,8 +83,9 @@ func TestResponsesWebsocketReportsExhaustedBudget(t *testing.T) {
 }
 
 type responsesQuotaFixture struct {
-	server *httptest.Server
-	model  string
+	server       *httptest.Server
+	model        string
+	observations *requestlog.Store
 }
 
 func newResponsesQuotaFixture(t *testing.T, upstreamHandler http.Handler, keys []string, configure ...func(*config.Config)) *responsesQuotaFixture {
@@ -123,6 +125,8 @@ func newResponsesQuotaFixture(t *testing.T, upstreamHandler http.Handler, keys [
 	h := openai.NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
 	logsDir := t.TempDir()
 	logHandler := management.NewHandlerWithoutConfigFilePath(cfg, manager)
+	observations := requestlog.NewStore(64)
+	logHandler.SetRequestObservations(observations)
 	logHandler.SetLogDirectory(logsDir)
 	if err := logHandler.StartRequestLogIndex(); err != nil {
 		t.Fatal(err)
@@ -133,13 +137,14 @@ func newResponsesQuotaFixture(t *testing.T, upstreamHandler http.Handler, keys [
 		}
 	})
 	router := gin.New()
+	router.Use(logging.GinLogrusLogger(), middleware.RequestObservationMiddleware(observations))
 	router.Use(middleware.RequestLoggingMiddleware(logging.NewFileRequestLogger(true, logsDir, logsDir, 0)))
 	router.GET("/v0/management/request-logs", logHandler.GetRequestLogs)
 	router.GET("/v1/responses", h.ResponsesWebsocket)
 	router.POST("/v1/responses", h.Responses)
 	server := httptest.NewServer(router)
 	t.Cleanup(server.Close)
-	return &responsesQuotaFixture{server: server, model: model}
+	return &responsesQuotaFixture{server: server, model: model, observations: observations}
 }
 
 func TestResponsesHTTPKeepsBudgetFailover(t *testing.T) {

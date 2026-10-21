@@ -16,8 +16,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/requestlog"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
@@ -166,11 +169,31 @@ func testCodexConversationSwitchContract(t *testing.T, agentModel, agentAlias, a
 					}
 				}
 				h := openai.NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
+				observations := requestlog.NewStore(128)
 				router := gin.New()
+				router.Use(logging.GinLogrusLogger(), middleware.RequestObservationMiddleware(observations))
 				router.POST("/v1/responses", h.Responses)
 				router.GET("/v1/responses", h.ResponsesWebsocket)
 				server := httptest.NewServer(router)
 				t.Cleanup(server.Close)
+				t.Cleanup(func() {
+					rows := observationRecords(t, observations, 14)
+					recovered := 0
+					for _, row := range rows {
+						if row.State != requestlog.Succeeded || len(row.Attempts) < 1 || len(row.Attempts) > 2 {
+							t.Errorf("bad observed conversation call: %+v", row)
+						}
+						if len(row.Attempts) == 2 {
+							recovered++
+							if !row.Recovered || row.Attempts[0].State != requestlog.Failed || row.Attempts[0].AuthID != row.Attempts[1].AuthID {
+								t.Errorf("same-key recovery lost: %+v", row)
+							}
+						}
+					}
+					if recovered == 0 {
+						t.Error("no compatibility recovery observed")
+					}
+				})
 				for session, start := range []string{"agentrouter.org", "anyrouter.top"} {
 					t.Run(fmt.Sprintf("session%d", session), func(t *testing.T) {
 						t.Parallel()

@@ -8,6 +8,7 @@ import (
 
 	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/requestlog"
 	internalutil "github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
@@ -111,9 +112,17 @@ func TestExecutionAttemptsDoNotReuseQuotaResponseHeaders(t *testing.T) {
 				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
 			}
 
-			ctx := internallogging.WithResponseHeadersHolder(context.Background())
+			observations := requestlog.NewStore(4)
+			ctx := requestlog.WithScope(internallogging.WithResponseHeadersHolder(context.Background()), observations, requestlog.Scope{TraceID: "trace"})
+			ctx, owner := requestlog.Start(ctx, "call", model)
 			if errExecute := test.run(manager, ctx, model); errExecute == nil {
 				t.Fatal("execution error = nil, want terminal prepare error")
+			}
+
+			owner.Finish(requestlog.Failed, 500, nil)
+			observed, _ := observations.Get("call")
+			if len(observed.Attempts) != 2 || observed.Attempts[0].AuthID != firstID || observed.Attempts[1].AuthID != secondID || observed.Attempts[1].Status != 500 {
+				t.Fatalf("preparation failure missing from route history: %+v", observed)
 			}
 
 			first, okFirst := manager.GetByID(firstID)

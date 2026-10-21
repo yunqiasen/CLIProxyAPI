@@ -337,6 +337,16 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 		headers["X-CPA-Client-IP"] = []string{sourceIP}
 	}
 
+	// Correlation is server-owned and confined to the log copy, never the outbound request.
+	for key := range headers {
+		if strings.EqualFold(key, "X-CPA-Log-Trace-ID") {
+			delete(headers, key)
+		}
+	}
+	if trace := logging.GetGinRequestID(c); trace != "" {
+		headers["X-CPA-Log-Trace-ID"] = []string{trace}
+	}
+
 	// Capture request body
 	var body []byte
 	if captureBody && c.Request.Body != nil {

@@ -641,7 +641,18 @@ func newTestServerWithConfig(t *testing.T, cfg *proxyconfig.Config, opts ...Serv
 	accessManager := sdkaccess.NewManager()
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
-	return NewServer(cfg, authManager, accessManager, configPath, opts...)
+	server := NewServer(cfg, authManager, accessManager, configPath, opts...)
+	cleanupTestServer(t, server)
+	return server
+}
+
+func cleanupTestServer(t *testing.T, server *Server) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := server.Stop(context.Background()); err != nil {
+			t.Errorf("stop test server: %v", err)
+		}
+	})
 }
 
 func TestNewServerAppliesTrustedProxyConfiguration(t *testing.T) {
@@ -2631,6 +2642,7 @@ func TestRequestLoggerHotReloadsAfterCommercialModeDisabled(t *testing.T) {
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	server := NewServer(cfg, auth.NewManager(nil, nil, nil), sdkaccess.NewManager(), configPath)
+	cleanupTestServer(t, server)
 
 	sendRequest := func() {
 		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"probe","input":"hello"}`))

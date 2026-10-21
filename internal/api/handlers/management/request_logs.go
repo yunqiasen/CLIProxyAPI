@@ -89,6 +89,7 @@ type parsedRequestLog struct {
 	prompt          string
 	output          string
 	error           string
+	traceID         string
 	promptMetadata  requestPromptMetadata
 	calledTools     []requestLogToolInfo
 	requestMetadata map[string]string
@@ -216,8 +217,58 @@ func (h *Handler) GetRequestLogs(c *gin.Context) {
 
 	retentionDays := h.requestLogRetentionDays()
 	storageError := ""
+	view := strings.TrimSpace(strings.ToLower(c.Query("view")))
+	state := strings.TrimSpace(strings.ToLower(c.Query("state")))
+	if view == "routes" && !validObservationState(state) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request state"})
+		return
+	}
 	manager, startupError := h.requestLogIndexSnapshot()
 	status := requestLogSyncStatus{LastSyncError: startupError}
+
+	if view == "routes" && manager != nil {
+		manager.TriggerSync()
+		items, total, obsWarning, errList := manager.ListRoutes(c.Request.Context(), requestLogQueryOptions{Query: query, Limit: limit, Offset: offset}, state)
+		status = manager.Status()
+		if errList == nil {
+			response := gin.H{
+				"items":   items,
+				"total":   total,
+				"limit":   limit,
+				"offset":  offset,
+				"storage": "sqlite",
+				"view":    "routes",
+			}
+			if obsWarning != "" {
+				response["observation_warning"] = obsWarning
+			}
+			for key, value := range requestLogSyncResponse(status, retentionDays) {
+				response[key] = value
+			}
+			h.setRequestLogSyncHeaders(c)
+			c.JSON(http.StatusOK, response)
+			return
+		}
+		if c.Request.Context().Err() != nil {
+			return
+		}
+		storageError = fmt.Sprintf("failed to list routes: %v", errList)
+	}
+	if view == "routes" {
+		if storageError == "" {
+			storageError = startupError
+			if storageError == "" {
+				storageError = "request log index unavailable"
+			}
+		}
+		items, total := liveRouteFallback(h.requestObservationsSnapshot(), requestLogQueryOptions{Query: query, Limit: limit, Offset: offset}, state, requestLogRetentionCutoff(time.Now(), retentionDays))
+		response := gin.H{"items": items, "total": total, "limit": limit, "offset": offset, "view": "routes", "storage": "memory", "storage_error": storageError, "observation_warning": "Recent route metadata only; durable history and full-text search pending."}
+		for key, value := range requestLogSyncResponse(status, retentionDays) {
+			response[key] = value
+		}
+		c.JSON(http.StatusOK, response)
+		return
+	}
 	if manager != nil {
 		manager.TriggerSync()
 		items, total, errList := manager.List(c.Request.Context(), requestLogQueryOptions{Query: query, Limit: limit, Offset: offset})
@@ -350,7 +401,48 @@ func (h *Handler) GetRequestLogDetail(c *gin.Context) {
 		return
 	}
 
+	view := strings.TrimSpace(strings.ToLower(c.Query("view")))
 	manager, _ := h.requestLogIndexSnapshot()
+	if view == "routes" {
+		metadataOnly := strings.EqualFold(strings.TrimSpace(c.Query("metadata_only")), "true")
+		var result any
+		var routeErr error = sql.ErrNoRows
+		if manager != nil {
+			if metadataOnly {
+				meta, err := manager.MetadataRoute(c.Request.Context(), id)
+				meta.RawLogPending = h.pendingRawRequestLog(meta.State, meta.RawLogID)
+				result, routeErr = meta, err
+			} else {
+				detail, err := manager.DetailRoute(c.Request.Context(), id)
+				detail.RawLogPending = h.pendingRawRequestLog(detail.State, detail.RawLogID)
+				result, routeErr = detail, err
+			}
+		}
+		h.setRequestLogSyncHeaders(c)
+		if routeErr == nil {
+			c.JSON(http.StatusOK, result)
+			return
+		}
+		if source := h.requestObservationsSnapshot(); source != nil {
+			if record, ok := source.Get(id); ok && observationWithinRetention(record, requestLogRetentionCutoff(time.Now(), h.requestLogRetentionDays())) {
+				meta := metadataFromObservation(record)
+				meta.RawLogPending = h.pendingRawRequestLog(meta.State, meta.RawLogID)
+				if metadataOnly {
+					c.JSON(http.StatusOK, meta)
+				} else {
+					c.JSON(http.StatusOK, observationDetail(meta, requestLogDetail{}))
+				}
+				return
+			}
+		}
+		if errors.Is(routeErr, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "request log not found"})
+		} else {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": fmt.Sprintf("failed to load route detail: %v", routeErr)})
+		}
+		return
+	}
+
 	if manager != nil {
 		detail, errDetail := manager.Detail(c.Request.Context(), id)
 		h.setRequestLogSyncHeaders(c)
@@ -441,7 +533,33 @@ func (h *Handler) ExportRequestLogs(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "format must be csv or jsonl"})
 		return
 	}
+	view := strings.TrimSpace(strings.ToLower(c.Query("view")))
+	state := strings.TrimSpace(strings.ToLower(c.Query("state")))
+	if view == "routes" && !validObservationState(state) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request state"})
+		return
+	}
 	manager, startupError := h.requestLogIndexSnapshot()
+	if view == "routes" && manager != nil {
+		manager.TriggerSync()
+		h.setRequestLogSyncHeaders(c)
+		filename := fmt.Sprintf("request-logs-routes-%s.%s", time.Now().Format("20060102-150405"), format)
+		if format == "jsonl" {
+			c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
+		} else {
+			c.Header("Content-Type", "text/csv; charset=utf-8")
+		}
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+		if errExport := manager.ExportRoutes(c.Request.Context(), c.Writer, requestLogQueryOptions{Query: c.Query("q"), Limit: limit, Offset: offset}, state, format); errExport != nil {
+			_ = c.Error(errExport)
+			if !c.Writer.Written() {
+				c.Header("Content-Disposition", "")
+				c.Header("Content-Type", "application/json; charset=utf-8")
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "request log export failed"})
+			}
+		}
+		return
+	}
 	if manager == nil {
 		if startupError == "" {
 			startupError = "request log index unavailable"
@@ -828,6 +946,7 @@ func parseRequestLogFile(candidate requestLogCandidate) (parsedRequestLog, error
 	}
 	ip := requestIP(headers)
 	location := requestIPLocation(headers, ip)
+	traceID := strings.TrimSpace(headers["X-CPA-Log-Trace-ID"])
 	id := requestLogIDFromFilename(candidate.name)
 
 	timestamp := strings.TrimSpace(info["Timestamp"])
@@ -870,6 +989,7 @@ func parseRequestLogFile(candidate requestLogCandidate) (parsedRequestLog, error
 		prompt:          prompt,
 		output:          output,
 		error:           errFullText,
+		traceID:         traceID,
 		promptMetadata:  promptMetadata,
 		calledTools:     calledTools,
 		requestMetadata: requestMetadata,

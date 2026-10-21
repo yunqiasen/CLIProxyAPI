@@ -61,15 +61,20 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		return
 	}
 	if len(fileHeaders) == 1 {
-		if _, errUpload := h.storeUploadedAuthFile(ctx, fileHeaders[0]); errUpload != nil {
+		name, errUpload := h.storeUploadedAuthFile(ctx, fileHeaders[0])
+		if errUpload != nil {
 			if errors.Is(errUpload, errAuthFileMustBeJSON) {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "file must be .json"})
+				return
+			}
+			if status, ok := nativeImportErrorStatus(errUpload); ok {
+				c.JSON(status, gin.H{"error": errUpload.Error()})
 				return
 			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errUpload.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "name": name})
 		return
 	}
 	if len(fileHeaders) > 1 {
@@ -121,11 +126,32 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
 	}
+	nativeResult, err := tryNativeImport(data)
+	if err != nil {
+		if status, ok := nativeImportErrorStatus(err); ok {
+			c.JSON(status, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	if nativeResult != nil {
+		if err = h.writeNativeAuthFile(ctx, nativeResult.Name, nativeResult.Data); err != nil {
+			if status, ok := nativeImportErrorStatus(err); ok {
+				c.JSON(status, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(200, gin.H{"status": "ok", "name": nativeResult.Name})
+		return
+	}
 	if err = h.writeAuthFile(ctx, filepath.Base(name), data); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(200, gin.H{"status": "ok"})
+	c.JSON(200, gin.H{"status": "ok", "name": filepath.Base(name)})
 }
 
 // Delete auth files: single by name or all
@@ -251,6 +277,16 @@ func (h *Handler) storeUploadedAuthFile(ctx context.Context, file *multipart.Fil
 	data, err := io.ReadAll(src)
 	if err != nil {
 		return "", fmt.Errorf("failed to read uploaded file: %w", err)
+	}
+	nativeResult, err := tryNativeImport(data)
+	if err != nil {
+		return name, err
+	}
+	if nativeResult != nil {
+		if err := h.writeNativeAuthFile(ctx, nativeResult.Name, nativeResult.Data); err != nil {
+			return "", err
+		}
+		return nativeResult.Name, nil
 	}
 	if err := h.writeAuthFile(ctx, name, data); err != nil {
 		return "", err

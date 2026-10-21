@@ -69,6 +69,7 @@ type Handler struct {
 	quotaRefreshJobs        *quotaRefreshJobStore
 	requestLogIndex         *requestLogIndexManager
 	requestLogIndexError    string
+	observationStore        ObservationSource
 }
 
 type configReloadSnapshot struct {
@@ -279,6 +280,22 @@ func (h *Handler) SetLogDirectory(dir string) {
 	h.logDir = dir
 }
 
+// SetRequestObservations binds the passive request source before index startup.
+func (h *Handler) SetRequestObservations(store ObservationSource) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.observationStore = store
+}
+
+func (h *Handler) requestObservationsSnapshot() ObservationSource {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.observationStore
+}
+
 // StartRequestLogIndex initializes the long-lived structured request-log index.
 func (h *Handler) StartRequestLogIndex() error {
 	if h == nil {
@@ -295,9 +312,13 @@ func (h *Handler) StartRequestLogIndex() error {
 	}
 	h.mu.Unlock()
 
+	h.mu.Lock()
+	obsStore := h.observationStore
+	h.mu.Unlock()
 	manager, err := newRequestLogIndexManager(dir, requestLogIndexManagerOptions{
-		RetentionDays: h.requestLogRetentionDays,
-		SyncInterval:  defaultRequestLogSyncInterval,
+		RetentionDays:    h.requestLogRetentionDays,
+		SyncInterval:     defaultRequestLogSyncInterval,
+		ObservationStore: obsStore,
 	})
 	if err != nil {
 		h.mu.Lock()

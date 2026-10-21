@@ -23,12 +23,13 @@ type requestLogSyncStatus struct {
 }
 
 type requestLogIndexManagerOptions struct {
-	RetentionDays func() int
-	ScanHook      func(context.Context) error
-	BatchSize     int
-	BatchHook     func(int)
-	SyncInterval  time.Duration
-	Now           func() time.Time
+	RetentionDays    func() int
+	ScanHook         func(context.Context) error
+	BatchSize        int
+	BatchHook        func(int)
+	SyncInterval     time.Duration
+	Now              func() time.Time
+	ObservationStore ObservationSource
 }
 
 type requestLogIndexManager struct {
@@ -40,6 +41,8 @@ type requestLogIndexManager struct {
 	batchHook     func(int)
 	syncInterval  time.Duration
 	now           func() time.Time
+
+	obsWriter *observationWriter
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -77,7 +80,7 @@ func newRequestLogIndexManager(dir string, opts requestLogIndexManagerOptions) (
 	if now == nil {
 		now = time.Now
 	}
-	return &requestLogIndexManager{
+	mgr := &requestLogIndexManager{
 		dir:           dir,
 		store:         store,
 		retentionDays: retentionDays,
@@ -89,7 +92,11 @@ func newRequestLogIndexManager(dir string, opts requestLogIndexManagerOptions) (
 		ctx:           ctx,
 		cancel:        cancel,
 		trigger:       make(chan struct{}, 1),
-	}, nil
+	}
+	if opts.ObservationStore != nil {
+		mgr.obsWriter = newObservationWriter(opts.ObservationStore, store, 0, now)
+	}
+	return mgr, nil
 }
 
 func (m *requestLogIndexManager) Start() {
@@ -97,6 +104,9 @@ func (m *requestLogIndexManager) Start() {
 		return
 	}
 	m.startOnce.Do(func() {
+		if m.obsWriter != nil {
+			m.obsWriter.Start()
+		}
 		m.wg.Add(1)
 		go m.run()
 		m.TriggerSync()
@@ -106,6 +116,9 @@ func (m *requestLogIndexManager) Start() {
 func (m *requestLogIndexManager) TriggerSync() {
 	if m == nil {
 		return
+	}
+	if m.obsWriter != nil {
+		m.obsWriter.TriggerSync()
 	}
 	select {
 	case <-m.ctx.Done():
@@ -132,6 +145,76 @@ func (m *requestLogIndexManager) List(ctx context.Context, opts requestLogQueryO
 		return nil, 0, fmt.Errorf("request log index unavailable")
 	}
 	return m.store.list(ctx, opts)
+}
+
+// ListRoutes returns the routes view combining observations and raw entries.
+func (m *requestLogIndexManager) ListRoutes(ctx context.Context, opts requestLogQueryOptions, state string) ([]requestLogRouteListItem, int, string, error) {
+	if m == nil || m.store == nil {
+		return nil, 0, "", fmt.Errorf("request log index unavailable")
+	}
+	cutoff := requestLogRetentionCutoff(m.now(), m.retentionDays())
+	items, total, err := m.store.listRoutes(ctx, opts, state, cutoff)
+	warning := ""
+	if m.obsWriter != nil {
+		warning = m.obsWriter.Status().warning()
+	}
+	return items, total, warning, err
+}
+
+// DetailRoute returns a single observation with raw detail joined by trace_id.
+// If no observation exists, falls back to the raw entry detail for legacy IDs.
+func (m *requestLogIndexManager) DetailRoute(ctx context.Context, id string) (requestLogRouteDetail, error) {
+	if m == nil || m.store == nil {
+		return requestLogRouteDetail{}, fmt.Errorf("request log index unavailable")
+	}
+	cutoff := requestLogRetentionCutoff(m.now(), m.retentionDays())
+	detail, err := m.store.detailRoute(ctx, id, cutoff)
+	if err == nil {
+		return detail, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return requestLogRouteDetail{}, err
+	}
+	// No observation found; fall back to raw entry detail for legacy IDs.
+	resolvedID, errResolve := m.store.resolveID(ctx, id)
+	if errResolve != nil {
+		return requestLogRouteDetail{}, errResolve
+	}
+	return m.store.detailRoute(ctx, resolvedID, cutoff)
+}
+
+// MetadataRoute reads attempts without loading the raw prompt/response bodies.
+func (m *requestLogIndexManager) MetadataRoute(ctx context.Context, id string) (requestLogRouteMetadata, error) {
+	if m == nil || m.store == nil {
+		return requestLogRouteMetadata{}, fmt.Errorf("request log index unavailable")
+	}
+	cutoff := requestLogRetentionCutoff(m.now(), m.retentionDays())
+	meta, err := m.store.metadataRoute(ctx, id, cutoff)
+	if err == nil || !errors.Is(err, sql.ErrNoRows) {
+		return meta, err
+	}
+	resolved, err := m.store.resolveID(ctx, id)
+	if err != nil {
+		return meta, err
+	}
+	return m.store.metadataRoute(ctx, resolved, cutoff)
+}
+
+// ExportRoutes exports observations and raw-only rows with state filtering.
+func (m *requestLogIndexManager) ExportRoutes(ctx context.Context, w io.Writer, opts requestLogQueryOptions, state, format string) error {
+	if m == nil || m.store == nil {
+		return fmt.Errorf("request log index unavailable")
+	}
+	cutoff := requestLogRetentionCutoff(m.now(), m.retentionDays())
+	return m.store.exportRoutes(ctx, w, opts, state, format, cutoff)
+}
+
+// ObservationWarning returns the current observation writer warning string.
+func (m *requestLogIndexManager) ObservationWarning() string {
+	if m == nil || m.obsWriter == nil {
+		return ""
+	}
+	return m.obsWriter.Status().warning()
 }
 
 func (m *requestLogIndexManager) Detail(ctx context.Context, id string) (requestLogDetail, error) {
@@ -200,6 +283,9 @@ func (m *requestLogIndexManager) Close() error {
 	m.closeOnce.Do(func() {
 		m.cancel()
 		m.wg.Wait()
+		if m.obsWriter != nil {
+			m.obsWriter.Close()
+		}
 		if m.store != nil {
 			m.closeErr = m.store.close()
 		}
@@ -314,6 +400,9 @@ func (m *requestLogIndexManager) sync(ctx context.Context) error {
 
 	if cutoffTime != nil {
 		if err := m.store.pruneBefore(ctx, *cutoffTime); err != nil {
+			return err
+		}
+		if err := m.store.pruneObservationsBefore(ctx, *cutoffTime); err != nil {
 			return err
 		}
 	}

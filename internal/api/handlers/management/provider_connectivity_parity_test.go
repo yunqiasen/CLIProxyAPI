@@ -120,12 +120,13 @@ func TestProviderConnectivityCodexDraftOverridesRoutingWithoutChangingSavedState
 
 func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 	for _, scenario := range []struct {
-		host      string
-		resource  bool
-		masked    bool
-		anyItems  bool
-		requestID bool
-		model     string
+		host        string
+		resource    bool
+		masked      bool
+		anyItems    bool
+		requestID   bool
+		errorFormat string
+		model       string
 	}{
 		{host: "anyrouter.top"},
 		{host: "anyrouter.top", anyItems: true},
@@ -134,6 +135,8 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 		{host: "agentrouter.org", resource: true, masked: true},
 		{host: "agentrouter.org", resource: true, requestID: true, model: "gpt-6.1-sol"},
 		{host: "agentrouter.org", requestID: true, model: "gpt-6.1-sol"},
+		{host: "agentrouter.org", resource: true, errorFormat: "numeric", model: "gpt-6.1-sol"},
+		{host: "agentrouter.org", resource: true, errorFormat: "decode", model: "gpt-6.1-sol"},
 	} {
 		host := scenario.host
 		model, alias := scenario.model, "cpa-6a"
@@ -142,7 +145,7 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 		} else {
 			alias = "cpa-6s"
 		}
-		t.Run(fmt.Sprintf("%s/resource_%t/masked_%t/items_%t/request_id_%t", host, scenario.resource, scenario.masked, scenario.anyItems, scenario.requestID), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s/resource_%t/masked_%t/items_%t/request_id_%t/error_%s", host, scenario.resource, scenario.masked, scenario.anyItems, scenario.requestID, scenario.errorFormat), func(t *testing.T) {
 			var requests [][]byte
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				b, _ := io.ReadAll(r.Body)
@@ -181,7 +184,16 @@ func TestProviderConnectivityAndProductionShareAnyAgentPipeline(t *testing.T) {
 					if scenario.requestID {
 						message = strings.Replace(message, " [trace_id", " (request id: fixture) [trace_id", 1)
 					}
-					_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"type": "invalid_request_error", "code": nil, "param": "", "message": message}})
+					rejection := map[string]any{"type": "invalid_request_error", "code": nil, "param": "", "message": message}
+					if scenario.errorFormat != "" {
+						rejection["code"] = 0
+						rejection["message"] = strings.Replace(message, " [trace_id=parity]", " trace_id: inner_parity", 1)
+						if scenario.errorFormat == "decode" {
+							inner, _ := json.Marshal(map[string]any{"error": rejection})
+							rejection = map[string]any{"type": "invalid_request_error", "code": nil, "param": "", "message": "failed to decode error response: json: cannot unmarshal number into Go struct field ResponseError.error.code of type string, raw: " + string(inner) + " [trace_id=outer_parity]"}
+						}
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"error": rejection})
 					return
 				}
 				if host == "agentrouter.org" {

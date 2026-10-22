@@ -169,6 +169,9 @@ const agentResourceMismatchRejection = `{"error":{"type":"invalid_request_error"
 const agentMaskedResourceMismatchRejection = `{"error":{"type":"invalid_request_error","param":"","message":"OpenAI Responses bad request: The requested item was created under a different *** OpenAI resource. Use the same resource that created the item to access it. [trace_id=fixture]"}}`
 const agentRequestIDResourceRejection = `{"error":{"message":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. (request id: 20261021073158346501676MSvAiaYZ) [trace_id=968823f431986387c18884d75f28b92f]","type":"invalid_request_error","param":"","code":null}}`
 
+const agentNumericResourceRejection = `{"error":{"code":0,"message":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. trace_id: inner_fixture","type":"invalid_request_error"}}`
+const agentDecodeResourceRejection = `{"error":{"code":null,"param":"","type":"invalid_request_error","message":"failed to decode error response: json: cannot unmarshal number into Go struct field ResponseError.error.code of type string, raw: {\"error\":{\"code\":0,\"message\":\"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. trace_id: inner_fixture\",\"type\":\"invalid_request_error\"}} [trace_id=outer_fixture]"}}`
+
 const completedHistoryResponse = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"status\":\"completed\",\"output\":[]}}\n\n"
 
 func TestCodexAgentMessageOnlySSERecoveryBoundaries(t *testing.T) {
@@ -177,6 +180,8 @@ func TestCodexAgentMessageOnlySSERecoveryBoundaries(t *testing.T) {
 		{"resource", agentResourceMismatchRejection},
 		{"masked-resource", agentMaskedResourceMismatchRejection},
 		{"resource-request-id", agentRequestIDResourceRejection},
+		{"numeric-resource", agentNumericResourceRejection},
+		{"decode-resource", agentDecodeResourceRejection},
 		{"encrypted-request-id", strings.Replace(agentMessageOnlySignatureRejection, " [trace_id", " (request id: fixture) [trace_id", 1)},
 		{"web-search-resource", agentMaskedResourceMismatchRejection},
 		{"encrypted-web-search", agentMessageOnlySignatureRejection},
@@ -216,7 +221,7 @@ func TestCodexAgentMessageOnlySSERecoveryBoundaries(t *testing.T) {
 					if scenario.name == "encrypted-web-search" {
 						req.Payload = bytes.Replace(req.Payload, []byte(`{"role":"user"`), []byte(`{"type":"web_search_call","id":"ws_foreign","status":"completed","action":{"type":"search","query":"preserved search"}},{"role":"user"`), 1)
 					}
-					if strings.HasSuffix(scenario.name, "-request-id") {
+					if strings.HasSuffix(scenario.name, "-request-id") || scenario.name == "numeric-resource" || scenario.name == "decode-resource" {
 						req.Model = "gpt-6.1-sol"
 					}
 					opts := coreexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: stream}
@@ -250,12 +255,13 @@ func TestCodexAgentMessageOnlySSERecoveryBoundaries(t *testing.T) {
 
 func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 	for _, route := range []struct {
-		host      string
-		source    sdktranslator.Format
-		resource  bool
-		masked    bool
-		anyItems  bool
-		requestID bool
+		host        string
+		source      sdktranslator.Format
+		resource    bool
+		masked      bool
+		anyItems    bool
+		requestID   bool
+		errorFormat string
 	}{
 		{host: "anyrouter.top", source: sdktranslator.FormatOpenAIResponse},
 		{host: "anyrouter.top", source: sdktranslator.FormatOpenAIResponse, anyItems: true},
@@ -265,14 +271,16 @@ func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 		{host: "anyrouter.top", source: sdktranslator.FromString(codexOpenAIImageSourceFormat)},
 		{host: "agentrouter.org", source: sdktranslator.FormatOpenAIResponse, resource: true, requestID: true},
 		{host: "agentrouter.org", source: sdktranslator.FormatOpenAIResponse, requestID: true},
+		{host: "agentrouter.org", source: sdktranslator.FormatOpenAIResponse, resource: true, errorFormat: "numeric"},
+		{host: "agentrouter.org", source: sdktranslator.FormatOpenAIResponse, resource: true, errorFormat: "decode"},
 	} {
 		host := route.host
 		model := "gpt-6-astra"
-		if route.requestID {
+		if route.requestID || route.errorFormat != "" {
 			model = "gpt-6.1-sol"
 		}
 		for _, stream := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/%s/resource_%t/masked_%t/items_%t/request_id_%t/stream_%t", host, route.source, route.resource, route.masked, route.anyItems, route.requestID, stream), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/%s/resource_%t/masked_%t/items_%t/request_id_%t/error_%s/stream_%t", host, route.source, route.resource, route.masked, route.anyItems, route.requestID, route.errorFormat, stream), func(t *testing.T) {
 				var calls atomic.Int32
 				upgrader := websocket.Upgrader{}
 				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -311,6 +319,11 @@ func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 							}
 							if route.requestID {
 								rejection = strings.Replace(rejection, " [trace_id", " (request id: fixture) [trace_id", 1)
+							}
+							if route.errorFormat == "numeric" {
+								rejection = agentNumericResourceRejection
+							} else if route.errorFormat == "decode" {
+								rejection = agentDecodeResourceRejection
 							}
 							_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status":400,`+strings.TrimPrefix(rejection, "{")))
 							continue

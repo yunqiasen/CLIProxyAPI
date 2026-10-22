@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"encoding/json"
 	"net/url"
 	"regexp"
 	"strings"
@@ -11,7 +12,11 @@ import (
 
 // Agent appends relay request metadata to the upstream message. Keep both the
 // message and diagnostic suffix anchored rather than accepting arbitrary prose.
-const agentRejectionMetadataSuffix = `(?: \(request id: [A-Za-z0-9_-]+\))?(?: \[trace_id=[A-Za-z0-9_-]+\])?$`
+const agentRejectionMetadataSuffix = `(?: \(request id: [A-Za-z0-9_-]+\))?(?: \[trace_id=[A-Za-z0-9_-]+\]| trace_id: [A-Za-z0-9_-]+)?$`
+
+const agentRejectionDecodePrefix = "failed to decode error response: json: cannot unmarshal number into Go struct field ResponseError.error.code of type string, raw: "
+
+var agentRejectionRelayMetadata = regexp.MustCompile(`^` + agentRejectionMetadataSuffix)
 
 var agentSignatureRejection = regexp.MustCompile(`^(?:OpenAI Responses bad request: )?The encrypted content for item (rs_[A-Za-z0-9_-]+) could not be verified\. Reason: Encrypted content could not be decrypted or parsed\.` + agentRejectionMetadataSuffix)
 
@@ -44,11 +49,10 @@ func classifyAgentSignatureRejection(body, rejection []byte, endpoint string) ag
 	if !gjson.GetBytes(rejection, path).IsObject() {
 		path = "response.error"
 	}
-	e := gjson.GetBytes(rejection, path)
-	if e.Get("type").String() != "invalid_request_error" || e.Get("code").String() != "" || e.Get("param").String() != "" {
+	message := agentSignatureRejectionMessage(gjson.GetBytes(rejection, path))
+	if message == "" {
 		return agentSignatureRejectionMatch{}
 	}
-	message := e.Get("message").String()
 	if match := agentSignatureRejection.FindStringSubmatch(message); len(match) == 2 {
 		for _, item := range gjson.GetBytes(body, "input").Array() {
 			if item.Get("type").String() == "reasoning" && item.Get("id").String() == match[1] && item.Get("encrypted_content").Type == gjson.String && item.Get("encrypted_content").String() != "" {
@@ -69,6 +73,36 @@ func classifyAgentSignatureRejection(body, rejection []byte, endpoint string) ag
 		}
 	}
 	return agentSignatureRejectionMatch{}
+}
+
+// agentSignatureRejectionMessage unwraps only the observed relay decoder error.
+// Parse one JSON value and validate both envelopes plus the remaining metadata;
+// quoted errors, arbitrary trailers and recursive wrappers are not evidence.
+func agentSignatureRejectionMessage(e gjson.Result) string {
+	if !isAgentSignatureRejectionEnvelope(e) {
+		return ""
+	}
+	message := e.Get("message").String()
+	if !strings.HasPrefix(message, agentRejectionDecodePrefix) {
+		return message
+	}
+	encoded := strings.TrimPrefix(message, agentRejectionDecodePrefix)
+	decoder := json.NewDecoder(strings.NewReader(encoded))
+	var raw json.RawMessage
+	if errDecode := decoder.Decode(&raw); errDecode != nil || !agentRejectionRelayMetadata.MatchString(encoded[decoder.InputOffset():]) {
+		return ""
+	}
+	inner := gjson.GetBytes(raw, "error")
+	if !isAgentSignatureRejectionEnvelope(inner) || inner.Get("code").Type != gjson.Number || inner.Get("code").Raw != "0" {
+		return ""
+	}
+	return inner.Get("message").String()
+}
+
+func isAgentSignatureRejectionEnvelope(e gjson.Result) bool {
+	code := e.Get("code")
+	return e.IsObject() && e.Get("type").String() == "invalid_request_error" && e.Get("param").String() == "" &&
+		(code.String() == "" || (code.Type == gjson.Number && code.Raw == "0"))
 }
 
 // normalizeAgentSignatureRejection maps verified Agent state errors into the

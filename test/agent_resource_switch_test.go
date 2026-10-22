@@ -37,6 +37,11 @@ func TestAgentSolRateLimitSwitchWithRequestIDKeepsPortableConversation(t *testin
 	testAgentRateLimitSwitchKeepsPortableConversation(t, rejection, "gpt-6.1-sol", "cpa-6s")
 }
 
+func TestAgentSolRateLimitSwitchWithDecodeErrorKeepsPortableConversation(t *testing.T) {
+	rejection := fmt.Sprintf(`{"error":{"type":"invalid_request_error","code":null,"param":"","message":%q}}`, agentDecodeResourceSwitchMessage)
+	testAgentRateLimitSwitchKeepsPortableConversation(t, rejection, "gpt-6.1-sol", "cpa-6s")
+}
+
 func testAgentRateLimitSwitchKeepsPortableConversation(t *testing.T, rejection, model, alias string) {
 	t.Helper()
 	for _, stream := range []bool{false, true} {

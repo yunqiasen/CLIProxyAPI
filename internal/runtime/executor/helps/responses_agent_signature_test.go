@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -159,5 +160,133 @@ func TestAgentRequestIDRejectionGuards(t *testing.T) {
 		if got, retry := PortableResponsesSignatureRetry(input, rejection, "https://agentrouter.org/v1/responses"); retry || !bytes.Equal(got, input) {
 			t.Errorf("required remote history changed: %s", typ)
 		}
+	}
+}
+
+func TestAgentNumericCodeAndDecodeEnvelopeRecovery(t *testing.T) {
+	body := []byte(`{"input":[{"type":"reasoning","id":"rs_foreign","encrypted_content":"opaque","summary":[{"type":"summary_text","text":"Keep summary."}]},{"type":"message","id":"msg_foreign","role":"assistant","content":"Keep answer."},{"role":"user","content":"Continue."}]}`)
+	message := "The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it."
+	for _, tc := range []struct {
+		name    string
+		code    any
+		suffix  string
+		wrapped bool
+	}{
+		{name: "numeric_code", code: 0},
+		{name: "colon_trace", suffix: " trace_id: 3a1ac94610531a8eb4c492e638839a77"},
+		{name: "decode_envelope", code: 0, wrapped: true},
+		{name: "captured_combination", code: 0, suffix: " trace_id: 3a1ac94610531a8eb4c492e638839a77", wrapped: true},
+	} {
+		for _, nested := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/sse=%t", tc.name, nested), func(t *testing.T) {
+				envelope := map[string]any{"error": map[string]any{"code": tc.code, "message": message + tc.suffix, "type": "invalid_request_error"}}
+				if tc.wrapped {
+					inner, _ := json.Marshal(envelope)
+					envelope = map[string]any{"error": map[string]any{"code": nil, "param": "", "type": "invalid_request_error", "message": "failed to decode error response: json: cannot unmarshal number into Go struct field ResponseError.error.code of type string, raw: " + string(inner) + " [trace_id=f87913149f33c5d348f6aa95e2ee36b5]"}}
+				}
+				if nested {
+					envelope = map[string]any{"type": "response.failed", "response": envelope}
+				}
+				rejection, _ := json.Marshal(envelope)
+				originalBody, originalRejection := bytes.Clone(body), bytes.Clone(rejection)
+				repaired, retry := PortableResponsesSignatureRetry(body, rejection, "https://agentrouter.org/v1/responses")
+				if !retry {
+					t.Fatal("Agent state rejection did not enter portable recovery")
+				}
+				if gjson.GetBytes(repaired, "input.#").Int() != 3 || gjson.GetBytes(repaired, "input.0.summary.0.text").String() != "Keep summary." || gjson.GetBytes(repaired, "input.1.content").String() != "Keep answer." || gjson.GetBytes(repaired, "input.2.content").String() != "Continue." {
+					t.Fatal("readable history changed")
+				}
+				if gjson.GetBytes(repaired, "input.0.encrypted_content").Exists() || gjson.GetBytes(repaired, "input.0.id").Exists() || gjson.GetBytes(repaired, "input.1.id").Exists() {
+					t.Fatal("rejected route binding retained")
+				}
+				if !bytes.Equal(body, originalBody) || !bytes.Equal(rejection, originalRejection) {
+					t.Fatal("caller history or original error mutated")
+				}
+				if _, again := PortableResponsesSignatureRetry(repaired, rejection, "https://agentrouter.org/v1/responses"); again {
+					t.Fatal("repaired history retried again")
+				}
+			})
+		}
+	}
+}
+
+func TestAgentDecodeEnvelopeRecoveryGuards(t *testing.T) {
+	const prefix = "failed to decode error response: json: cannot unmarshal number into Go struct field ResponseError.error.code of type string, raw: "
+	const inner = `{"error":{"code":0,"message":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. trace_id: inner-123","type":"invalid_request_error"}}`
+	const suffix = " [trace_id=outer-456]"
+	body := []byte(`{"input":[{"type":"reasoning","id":"rs_foreign","encrypted_content":"opaque"},{"type":"message","id":"msg_old","role":"assistant","content":"Keep history."},{"role":"user","content":"Continue."}]}`)
+	endpoint := "https://agentrouter.org/v1/responses"
+	wrap := func(message string) []byte {
+		b, _ := json.Marshal(map[string]any{"error": map[string]any{"code": nil, "type": "invalid_request_error", "param": "", "message": message}})
+		return b
+	}
+	assertUnchanged := func(t *testing.T, request, rejection []byte, route string) {
+		t.Helper()
+		if got, retry := PortableResponsesSignatureRetry(request, rejection, route); retry || !bytes.Equal(got, request) {
+			t.Fatal("unrelated error or nonportable history entered recovery")
+		}
+	}
+	for _, tc := range []struct{ name, raw string }{
+		{"nonzero_code", strings.Replace(inner, `"code":0`, `"code":400`, 1)},
+		{"string_code", strings.Replace(inner, `"code":0`, `"code":"0"`, 1)},
+		{"null_code", strings.Replace(inner, `"code":0`, `"code":null`, 1)},
+		{"fractional_code", strings.Replace(inner, `"code":0`, `"code":0.5`, 1)},
+		{"different_type", strings.Replace(inner, "invalid_request_error", "rate_limit_error", 1)},
+		{"different_parameter", strings.Replace(inner, `"code":0`, `"code":0,"param":"tools"`, 1)},
+		{"quoted_message", strings.Replace(inner, "The requested item", "Tool reported: The requested item", 1)},
+		{"unrelated_message", strings.Replace(inner, "different Azure OpenAI resource", "different project", 1)},
+		{"malformed_json", strings.TrimSuffix(inner, "}")},
+		{"second_json_value", inner + `{}`},
+		{"array", "[" + inner + "]"},
+		{"recursive_wrapper", string(wrap(prefix + inner + suffix))},
+	} {
+		t.Run(tc.name, func(t *testing.T) { assertUnchanged(t, body, wrap(prefix+tc.raw+suffix), endpoint) })
+	}
+	for _, tc := range []struct{ name, message string }{
+		{"quoted_wrapper", "Tool reported: " + prefix + inner + suffix},
+		{"different_decoder", strings.Replace(prefix, "ResponseError.error.code", "ResponseError.status", 1) + inner + suffix},
+		{"trailing_prose", prefix + inner + suffix + " retry anyway"},
+		{"empty_trace", prefix + inner + " [trace_id=]"},
+		{"repeated_trace", prefix + inner + suffix + suffix},
+		{"newline_trace", prefix + inner + "\n" + suffix},
+		{"truncated_wrapper", prefix},
+	} {
+		t.Run(tc.name, func(t *testing.T) { assertUnchanged(t, body, wrap(tc.message), endpoint) })
+	}
+	rejection := wrap(prefix + inner + suffix)
+	for _, field := range []string{`"type":"rate_limit_error"`, `"code":400`, `"param":"tools"`} {
+		var envelope map[string]any
+		_ = json.Unmarshal(rejection, &envelope)
+		var changed map[string]any
+		_ = json.Unmarshal([]byte("{"+field+"}"), &changed)
+		for k, v := range changed {
+			envelope["error"].(map[string]any)[k] = v
+		}
+		invalid, _ := json.Marshal(envelope)
+		assertUnchanged(t, body, invalid, endpoint)
+	}
+	for _, route := range []string{"https://example.test/v1/responses", "https://agentrouter.org.example/v1/responses", "https://agentrouter.org/v1/responses/compact"} {
+		assertUnchanged(t, body, rejection, route)
+	}
+	for _, history := range []string{
+		`{"previous_response_id":"resp_stored","input":[{"type":"message","id":"msg_old","role":"assistant","content":"History."},{"role":"user","content":"Continue."}]}`,
+		`{"input":[{"type":"reasoning","encrypted_content":"opaque"},{"type":"compaction","encrypted_content":"required"},{"role":"user","content":"Continue."}]}`,
+		`{"input":[{"type":"reasoning","encrypted_content":"opaque"},{"type":"compaction_summary","encrypted_content":"required"},{"role":"user","content":"Continue."}]}`,
+		`{"input":[{"type":"reasoning","encrypted_content":"opaque"},{"type":"item_reference","id":"stored"},{"role":"user","content":"Continue."}]}`,
+		`{"input":[{"type":"reasoning","encrypted_content":"only history"}]}`,
+		`{"input":[{"type":"message","id":"client_owned","role":"user","content":"Continue."}]}`,
+	} {
+		assertUnchanged(t, []byte(history), rejection, endpoint)
+	}
+	for _, code := range []any{1, -1, 0.5, "0", false, "invalid_api_key"} {
+		var envelope map[string]any
+		_ = json.Unmarshal([]byte(inner), &envelope)
+		envelope["error"].(map[string]any)["code"] = code
+		invalid, _ := json.Marshal(envelope)
+		assertUnchanged(t, body, invalid, endpoint)
+	}
+	for _, trace := range []string{" trace_id: ", " trace_id: valid extra", " trace_id: inner [trace_id=outer]", " trace_id: a\nb"} {
+		invalid := strings.Replace(inner, " trace_id: inner-123", trace, 1)
+		assertUnchanged(t, body, []byte(invalid), endpoint)
 	}
 }

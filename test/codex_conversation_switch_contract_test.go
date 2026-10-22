@@ -32,14 +32,26 @@ import (
 // Exercise the public HTTP contract with client-retained output, rather than
 // calling the recovery helper or constructing an already-repaired conversation.
 func TestCodexConversationSwitchContract(t *testing.T) {
-	testCodexConversationSwitchContract(t, "gpt-6-astra", "agentrouter.org", "The requested item was created under a different *** OpenAI resource. Use the same resource that created the item to access it. [trace_id=contract]")
+	testCodexConversationSwitchContract(t, "gpt-6-astra", "agentrouter.org", "The requested item was created under a different *** OpenAI resource. Use the same resource that created the item to access it. [trace_id=contract]", nil)
 }
 
 func TestCodexConversationSwitchSolRequestIDContract(t *testing.T) {
-	testCodexConversationSwitchContract(t, "gpt-6.1-sol", "cpa-6s", "The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. (request id: 20261021073158346501676MSvAiaYZ) [trace_id=968823f431986387c18884d75f28b92f]")
+	testCodexConversationSwitchContract(t, "gpt-6.1-sol", "cpa-6s", "The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. (request id: 20261021073158346501676MSvAiaYZ) [trace_id=968823f431986387c18884d75f28b92f]", nil)
 }
 
-func testCodexConversationSwitchContract(t *testing.T, agentModel, agentAlias, agentRejection string) {
+// Captured from the Agent response after glm5.2 -> cpa-6s in an existing
+// conversation. The relay wraps a numeric-code Azure rejection in a decode error.
+const agentDecodeResourceSwitchMessage = `failed to decode error response: json: cannot unmarshal number into Go struct field ResponseError.error.code of type string, raw: {"error":{"code":0,"message":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. trace_id: 3a1ac94610531a8eb4c492e638839a77","type":"invalid_request_error"}} [trace_id=f87913149f33c5d348f6aa95e2ee36b5]`
+
+func TestCodexConversationSwitchAgentDecodeErrorContract(t *testing.T) {
+	testCodexConversationSwitchContract(t, "gpt-6.1-sol", "cpa-6s", agentDecodeResourceSwitchMessage, nil)
+}
+
+func TestCodexConversationSwitchAgentNumericErrorContract(t *testing.T) {
+	testCodexConversationSwitchContract(t, "gpt-6.1-sol", "cpa-6s", "The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. trace_id: numeric_fixture", 0)
+}
+
+func testCodexConversationSwitchContract(t *testing.T, agentModel, agentAlias, agentRejection string, agentCode any) {
 	t.Helper()
 	models := map[string]string{"agentrouter.org": agentModel, "anyrouter.top": "gpt-6-astra"}
 	aliases := map[string]string{"agentrouter.org": agentAlias, "anyrouter.top": "cpa-6a"}
@@ -122,6 +134,9 @@ func testCodexConversationSwitchContract(t *testing.T, agentModel, agentAlias, a
 							message = "bad response status code 400 (request id: contract)"
 						}
 						rejection := map[string]any{"type": "invalid_request_error", "message": message, "param": ""}
+						if host == "agentrouter.org" {
+							rejection["code"] = agentCode
+						}
 						if rejectionSSE {
 							w.Header().Set("Content-Type", "text/event-stream")
 							writeConversationEvent(w, map[string]any{"type": "response.created", "response": map[string]any{"id": "rejected_scaffolding", "status": "in_progress", "output": []any{}}})

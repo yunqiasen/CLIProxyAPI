@@ -330,3 +330,94 @@ verification.
 Independent Standards and Spec reviews completed against the fixed baseline with
 zero findings on either axis. The complete diff was also inspected before local
 delivery; no provider settings or unrelated plugin-host changes are included.
+
+## October 22: numeric errors wrapped by the Agent relay
+
+Review baseline: `e080f6ee22d6a267ebe96162fb2ce5b0025afa99`.
+
+The screenshot matches the persisted error of local request
+`v1-responses-2026-10-22T100734-f6d01045`, started at 10:06:07 +08:00.
+The observation record identifies AgentRouter, client alias `cpa-6s`, upstream
+`gpt-6.1-sol`, HTTP 400 and exactly one attempt. Main logs confirm the same
+upstream error at 10:07:34. This is not text quoted inside a user prompt.
+
+The preceding 10:04:20 request had already recovered once and completed on the
+same credential. The exact client turn then recorded one opaque reasoning item,
+one tool call and its matching result before this failed continuation. There was
+no compaction in that turn fragment. Thus the screenshot also exercises continued
+tool work after a successful switch, not just the first request after switching.
+
+The outer `invalid_request_error` has a null code and a message beginning with
+`failed to decode error response`. Its `raw:` payload is another JSON error:
+
+```json
+{"error":{"code":0,"message":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. trace_id: 3a1ac94610531a8eb4c492e638839a77","type":"invalid_request_error"}}
+```
+
+The relay appends `[trace_id=f87913149f33c5d348f6aa95e2ee36b5]` outside that
+embedded JSON. The preceding repair covered direct errors with bracketed trace
+IDs and request IDs, but not this decoder envelope. Independently, numeric code
+`0` and the colon-style trace suffix also prevented recognition. Each condition
+fails a separate minimal regression on the baseline.
+
+The shared Agent recognizer now accepts the observed numeric zero and colon trace
+form. It decodes exactly one embedded JSON value only for the known decoder
+prefix, validates both error envelopes and the outer diagnostic suffix, and then
+uses the existing anchored resource/named-encryption matching. Other numeric
+codes, string codes, unrelated parameters/types, arbitrary quoted errors,
+recursive wrappers, extra JSON and malformed trailers do not trigger repair.
+The upstream error bytes are preserved; this parser is not a general error rewrite.
+
+Repair still modifies only the outgoing copy, using the existing one-shot,
+same-credential recovery. It preserves readable reasoning, messages, search
+records, tool arguments and matching results. It neither locks the conversation
+to Agent nor resets client history. Stored response references, item references
+and opaque compaction keep their existing boundaries. Output already delivered
+to the client is not replayed, and repeated rejection remains a failure.
+
+### Verification and evidence boundary
+
+- The recorded decoder message fails through the public HTTP, SSE and downstream
+  WebSocket handlers on the baseline, then passes after the change.
+- Numeric/direct and wrapped errors add 168 client turns using retained output:
+  Agent/Sol and Any/Astra in both directions, returning to a route, independent
+  concurrent sessions, and copied history. Existing 168-turn coverage remains.
+- Native upstream WebSocket, selected-key management-probe parity, rate-limit
+  failover to another credential, repeated failures, and failures after text,
+  reasoning or tool output all pass with the new envelopes.
+- A separate-process comparison uses the copied running baseline binary and the
+  candidate binary. The baseline reproduces the error after one attempt in all
+  12 numeric/wrapped, HTTP/SSE, client/probe combinations. The candidate passes
+  21 recovery and no-replay checks. Every upstream in this comparison is loopback.
+- The current raw request file has rotated away. The binary comparison therefore
+  uses the previously sanitized 155-item history as a representative long
+  conversation, not as the captured October 22 request body. The retained error,
+  route and attempt count are from the current incident.
+- Full `go test ./... -count=1 -timeout=180s`, the affected four-package race suite
+  (`-count=3`), server build and management-bundle regression pass. These suites
+  use local fixtures, with no paid-key sweep, provider edit or plugin installation.
+
+```sh
+go test ./internal/runtime/executor/helps ./internal/runtime/executor \
+  ./internal/api/handlers/management ./test \
+  -run 'AgentNumericCodeAndDecodeEnvelopeRecovery|AgentDecodeEnvelopeRecoveryGuards|ConversationSwitch.*Contract|AgentSol|CodexAgentMessageOnlySSERecoveryBoundaries|CodexWebsocketAnyAgentHistoryCompatibility|ProviderConnectivityAndProductionShareAnyAgentPipeline' \
+  -count=1
+```
+
+### Bounded live check and review
+
+A separate candidate process made one logical request using only Agent's first
+configured key and the production Responses executor. It carried an opaque
+reasoning item already returned by `cpa-6a`, with readable test messages replacing
+private text. No new Any request was sent. Agent returned HTTP 404, "The API
+deployment for this resource does not exist", request
+`20261022080430357626519aPyLYTXW`, trace
+`713cc48976df60ffc6809c6cc44ae1f1`. There was no `response.completed`; no other
+key was attempted. This is a different upstream outcome, not real-site acceptance
+of the recorded 400 or the user's original window. The production configuration,
+credential pool and runtime were untouched by this isolated check.
+
+Independent read-only reviews completed on both axes: Standards found no rule
+violations and two non-blocking naming/test-representation suggestions; Spec found
+no actionable findings. The suggestions were left unchanged under the repository's
+small-change/KISS rule. The final evidence additions were manually checked.

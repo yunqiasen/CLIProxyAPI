@@ -163,6 +163,15 @@ func TestAgentRequestIDRejectionGuards(t *testing.T) {
 	}
 }
 
+func TestAgentEncryptedRecoveryAcceptsCapturedRelayTraceSuffix(t *testing.T) {
+	body := []byte(`{"input":[{"type":"reasoning","id":"rs_foreign","encrypted_content":"opaque"},{"role":"user","content":"continue"}]}`)
+	rejection := []byte(`{"error":{"type":"invalid_request_error","code":null,"param":"","message":"The encrypted content for item rs_foreign could not be verified. Reason: Encrypted content could not be decrypted or parsed. trace_id: upstream-trace [trace_id=relay-trace]"}}`)
+	got, retry := PortableResponsesSignatureRetry(body, rejection, "https://agentrouter.org/v1/responses")
+	if !retry || gjson.GetBytes(got, "input.#").Int() != 1 || gjson.GetBytes(got, "input.0.content").String() != "continue" {
+		t.Fatalf("captured encrypted rejection not repaired: retry=%t body=%s", retry, got)
+	}
+}
+
 func TestAgentNumericCodeAndDecodeEnvelopeRecovery(t *testing.T) {
 	body := []byte(`{"input":[{"type":"reasoning","id":"rs_foreign","encrypted_content":"opaque","summary":[{"type":"summary_text","text":"Keep summary."}]},{"type":"message","id":"msg_foreign","role":"assistant","content":"Keep answer."},{"role":"user","content":"Continue."}]}`)
 	message := "The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it."
@@ -176,6 +185,7 @@ func TestAgentNumericCodeAndDecodeEnvelopeRecovery(t *testing.T) {
 		{name: "colon_trace", suffix: " trace_id: 3a1ac94610531a8eb4c492e638839a77"},
 		{name: "decode_envelope", code: 0, wrapped: true},
 		{name: "captured_combination", code: 0, suffix: " trace_id: 3a1ac94610531a8eb4c492e638839a77", wrapped: true},
+		{name: "double_trace_inner", code: 0, suffix: " trace_id: 3a1ac94610531a8eb4c492e638839a77 [trace_id=inner-relay]", wrapped: true},
 	} {
 		for _, nested := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/sse=%t", tc.name, nested), func(t *testing.T) {
@@ -285,7 +295,7 @@ func TestAgentDecodeEnvelopeRecoveryGuards(t *testing.T) {
 		invalid, _ := json.Marshal(envelope)
 		assertUnchanged(t, body, invalid, endpoint)
 	}
-	for _, trace := range []string{" trace_id: ", " trace_id: valid extra", " trace_id: inner [trace_id=outer]", " trace_id: a\nb"} {
+	for _, trace := range []string{" trace_id: ", " trace_id: valid extra", " trace_id: inner [trace_id=outer] [trace_id=third]", " trace_id: a\nb"} {
 		invalid := strings.Replace(inner, " trace_id: inner-123", trace, 1)
 		assertUnchanged(t, body, []byte(invalid), endpoint)
 	}

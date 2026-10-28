@@ -64,6 +64,7 @@ func PortableResponsesSignatureRetry(body, rejection []byte, endpoint string) ([
 		}
 	}
 	items := input.Array()
+	discovery := portableResponsesToolSearchRecords(items)
 	kept := make([]json.RawMessage, 0, len(items))
 	changed := false
 	portable := false
@@ -85,7 +86,10 @@ func PortableResponsesSignatureRetry(body, rejection []byte, endpoint string) ([
 			continue
 		}
 		raw := item.Raw
-		if routeBindingRejected && typ == "web_search_call" {
+		if record, ok := discovery[i]; ok {
+			raw = record
+			changed = true
+		} else if routeBindingRejected && typ == "web_search_call" {
 			var ok bool
 			raw, ok = portableResponsesWebSearchRecord(item)
 			if !ok {
@@ -163,6 +167,10 @@ type restoredResponsesBody struct {
 // DoWithResponsesSignatureRecovery retries a rejected HTTP request once, before any
 // response is exposed. onRetry records the failed attempt and the actual retry body.
 func DoWithResponsesSignatureRecovery(client *http.Client, req *http.Request, onRetry func(*http.Response, []byte, *http.Request, []byte) error) (*http.Response, error) {
+	return DoWithResponsesSignatureRecoveryAttempt(client, req, onRetry, nil)
+}
+
+func DoWithResponsesSignatureRecoveryAttempt(client *http.Client, req *http.Request, onRetry func(*http.Response, []byte, *http.Request, []byte) error, newAttempt func(*http.Request) *http.Request) (*http.Response, error) {
 	resp, err := client.Do(req)
 	if err != nil || resp == nil || resp.Body == nil || req.GetBody == nil || (resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusUnprocessableEntity) {
 		return resp, err
@@ -188,7 +196,14 @@ func DoWithResponsesSignatureRecovery(client *http.Client, req *http.Request, on
 		return resp, nil
 	}
 	retry := CloneResponsesRetryRequest(req, repaired)
-	if errContext := req.Context().Err(); errContext != nil {
+	if newAttempt != nil {
+		retry = newAttempt(retry)
+		if retry == nil {
+			closeResponsesRetryBody(resp.Body)
+			return resp, nil
+		}
+	}
+	if errContext := retry.Context().Err(); errContext != nil {
 		closeResponsesRetryBody(resp.Body)
 		closeResponsesRetryBody(retry.Body)
 		return nil, errContext

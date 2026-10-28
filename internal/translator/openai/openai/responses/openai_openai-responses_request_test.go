@@ -621,6 +621,26 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_EffortNoneDoesNotI
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ToolOnlyAssistantHasContent(t *testing.T) {
+	raw := []byte(`{
+		"model": "kimi-k3.1-pro",
+		"reasoning": {"effort": "high"},
+		"input": [
+			{"type": "reasoning", "id": "rs_opaque", "summary": [], "encrypted_content": "opaque"},
+			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": "{}"},
+			{"type": "function_call_output", "call_id": "call_1", "output": "done"}
+		]
+	}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3.1-pro", raw, false)
+	message := gjson.GetBytes(out, "messages.0")
+	if content := message.Get("content"); !content.Exists() || strings.TrimSpace(content.String()) == "" {
+		t.Fatalf("tool-only assistant has empty content: %s", message.Raw)
+	}
+	if message.Get("tool_calls.0.id").String() != "call_1" || gjson.GetBytes(out, "messages.1.output").Exists() {
+		t.Fatalf("tool call or result was changed: %s", out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesReasoningOnCustomToolCallTurns(t *testing.T) {
 	raw := []byte(`{
 		"model": "deepseek-v4.1-flash",

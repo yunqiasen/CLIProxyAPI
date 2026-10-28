@@ -39,7 +39,7 @@ func TestResponsesCompatibilityDigest(t *testing.T) {
 	got := fmt.Sprintf("%x", hash.Sum(nil))
 	// Fork emits a lossless custom input delta before input.done (covered by
 	// TestApplyPatchStreamingExchange); all other upstream wire output is retained.
-	const want = "8f96b8669ba868cc57e9b08175df563804802b18ba20ce02d8911ca20b3cd1aa"
+	const want = "639279d4640572e0ce4eb07fc86f21cf73dc2e50b3a35804dd13e5ec2883d72d"
 	if got != want {
 		t.Fatalf("compatibility digest: got %s, want %s", got, want)
 	}

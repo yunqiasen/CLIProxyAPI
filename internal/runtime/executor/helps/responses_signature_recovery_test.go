@@ -3,6 +3,7 @@ package helps
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -80,5 +81,26 @@ func TestResponsesSignatureRecoveryCancellation(t *testing.T) {
 	_, err = DoWithResponsesSignatureRecovery(client, req, nil)
 	if calls != 1 || !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled attempt replayed: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestPortableResponsesSignatureRetryConvertsToolSearchWithRejectedReasoning(t *testing.T) {
+	body := []byte(`{"input":[{"type":"reasoning","id":"rs_old","summary":[],"encrypted_content":"opaque"},{"type":"tool_search_call","id":"tsc_old","call_id":"call_discovery","status":"completed","execution":"client","arguments":{"query":"tasks"}},{"type":"tool_search_output","id":"tso_old","call_id":"call_discovery","status":"completed","execution":"client","tools":[]},{"role":"user","content":"continue"}]}`)
+	rejection := []byte(`{"error":{"code":"invalid_encrypted_content","param":"input[0].encrypted_content"}}`)
+	got, retry := PortableResponsesSignatureRetry(body, rejection, "https://agentrouter.org/v1/responses")
+	if !retry {
+		t.Fatal("route-bound discovery history was not retried")
+	}
+	if gjson.GetBytes(got, "input.#").Int() != 3 {
+		t.Fatalf("history count changed: %s", got)
+	}
+	for i := 0; i < 2; i++ {
+		item := gjson.GetBytes(got, fmt.Sprintf("input.%d", i))
+		if item.Get("type").String() != "message" || item.Get("id").Exists() || item.Get("content.0.text").String() == "" {
+			t.Fatalf("tool discovery not portable: %s", item.Raw)
+		}
+	}
+	if gjson.GetBytes(got, "input.2.content").String() != "continue" {
+		t.Fatal("current user input changed")
 	}
 }

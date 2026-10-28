@@ -9,8 +9,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// NormalizeResponsesHistory preserves portable reasoning on Any and Agent.
-// Historical web and tool search conversion remains specific to the verified Any route.
+// NormalizeResponsesHistory preserves portable reasoning and client tool discovery on Any and Agent.
+// Historical web search conversion remains specific to the verified Any route.
 // It changes only the outgoing copy, not the caller's stored conversation.
 func NormalizeResponsesHistory(body []byte, endpoint string) []byte {
 	parsed, err := url.Parse(endpoint)
@@ -33,10 +33,7 @@ func NormalizeResponsesHistory(body []byte, endpoint string) []byte {
 		}
 	}
 	// Native discovery input is a relay schema constraint, not a model capability.
-	var discovery map[int]string
-	if isAny {
-		discovery = portableResponsesToolSearchRecords(items)
-	}
+	discovery := portableResponsesToolSearchRecords(items)
 	model := gjson.GetBytes(body, "model").String()
 	modelName := model
 	if suffix := strings.LastIndex(modelName, "-"); suffix > 0 {

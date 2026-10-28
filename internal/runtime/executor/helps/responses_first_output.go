@@ -20,6 +20,8 @@ type ResponsesFirstOutputWatch struct {
 	timer            *time.Timer
 	mu               sync.Mutex
 	stopped, expired bool
+	duration         time.Duration
+	generation       uint64
 }
 
 // StartResponsesFirstOutputWatch leaves unconfigured credentials unchanged.
@@ -32,16 +34,38 @@ func StartResponsesFirstOutputWatch(ctx context.Context, auth *coreauth.Auth) (c
 		return ctx, nil
 	}
 	attemptCtx, cancel := context.WithCancel(ctx)
-	w := &ResponsesFirstOutputWatch{parent: ctx, cancel: cancel}
-	w.timer = time.AfterFunc(time.Duration(seconds)*time.Second, func() {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		if !w.stopped {
-			w.stopped, w.expired = true, true
-			w.cancel()
-		}
-	})
+	w := &ResponsesFirstOutputWatch{parent: ctx, cancel: cancel, duration: time.Duration(seconds) * time.Second, generation: 1}
+	w.armLocked()
 	return attemptCtx, w
+}
+
+// armLocked schedules expiry for the current generation. Each reset captures a new
+// generation so a callback from a superseded attempt cannot expire the new one.
+func (w *ResponsesFirstOutputWatch) armLocked() {
+	if w.timer != nil {
+		w.timer.Stop()
+	}
+	gen := w.generation
+	w.timer = time.AfterFunc(w.duration, func() { w.expire(gen) })
+}
+
+func (w *ResponsesFirstOutputWatch) expire(gen uint64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if gen != w.generation || w.stopped {
+		return
+	}
+	w.stopped, w.expired = true, true
+	w.cancel()
+}
+
+// ResponsesRetryAttemptBuilder adapts a compatible retry request to the attempt
+// context. Without a watch the request passes through unchanged.
+func ResponsesRetryAttemptBuilder(ctx context.Context, watch *ResponsesFirstOutputWatch) func(*http.Request) *http.Request {
+	if watch == nil {
+		return func(req *http.Request) *http.Request { return req }
+	}
+	return func(req *http.Request) *http.Request { return req.WithContext(watch.Reset(ctx)) }
 }
 
 // Observe must run before publishing a frame. Once expiry wins, no frame is exposed.
@@ -91,6 +115,26 @@ func (w *ResponsesFirstOutputWatch) Close() {
 	w.timer.Stop()
 	w.mu.Unlock()
 	w.cancel()
+}
+
+// Reset starts a fresh first-output budget for a compatible retry attempt.
+// Expiry cancels the old attempt context; a new child must derive from the caller.
+func (w *ResponsesFirstOutputWatch) Reset(ctx context.Context) context.Context {
+	if w == nil {
+		return ctx
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if ctx.Err() != nil {
+		return ctx
+	}
+	attemptCtx, cancel := context.WithCancel(ctx)
+	w.cancel()
+	w.cancel = cancel
+	w.stopped, w.expired = false, false
+	w.generation++
+	w.armLocked()
+	return attemptCtx
 }
 
 // ResponsesFirstOutputTimeoutError is retryable only before the caller commits output.

@@ -88,3 +88,24 @@ func TestRouteStateConcurrentCompletionsRetainIndividualOwners(t *testing.T) {
 		}
 	}
 }
+
+func TestRouteStateSwitchPortablesDependentToolDiscovery(t *testing.T) {
+	const encrypted = "route-owned-opaque"
+	const scope = "route-state-tool-discovery"
+	first := &auth.Auth{ID: "first", Provider: "codex"}
+	_, state := PrepareCodexRouteState(first, "model", scope, nil)
+	state.Completed(context.Background(), []byte(`{"type":"response.completed","response":{"status":"completed","output":[{"type":"reasoning","encrypted_content":"`+encrypted+`"}]}}`))
+	second := first.Clone()
+	second.ID = "second"
+	body := []byte(`{"input":[{"type":"reasoning","id":"rs_old","encrypted_content":"` + encrypted + `","summary":[]},{"type":"tool_search_call","id":"tsc_old","call_id":"call_discovery","status":"completed","execution":"client","arguments":{"query":"tasks"}},{"type":"tool_search_output","id":"tso_old","call_id":"call_discovery","status":"completed","execution":"client","tools":[]},{"role":"user","content":"continue"}]}`)
+	got, _ := PrepareCodexRouteState(second, "model", scope, body)
+	for i := 0; i < 2; i++ {
+		item := gjson.GetBytes(got, fmt.Sprintf("input.%d", i))
+		if item.Get("type").String() != "message" || item.Get("id").Exists() || item.Get("content.0.text").String() == "" {
+			t.Fatalf("discovery depends on stripped reasoning: %s", item.Raw)
+		}
+	}
+	if gjson.GetBytes(got, "input.2.content").String() != "continue" {
+		t.Fatalf("user history changed: %s", got)
+	}
+}

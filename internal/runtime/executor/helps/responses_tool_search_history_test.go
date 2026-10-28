@@ -2,6 +2,7 @@ package helps
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -40,7 +41,7 @@ func TestNormalizeResponsesToolSearchHistory(t *testing.T) {
 
 func TestNormalizeResponsesToolSearchHistoryBoundaries(t *testing.T) {
 	body := `{"model":"gpt-6-astra","input":[` + historicalToolSearchCall + `,` + historicalToolSearchOutput + `]}`
-	for _, endpoint := range []string{"https://api.openai.com/v1/responses", "https://agentrouter.org/v1/responses", "https://anyrouter.top.example/v1/responses", "https://anyrouter.top/v1/responses/compact"} {
+	for _, endpoint := range []string{"https://api.openai.com/v1/responses", "https://anyrouter.top.example/v1/responses", "https://anyrouter.top/v1/responses/compact"} {
 		if !bytes.Equal([]byte(body), NormalizeResponsesHistory([]byte(body), endpoint)) {
 			t.Fatalf("unverified endpoint modified: %s", endpoint)
 		}
@@ -65,5 +66,18 @@ func TestNormalizeResponsesToolSearchHistoryBoundaries(t *testing.T) {
 				t.Fatalf("unresolved discovery changed: %s", got)
 			}
 		})
+	}
+}
+
+func TestNormalizeResponsesToolSearchHistoryAgent(t *testing.T) {
+	body := []byte(`{"model":"gpt-6-astra","input":[` + historicalToolSearchCall + `,{"type":"reasoning","id":"rs_foreign","summary":[],"encrypted_content":"opaque"},` + historicalToolSearchOutput + `,{"role":"user","content":"continue"}]}`)
+	got := NormalizeResponsesHistory(body, "https://agentrouter.org/v1/responses")
+	for _, index := range []int{0, 2} {
+		if typ := gjson.GetBytes(got, fmt.Sprintf("input.%d.type", index)).String(); typ != "message" {
+			t.Fatalf("input[%d] type = %s, want portable message", index, typ)
+		}
+	}
+	if gjson.GetBytes(got, "input.1.id").String() != "rs_foreign" || gjson.GetBytes(got, "input.3.content").String() != "continue" {
+		t.Fatalf("unrelated history changed: %s", got)
 	}
 }

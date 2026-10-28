@@ -127,6 +127,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, status, rejection)
 	})
 	attemptCtx, firstOutput := helps.StartResponsesFirstOutputWatch(ctx, auth)
+	newAttempt := helps.ResponsesRetryAttemptBuilder(ctx, firstOutput)
 	httpReq = httpReq.WithContext(attemptCtx)
 	watchHandedOff := false
 	defer func() {
@@ -138,7 +139,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if opts.ExecutionLifecycle != nil {
 		httpResp, err = httpClient.Do(httpReq)
 	} else {
-		httpResp, err = helps.DoWithResponsesSignatureRecovery(httpClient, httpReq, recordSignatureRetry)
+		httpResp, err = helps.DoWithResponsesSignatureRecoveryAttempt(httpClient, httpReq, recordSignatureRetry, newAttempt)
 	}
 	if err != nil {
 		err = firstOutput.Failure(err)
@@ -449,7 +450,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
 					if !meaningfulOutput && !signatureRepairUsed {
 						if repaired, canRetry := helps.PortableResponsesSignatureRetry(upstreamBody, terminalBody, httpReq.URL.String()); canRetry {
-							retry := helps.CloneResponsesRetryRequest(httpReq, repaired)
+							retry := newAttempt(helps.CloneResponsesRetryRequest(httpReq, repaired))
 							closeHTTPResponseBody(httpResp, "codex executor: close rejected response body")
 							errRetry := recordSignatureRetry(nil, terminalBody, retry, repaired)
 							var next *http.Response

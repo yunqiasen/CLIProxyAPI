@@ -190,7 +190,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 			}
 			if !mergedIntoAssistant {
-				assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
+				// Strict Chat Completions upstreams reject a tool-only assistant with no visible content.
+				assistantMessage := []byte(`{"role":"assistant","content":"[reasoning unavailable]","tool_calls":[]}`)
 				assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
 				if reasoningContent != "" {
 					assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoningContent)

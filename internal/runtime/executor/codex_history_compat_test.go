@@ -397,3 +397,69 @@ func TestCodexWebsocketAnyAgentHistoryCompatibility(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexAgentHistoryCompatibilityEndToEnd(t *testing.T) {
+	const discoveryCall = `{"type":"tool_search_call","id":"tsc_old","call_id":"call_discovery","status":"completed","execution":"client","arguments":{"query":"tasks"}}`
+	const discoveryOutput = `{"type":"tool_search_output","id":"tso_old","call_id":"call_discovery","status":"completed","execution":"client","tools":[]}`
+	for _, tc := range []struct {
+		name      string
+		timeout   string
+		rejection string
+		calls     int
+	}{
+		{name: "resource_then_discovery", timeout: "120", rejection: agentResourceMismatchRejection, calls: 2},
+		{name: "encrypted_with_double_trace", rejection: strings.Replace(agentMessageOnlySignatureRejection, " [trace_id=fixture]", " trace_id: upstream-trace [trace_id=relay-trace]", 1), calls: 2},
+	} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream_%t", tc.name, stream), func(t *testing.T) {
+				calls := 0
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					calls++
+					body, _ := io.ReadAll(r.Body)
+					w.Header().Set("Content-Type", "text/event-stream")
+					if tc.rejection != "" && calls == 1 {
+						w.WriteHeader(http.StatusBadRequest)
+						_, _ = io.WriteString(w, tc.rejection)
+						return
+					}
+					if strings.Contains(string(body), `"type":"tool_search_call"`) || strings.Contains(string(body), `"type":"tool_search_output"`) {
+						w.WriteHeader(http.StatusBadRequest)
+						_, _ = io.WriteString(w, `{"error":{"type":"invalid_request_error","code":null,"param":"","message":"Item 'tsc_old' of type 'tool_search_call' was provided without its required 'reasoning' item: 'rs_old'. [trace_id=fixture]"}}`)
+						return
+					}
+					_, _ = io.WriteString(w, completedHistoryResponse)
+				}))
+				defer upstream.Close()
+				attrs := map[string]string{"api_key": "fixture", "base_url": "http://agentrouter.org/v1"}
+				if tc.timeout != "" {
+					attrs[coreauth.AttributeResponsesFirstOutputTimeoutSeconds] = tc.timeout
+				}
+				auth := &coreauth.Auth{ID: "agent-history-e2e", Provider: "codex", ProxyURL: upstream.URL, Attributes: attrs}
+				payload := []byte(`{"model":"gpt-6-astra","input":[{"type":"reasoning","id":"rs_old","summary":[],"encrypted_content":"` + validCodexReasoningEncryptedContentForTest() + `"},` + discoveryCall + `,` + discoveryOutput + `,{"role":"user","content":"continue"}]}`)
+				if tc.name == "encrypted_with_double_trace" {
+					payload = []byte(`{"model":"gpt-6-astra","input":[{"type":"reasoning","id":"rs_foreign","summary":[],"encrypted_content":"` + validCodexReasoningEncryptedContentForTest() + `"},{"role":"user","content":"continue"}]}`)
+				}
+				req := coreexecutor.Request{Model: "gpt-6-astra", Payload: payload}
+				opts := coreexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: stream}
+				e := NewCodexExecutor(&config.Config{})
+				var err error
+				if stream {
+					result, errExecute := e.ExecuteStream(context.Background(), auth, req, opts)
+					err = errExecute
+					if result != nil {
+						for chunk := range result.Chunks {
+							if chunk.Err != nil {
+								err = chunk.Err
+							}
+						}
+					}
+				} else {
+					_, err = e.Execute(context.Background(), auth, req, opts)
+				}
+				if err != nil || calls != tc.calls {
+					t.Fatalf("calls=%d want=%d err=%v", calls, tc.calls, err)
+				}
+			})
+		}
+	}
+}

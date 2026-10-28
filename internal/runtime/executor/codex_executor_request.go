@@ -138,9 +138,7 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", cache.ID)
 	}
 	rawJSON = helps.SanitizeCodexInputItemIDs(rawJSON)
-	if sourceFormatEqual(from, sdktranslator.FormatCodex) || sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
-		rawJSON = helps.NormalizeResponsesHistory(rawJSON, url)
-	}
+	rawJSON = helps.NormalizeResponsesHistory(rawJSON, url)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
 	if err != nil {
 		return nil, nil, err

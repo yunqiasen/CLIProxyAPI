@@ -12,11 +12,18 @@ import (
 
 // Agent appends relay request metadata to the upstream message. Keep both the
 // message and diagnostic suffix anchored rather than accepting arbitrary prose.
-const agentRejectionMetadataSuffix = `(?: \(request id: [A-Za-z0-9_-]+\))?(?: \[trace_id=[A-Za-z0-9_-]+\]| trace_id: [A-Za-z0-9_-]+)?$`
+const agentRejectionMetadataSuffix = `(?: \(request id: [A-Za-z0-9_-]+\))?(?: trace_id: [A-Za-z0-9_-]+)?(?: \[trace_id=[A-Za-z0-9_-]+\])?$`
+
+// Inner decode-envelope messages carry the same relay metadata as direct ones;
+// keeping one definition prevents the two paths from accepting different suffixes.
+const agentInnerRejectionMetadataSuffix = agentRejectionMetadataSuffix
 
 const agentRejectionDecodePrefix = "failed to decode error response: json: cannot unmarshal number into Go struct field ResponseError.error.code of type string, raw: "
 
+var agentRelayTraceMetadata = regexp.MustCompile(`^(?: trace_id: [A-Za-z0-9_-]+)?(?: \[trace_id=[A-Za-z0-9_-]+\])?$`)
+
 var agentRejectionRelayMetadata = regexp.MustCompile(`^` + agentRejectionMetadataSuffix)
+var agentInnerRejectionMetadata = regexp.MustCompile(`^` + agentInnerRejectionMetadataSuffix)
 
 var agentSignatureRejection = regexp.MustCompile(`^(?:OpenAI Responses bad request: )?The encrypted content for item (rs_[A-Za-z0-9_-]+) could not be verified\. Reason: Encrypted content could not be decrypted or parsed\.` + agentRejectionMetadataSuffix)
 
@@ -89,14 +96,18 @@ func agentSignatureRejectionMessage(e gjson.Result) string {
 	encoded := strings.TrimPrefix(message, agentRejectionDecodePrefix)
 	decoder := json.NewDecoder(strings.NewReader(encoded))
 	var raw json.RawMessage
-	if errDecode := decoder.Decode(&raw); errDecode != nil || !agentRejectionRelayMetadata.MatchString(encoded[decoder.InputOffset():]) {
+	if errDecode := decoder.Decode(&raw); errDecode != nil || !agentRelayTraceMetadata.MatchString(encoded[decoder.InputOffset():]) {
 		return ""
 	}
 	inner := gjson.GetBytes(raw, "error")
 	if !isAgentSignatureRejectionEnvelope(inner) || inner.Get("code").Type != gjson.Number || inner.Get("code").Raw != "0" {
 		return ""
 	}
-	return inner.Get("message").String()
+	message = inner.Get("message").String()
+	if index := strings.LastIndex(message, " trace_id: "); index >= 0 && !agentInnerRejectionMetadata.MatchString(message[index:]) {
+		return ""
+	}
+	return message
 }
 
 func isAgentSignatureRejectionEnvelope(e gjson.Result) bool {

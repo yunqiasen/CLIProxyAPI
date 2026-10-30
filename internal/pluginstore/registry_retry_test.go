@@ -68,3 +68,27 @@ func TestFetchRegistryDoesNotRetryRateLimitErrors(t *testing.T) {
 		t.Fatalf("attempts=%d want 1", attempts)
 	}
 }
+
+type truncatedBody struct{}
+
+func (truncatedBody) Read([]byte) (int, error) { return 0, fmt.Errorf("unexpected EOF") }
+func (truncatedBody) Close() error             { return nil }
+
+func TestFetchRegistryRetriesTruncatedBodies(t *testing.T) {
+	t.Parallel()
+
+	var attempts int
+	client := Client{HTTPClient: pluginIdentityDoerFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: truncatedBody{}}, nil
+		}
+		return testHTTPResponse(req, 200, nil, `{"schema_version":1,"plugins":[]}`), nil
+	})}
+	if _, errFetch := client.FetchRegistry(context.Background()); errFetch != nil {
+		t.Fatalf("fetch registry error=%v", errFetch)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts=%d want 2", attempts)
+	}
+}

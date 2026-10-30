@@ -421,7 +421,9 @@ func readPluginStoreResponse(resp *http.Response, maxSize int64, authenticated b
 	}
 	data, errRead := io.ReadAll(reader)
 	if errRead != nil {
-		return nil, fmt.Errorf("read response: %w", errRead)
+		// A truncated body is a transport failure, not a protocol answer; the
+		// caller may retry the same idempotent GET.
+		return nil, &pluginStoreTransportError{err: fmt.Errorf("read response: %w", errRead)}
 	}
 	if maxSize > 0 && int64(len(data)) > maxSize {
 		return nil, fmt.Errorf("response exceeds maximum allowed size of %d bytes", maxSize)

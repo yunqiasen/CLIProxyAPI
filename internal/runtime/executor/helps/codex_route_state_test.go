@@ -109,3 +109,17 @@ func TestRouteStateSwitchPortablesDependentToolDiscovery(t *testing.T) {
 		t.Fatalf("user history changed: %s", got)
 	}
 }
+
+func TestRouteStateSwitchRetainsActiveDiscoveredTools(t *testing.T) {
+	const scope = "active-discovery-switch"
+	first := &auth.Auth{ID: "active-first", Provider: "codex"}
+	_, state := PrepareCodexRouteState(first, "gpt-6-astra", scope, nil)
+	state.Completed(context.Background(), []byte(`{"type":"response.completed","response":{"status":"completed","output":[{"type":"reasoning","encrypted_content":"active-owned"}]}}`))
+	second := first.Clone()
+	second.ID = "active-second"
+	body := []byte(`{"input":[{"role":"user","content":"Find a tool."},{"type":"reasoning","encrypted_content":"active-owned"},` + historicalToolSearchCall + `,` + historicalToolSearchOutput + `]}`)
+	got, _ := PrepareCodexRouteState(second, "gpt-6-astra", scope, body)
+	if gjson.GetBytes(got, "tools.0.tools.0.name").String() != "list_threads" {
+		t.Fatalf("switch lost callable discovery: %s", got)
+	}
+}

@@ -76,13 +76,14 @@ func PrepareCodexRouteState(credential *auth.Auth, model, scope string, body []b
 	}
 	if changed {
 		if encoded, err := json.Marshal(items); err == nil {
-			discovery := portableResponsesToolSearchRecords(gjson.ParseBytes(encoded).Array())
+			originalItems := gjson.ParseBytes(encoded).Array()
+			discovery := portableResponsesToolSearchRecords(originalItems)
 			for i, record := range discovery {
 				items[i] = json.RawMessage(record)
 			}
 			if encoded, err = json.Marshal(items); err == nil {
 				if updated, errSet := sjson.SetRawBytes(body, "input", encoded); errSet == nil {
-					body = updated
+					body = retainActiveResponsesTools(updated, originalItems, discovery)
 				}
 			}
 		}

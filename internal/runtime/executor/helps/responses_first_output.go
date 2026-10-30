@@ -128,6 +128,10 @@ func (w *ResponsesFirstOutputWatch) Reset(ctx context.Context) context.Context {
 	if ctx.Err() != nil {
 		return ctx
 	}
+	// Output (or Close) ends the budget permanently; only silent attempts restart.
+	if w.stopped && !w.expired {
+		return ctx
+	}
 	attemptCtx, cancel := context.WithCancel(ctx)
 	w.cancel()
 	w.cancel = cancel

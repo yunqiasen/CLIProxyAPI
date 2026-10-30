@@ -241,6 +241,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				}
 				if helps.HasMeaningfulCodexOutputDelta(data) {
 					sawOutputDelta = true
+				}
+				if !helps.ResponsesProvisionalEvent(eventType, data) {
 					meaningfulOutput = true
 				}
 				if helps.IsCodexTerminalEmptyIncomplete(data, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
@@ -448,7 +450,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					bootstrapEvent = "managed_execution"
 				}
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
-					if !meaningfulOutput && !signatureRepairUsed {
+					if !meaningfulOutput && !bootstrap.Committed() && emittedCount == 0 && !signatureRepairUsed {
 						if repaired, canRetry := helps.PortableResponsesSignatureRetry(upstreamBody, terminalBody, httpReq.URL.String()); canRetry {
 							retry := newAttempt(helps.CloneResponsesRetryRequest(httpReq, repaired))
 							closeHTTPResponseBody(httpResp, "codex executor: close rejected response body")
@@ -533,6 +535,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				}
 				if helps.HasMeaningfulCodexOutputDelta(data) {
 					sawOutputDelta = true
+				}
+				if !helps.ResponsesProvisionalEvent(eventType, data) {
 					meaningfulOutput = true
 				}
 				if helps.IsCodexTerminalEmptyIncomplete(data, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {

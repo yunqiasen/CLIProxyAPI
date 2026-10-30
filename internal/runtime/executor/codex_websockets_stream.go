@@ -398,6 +398,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
 				reporter.PublishFailure(ctx, wsErr)
+				if observedOutput {
+					bootstrapTerminalErr = wsErr
+					break
+				}
 				if timeoutReached {
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap error after %d messages read / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
 					bootstrapTerminalErr = wsErr
@@ -452,6 +456,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 
 			eventType = gjson.GetBytes(payload, "type").String()
+			if !helps.ResponsesProvisionalEvent(eventType, payload) {
+				observedOutput = true
+			}
 			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" || eventType == "response.failed" || eventType == "error"
 			if helps.HasMeaningfulCodexOutputDelta(payload) {
 				sawOutputDelta = true
@@ -537,9 +544,15 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	out := make(chan cliproxyexecutor.StreamChunk, chanCapacity)
 	for _, chunk := range bufferedChunks {
 		out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+		if len(chunk) > 0 {
+			observedOutput = true
+		}
 	}
 	for _, chunk := range initialChunks {
 		out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+		if len(chunk) > 0 {
+			observedOutput = true
+		}
 	}
 	if bootstrapTerminalErr != nil {
 		if isEphemeralSession {

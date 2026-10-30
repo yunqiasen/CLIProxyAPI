@@ -50,7 +50,7 @@ func (c Client) FetchRegistry(ctx context.Context) (Registry, error) {
 	if registryURL == "" {
 		registryURL = DefaultRegistryURL
 	}
-	data, errDownload := c.get(ctx, registryURL, "application/json", RequestKindRegistry, 0)
+	data, errDownload := c.fetchRegistryBytes(ctx, registryURL)
 	if errDownload != nil {
 		return Registry{}, errDownload
 	}
@@ -59,6 +59,28 @@ func (c Client) FetchRegistry(ctx context.Context) (Registry, error) {
 		return Registry{}, errParse
 	}
 	return registry, nil
+}
+
+// registryFetchAttempts bounds retries for transient transport failures on the
+// registry listing. GitHub raw endpoints intermittently drop the TLS handshake
+// through local proxies; a single EOF must not blank the whole plugin store.
+const registryFetchAttempts = 3
+
+func (c Client) fetchRegistryBytes(ctx context.Context, registryURL string) ([]byte, error) {
+	var errLast error
+	for attempt := 1; attempt <= registryFetchAttempts; attempt++ {
+		data, errDownload := c.get(ctx, registryURL, "application/json", RequestKindRegistry, 0)
+		if errDownload == nil {
+			return data, nil
+		}
+		errLast = errDownload
+		var transportError *pluginStoreTransportError
+		var limit *RateLimitError
+		if ctx.Err() != nil || errors.As(errLast, &limit) || !errors.As(errLast, &transportError) {
+			break
+		}
+	}
+	return nil, errLast
 }
 
 // FetchLatestRelease returns the latest published release of the plugin's
@@ -407,6 +429,16 @@ func readPluginStoreResponse(resp *http.Response, maxSize int64, authenticated b
 	return data, nil
 }
 
+// pluginStoreTransportError marks failures raised before a response was
+// received, so callers can retry idempotent GETs without retrying HTTP status
+// errors such as rate limits.
+type pluginStoreTransportError struct {
+	err error
+}
+
+func (err *pluginStoreTransportError) Error() string { return err.err.Error() }
+func (err *pluginStoreTransportError) Unwrap() error { return err.err }
+
 func pluginStoreRequestError(requestURL string, err error) error {
 	parsed, errParse := url.Parse(strings.TrimSpace(requestURL))
 	safeURL := "plugin store url"
@@ -421,7 +453,7 @@ func pluginStoreRequestError(requestURL string, err error) error {
 	if errors.As(err, &urlError) && urlError.Err != nil {
 		err = urlError.Err
 	}
-	return fmt.Errorf("request %s failed: %w", safeURL, err)
+	return &pluginStoreTransportError{err: fmt.Errorf("request %s failed: %w", safeURL, err)}
 }
 
 func SelectReleaseAssets(release Release, id, version, goos, goarch string) (ReleaseAsset, ReleaseAsset, error) {

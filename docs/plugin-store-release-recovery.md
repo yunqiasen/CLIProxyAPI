@@ -47,6 +47,13 @@ a checksum mismatch with no filesystem writes.
 The management regression covers a catalog-created cooldown followed by both
 latest and version-selected installation and configuration persistence.
 
+## Registry listing resilience
+
+Registry listing retries only transport failures (no HTTP response: TLS reset,
+EOF, proxy drop) up to three attempts. HTTP status errors, GitHub rate limits and
+caller cancellation stop immediately and keep their typed errors, so the listing
+no longer blanks out on a single dropped handshake.
+
 ## Live verification
 
 Verify availability of the authenticated management API and management panel,

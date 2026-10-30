@@ -94,34 +94,20 @@ func (c Client) fetchLatestReleaseFromWeb(ctx context.Context, plugin Plugin, go
 		url.PathEscape(owner),
 		url.PathEscape(repo),
 	)
-	req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, latestURL, nil)
-	if errRequest != nil {
-		return Release{}, errRequest
+	data, finalURL, errDownload := c.getWithURL(ctx, latestURL, "text/html", RequestKindMetadata, 512*1024, func(finalURL string) bool {
+		return releaseTagFromURL(finalURL) != ""
+	})
+	if errDownload != nil {
+		return Release{}, errDownload
 	}
-	req.Header.Set("Accept", "text/html")
-	req.Header.Set("User-Agent", c.userAgent())
-	resp, errDo := c.httpClient().Do(req)
-	if errDo != nil {
-		return Release{}, errDo
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode >= http.StatusBadRequest {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return Release{}, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	tag := releaseTagFromURL(resp.Header.Get("Location"))
-	if tag == "" && resp.Request != nil && resp.Request.URL != nil {
-		tag = releaseTagFromURL(resp.Request.URL.String())
-	}
+	tag := releaseTagFromURL(finalURL)
 	if tag == "" {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
-		tag = releaseTagFromHTML(string(body))
+		tag = releaseTagFromHTML(string(data))
 	}
 	if tag == "" {
 		return Release{}, fmt.Errorf("latest release tag not found")
 	}
-	return releaseForPluginVersion(plugin, tag, goos, goarch)
+	return releaseForPluginTag(plugin, tag, goos, goarch)
 }
 
 func releaseTagFromURL(rawURL string) string {
@@ -229,19 +215,35 @@ func (c Client) releaseAssetAPIAuthenticated(apiURL string) bool {
 }
 
 func (c Client) get(ctx context.Context, requestURL string, accept string, kind string, maxSize int64) ([]byte, error) {
+	data, _, errGet := c.getWithURL(ctx, requestURL, accept, kind, maxSize, nil)
+	return data, errGet
+}
+
+// getWithURL returns the final URL after authenticated, bounded redirects so
+// release discovery can retain the exact published tag, including bare tags.
+func (c Client) getWithURL(ctx context.Context, requestURL string, accept string, kind string, maxSize int64, skipBody func(string) bool) (data []byte, finalURL string, errGet error) {
+	// A redirect may introduce credentials that were absent at the initial URL.
+	// Preserve this binding on failure instead of allowing anonymous recovery.
+	authenticatedChain := false
+	defer func() {
+		if authenticatedChain && errGet != nil {
+			errGet = &authenticatedPluginStoreRequestError{err: errGet}
+		}
+	}()
 	currentURL := strings.TrimSpace(requestURL)
 	limiter := c.githubRateLimiter()
 	for redirects := 0; ; redirects++ {
 		if errContext := ctx.Err(); errContext != nil {
-			return nil, errContext
+			return nil, "", errContext
 		}
 		headers, authenticated, errAuth := c.authHeaders(currentURL, kind)
 		if errAuth != nil {
-			return nil, errAuth
+			return nil, "", errAuth
 		}
+		authenticatedChain = authenticatedChain || authenticated
 		rateKey := githubRateLimitKey(currentURL, c.NetworkScope, headers, authenticated)
 		if errLimit := limiter.check(rateKey); errLimit != nil {
-			return nil, errLimit
+			return nil, "", errLimit
 		}
 		if headers.Get("Accept") == "" {
 			headers.Set("Accept", accept)
@@ -259,7 +261,7 @@ func (c Client) get(ctx context.Context, requestURL string, accept string, kind 
 			}
 		}
 		if errDo != nil {
-			return nil, errDo
+			return nil, "", errDo
 		}
 		if pluginStoreRedirectStatus(resp.StatusCode) {
 			_ = limiter.observe(rateKey, resp.StatusCode, resp.Header, nil)
@@ -268,17 +270,34 @@ func (c Client) get(ctx context.Context, requestURL string, accept string, kind 
 				log.WithError(errClose).Debug("failed to close plugin store redirect body")
 			}
 			if errRedirect != nil {
-				return nil, errRedirect
+				return nil, "", errRedirect
 			}
 			if redirects >= maxPluginStoreRedirects {
-				return nil, fmt.Errorf("stopped after %d redirects", maxPluginStoreRedirects)
+				return nil, "", fmt.Errorf("stopped after %d redirects", maxPluginStoreRedirects)
 			}
 			currentURL = nextURL
 			continue
 		}
-		return readPluginStoreResponse(resp, maxSize, authenticated, limiter, rateKey)
+		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && skipBody != nil && skipBody(currentURL) {
+			_ = limiter.observe(rateKey, resp.StatusCode, resp.Header, nil)
+			if errClose := resp.Body.Close(); errClose != nil {
+				log.WithError(errClose).Debug("failed to close plugin store release page body")
+			}
+			return nil, currentURL, nil
+		}
+		responseData, errRead := readPluginStoreResponse(resp, maxSize, authenticated, limiter, rateKey)
+		return responseData, currentURL, errRead
 	}
 }
+
+// authenticatedPluginStoreRequestError binds failures to the actual request
+// chain while keeping typed cooldowns and cancellation available through Unwrap.
+type authenticatedPluginStoreRequestError struct {
+	err error
+}
+
+func (err *authenticatedPluginStoreRequestError) Error() string { return err.err.Error() }
+func (err *authenticatedPluginStoreRequestError) Unwrap() error { return err.err }
 
 func (c Client) httpClient() HTTPDoer {
 	if c.HTTPClient != nil {

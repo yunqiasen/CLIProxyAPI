@@ -56,8 +56,7 @@ func (c Client) Install(ctx context.Context, plugin Plugin, options InstallOptio
 	}
 	release, errRelease := c.FetchLatestRelease(ctx, plugin)
 	if errRelease != nil {
-		var rateLimit *RateLimitError
-		if errors.As(errRelease, &rateLimit) {
+		if !c.publicReleaseFallbackAllowed(ctx, plugin, "", errRelease) {
 			return InstallResult{}, errRelease
 		}
 		fallbackRelease, errFallback := c.fetchLatestReleaseFromWeb(ctx, plugin, options.GOOS, options.GOARCH)
@@ -112,7 +111,16 @@ func (c Client) InstallVersion(ctx context.Context, plugin Plugin, releaseTag st
 	}
 	release, errRelease := c.FetchReleaseByTag(ctx, plugin, releaseTag)
 	if errRelease != nil {
-		return InstallResult{}, errRelease
+		var rateLimit *RateLimitError
+		if !errors.As(errRelease, &rateLimit) || !c.publicReleaseFallbackAllowed(ctx, plugin, releaseTag, errRelease) {
+			return InstallResult{}, errRelease
+		}
+		// Fixed tags have immutable public download URLs. The archive and its
+		// checksum must both exist and verify before any plugin file is written.
+		release, errRelease = releaseForPluginTag(plugin, releaseTag, options.GOOS, options.GOARCH)
+		if errRelease != nil {
+			return InstallResult{}, errRelease
+		}
 	}
 	releaseVersion, errVersion := ReleaseVersion(release)
 	if errVersion != nil {
@@ -252,6 +260,27 @@ func directPluginVersion(plugin Plugin, id string, version string) (Plugin, erro
 	return Plugin{}, fmt.Errorf("direct install plugin %q version %q not found in source", id, version)
 }
 
+// publicReleaseFallbackAllowed retains authenticated metadata failures and caller
+// cancellation. Public downloads never reset or retry the API cooldown.
+func (c Client) publicReleaseFallbackAllowed(ctx context.Context, plugin Plugin, tag string, errRequest error) bool {
+	var authenticatedError *authenticatedPluginStoreRequestError
+	if ctx.Err() != nil || errors.As(errRequest, &authenticatedError) {
+		return false
+	}
+	owner, repo, errRepository := GitHubRepositoryParts(plugin.Repository)
+	if errRepository != nil {
+		return false
+	}
+	requestURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/", url.PathEscape(owner), url.PathEscape(repo))
+	if tag == "" {
+		requestURL += "latest"
+	} else {
+		requestURL += "tags/" + url.PathEscape(tag)
+	}
+	_, authenticated, errAuth := c.authHeaders(requestURL, RequestKindMetadata)
+	return errAuth == nil && !authenticated
+}
+
 func registryVersionRelease(plugin Plugin, goos, goarch string) (Release, error) {
 	version := normalizeVersion(plugin.Version)
 	return releaseForPluginVersion(plugin, version, goos, goarch)
@@ -262,12 +291,20 @@ func releaseForPluginVersion(plugin Plugin, version, goos, goarch string) (Relea
 	if !validPluginVersion(version) {
 		return Release{}, fmt.Errorf("invalid plugin version %q", version)
 	}
+	return releaseForPluginTag(plugin, "v"+version, goos, goarch)
+}
+
+func releaseForPluginTag(plugin Plugin, tag, goos, goarch string) (Release, error) {
+	tag = strings.TrimSpace(tag)
+	version, errVersion := ReleaseVersion(Release{TagName: tag})
+	if errVersion != nil {
+		return Release{}, errVersion
+	}
 	owner, repo, errRepository := GitHubRepositoryParts(plugin.Repository)
 	if errRepository != nil {
 		return Release{}, errRepository
 	}
 	archiveName := ArchiveName(plugin.ID, version, goos, goarch)
-	tag := "v" + version
 	baseURL := fmt.Sprintf(
 		"https://github.com/%s/%s/releases/download/%s",
 		url.PathEscape(owner),

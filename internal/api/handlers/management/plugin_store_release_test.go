@@ -2,6 +2,8 @@ package management
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -372,42 +374,65 @@ func TestPluginReleaseChecksStopQueuedRequestsDuringCooldown(t *testing.T) {
 	}
 }
 
-func TestPluginStoreListingCooldownAlsoBlocksInstallation(t *testing.T) {
+func TestPluginStoreListingCooldownAllowsVerifiedPublicInstallation(t *testing.T) {
 	t.Parallel()
 	var apiCalls atomic.Int32
+	archive := makeManagementPluginStoreZip(t, "sample-provider.so", "verified-public-plugin")
+	sum := sha256.Sum256(archive)
+	archiveName := pluginstore.ArchiveName("sample-provider", "0.2.0", "linux", "amd64")
 	h := &Handler{
-		cfg:                    &config.Config{Plugins: config.PluginsConfig{Dir: writeManagementPluginFile(t, "sample-provider")}},
+		cfg:                    &config.Config{Plugins: config.PluginsConfig{Enabled: true, Dir: writeManagementPluginFile(t, "sample-provider"), Configs: map[string]config.PluginInstanceConfig{"sample-provider": pluginConfigFromYAML(t, "enabled: true\nmode: preserve-me\n")}}},
+		configFilePath:         writeTestConfigFile(t),
 		pluginStoreRateLimiter: &pluginstore.GitHubRateLimiter{},
 		pluginStoreHTTPClient: pluginReleaseDoerFunc(func(req *http.Request) (*http.Response, error) {
-			if req.URL.Host != "api.github.com" {
-				return fakePluginStoreHTTPClient{pluginstore.DefaultRegistryURL: registryJSON(t)}.Do(req)
+			if req.URL.Host == "api.github.com" {
+				apiCalls.Add(1)
+				headers := make(http.Header)
+				headers.Set("Retry-After", "3600")
+				return &http.Response{StatusCode: 429, Header: headers, Body: io.NopCloser(strings.NewReader("limited"))}, nil
 			}
-			apiCalls.Add(1)
-			headers := make(http.Header)
-			headers.Set("Retry-After", "3600")
-			return &http.Response{StatusCode: 429, Header: headers, Body: io.NopCloser(strings.NewReader("limited"))}, nil
+			responses := fakePluginStoreHTTPClient{
+				pluginstore.DefaultRegistryURL: registryJSON(t),
+				"https://github.com/author-name/cliproxy-sample-provider-plugin/releases/tag/v0.2.0":                     []byte("release"),
+				"https://github.com/author-name/cliproxy-sample-provider-plugin/releases/download/v0.2.0/" + archiveName: archive,
+				"https://github.com/author-name/cliproxy-sample-provider-plugin/releases/download/v0.2.0/checksums.txt":  []byte(hex.EncodeToString(sum[:]) + "  " + archiveName + "\n"),
+			}
+			if strings.HasSuffix(req.URL.Path, "/releases/latest") {
+				headers := make(http.Header)
+				headers.Set("Location", "https://github.com/author-name/cliproxy-sample-provider-plugin/releases/tag/v0.2.0")
+				return &http.Response{StatusCode: 302, Header: headers, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+			}
+			return responses.Do(req)
 		}),
 	}
 	body := listPluginStoreForTest(t, h)
 	if len(body.Plugins) != 1 || body.Plugins[0].Version != "0.1.0" {
-		t.Fatalf("listing failed to fall back during cooldown: %#v", body)
+		t.Fatalf("listing failed to preserve registry version during cooldown: %#v", body)
 	}
-	for _, query := range []string{"", "?version=0.2.0"} {
+	for _, query := range []string{"", "?version=v0.2.0", "?version=0.2.0"} {
 		rec := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(rec)
 		c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
 		c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider/install"+query, nil)
-		h.InstallPluginFromStore(c)
-		if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), "plugin_store_rate_limited") || !strings.Contains(rec.Body.String(), "retry_at") {
+		h.installPluginFromStore(c, "linux", "amd64")
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"version":"0.2.0"`) {
 			t.Fatalf("install status=%d body=%s", rec.Code, rec.Body.String())
 		}
-		retryAfter, errRetry := strconv.Atoi(rec.Header().Get("Retry-After"))
-		if errRetry != nil || retryAfter <= 0 {
-			t.Fatalf("Retry-After=%q", rec.Header().Get("Retry-After"))
+		persisted, errLoad := config.LoadConfig(h.configFilePath)
+		if errLoad != nil {
+			t.Fatalf("reload saved plugin config: %v", errLoad)
+		}
+		instance := persisted.Plugins.Configs["sample-provider"]
+		manifest := pluginStoreManifestFromConfig(t, instance)
+		if instance.Enabled == nil || !*instance.Enabled || manifest.Version != "0.2.0" || manifest.ReleaseTag != "v0.2.0" {
+			t.Fatalf("saved configuration failed to pin the installed release: %#v", instance)
+		}
+		if !strings.Contains(marshalPluginRaw(t, instance), "mode: preserve-me") {
+			t.Fatalf("existing plugin option changed: %#v", instance.Raw)
 		}
 	}
 	if apiCalls.Load() != 1 {
-		t.Fatalf("cooldown installation made more requests: %d", apiCalls.Load())
+		t.Fatalf("public recovery retried the cooled API: calls=%d", apiCalls.Load())
 	}
 }
 
@@ -438,10 +463,13 @@ func TestPluginStoreInstallationPropagatesRegistryRateLimit(t *testing.T) {
 func TestPluginStoreTagInstallationStopsOnRateLimitError(t *testing.T) {
 	t.Parallel()
 	calls := 0
-	client := pluginstore.Client{HTTPClient: pluginReleaseDoerFunc(func(*http.Request) (*http.Response, error) {
+	client := pluginstore.Client{HTTPClient: pluginReleaseDoerFunc(func(req *http.Request) (*http.Response, error) {
 		calls++
+		if req.URL.Host != "api.github.com" {
+			return nil, errors.New("public release unavailable")
+		}
 		return nil, &pluginstore.RateLimitError{StatusCode: 429, RetryAt: time.Now().Add(time.Hour)}
-	})}
+	}), ResolvedAuth: []pluginstore.ResolvedAuthConfig{{Match: "https://api.github.com/", Type: pluginstore.AuthTypeGitHubToken, Token: pluginstore.Secret("fixture-token")}}, ResolvedAuthExpiresAt: time.Now().Add(time.Hour)}
 	_, errInstall := installPluginStoreGitHubRelease(context.Background(), client, pluginstore.Plugin{
 		ID: "sample-provider", Name: "Sample", Description: "Test plugin", Author: "owner", Repository: "https://github.com/owner/repo",
 	}, "1.0.0", pluginstore.InstallOptions{PluginsDir: t.TempDir(), GOOS: "linux", GOARCH: "amd64"})

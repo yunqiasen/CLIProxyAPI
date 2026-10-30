@@ -821,6 +821,8 @@ func (d latestWebFallbackHTTPDoer) Do(req *http.Request) (*http.Response, error)
 		header := make(http.Header)
 		header.Set("Location", "https://github.com/author-name/cliproxy-sample-provider-plugin/releases/tag/v0.2.0")
 		return testHTTPResponse(req, http.StatusFound, header, ``), nil
+	case "https://github.com/author-name/cliproxy-sample-provider-plugin/releases/tag/v0.2.0":
+		return testHTTPResponse(req, http.StatusOK, nil, `<html>release</html>`), nil
 	case "https://github.com/author-name/cliproxy-sample-provider-plugin/releases/download/v0.2.0/" + d.archiveName:
 		return testHTTPBytesResponse(req, http.StatusOK, nil, d.archiveData), nil
 	case "https://github.com/author-name/cliproxy-sample-provider-plugin/releases/download/v0.2.0/checksums.txt":

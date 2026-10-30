@@ -961,13 +961,15 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	var roundTiming homeRetryRoundTiming
 	transportFailures := 0
 	transportFailureLimit := defaultRequestRetry + 2
-	if maxRetryCredentials > 0 && maxRetryCredentials+1 < transportFailureLimit {
-		transportFailureLimit = maxRetryCredentials + 1
-	}
 	if transportFailureLimit < 3 {
 		transportFailureLimit = 3
 	}
 	for {
+		// Bound a run of transport failures, not credential/quota failover.
+		// Home owns its dispatch/retry contract and is not subject to this cap.
+		if !homeMode && transportFailures >= transportFailureLimit {
+			return nil, preferredExecutionAttemptError(lastErr, upstreamErr)
+		}
 		allowSameAuthRetry := homeMode && homeSameAuthRetryPending && lastHomeAuthID != "" && homeSameAuthRetries[lastHomeAuthID] == 0
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && !allowSameAuthRetry {
 			if lastErr != nil {
@@ -1119,6 +1121,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		}
 		if errPrepare != nil {
+			transportFailures = 0
 			if selection != nil {
 				excludeAuth := shouldExcludeHomeAuthAfterStreamError(execCtx, auth, errPrepare)
 				if homeSameAuthRetries[auth.ID] > 0 {
@@ -1231,6 +1234,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if errCtx := execCtx.Err(); errCtx != nil && ctx != nil && ctx.Err() != nil {
 				return nil, errCtx
 			}
+			if !homeMode {
+				if statusCodeFromError(errStream) == 0 && (isConnectionLifecycleError(errStream) || isTransientTransportError(errStream)) {
+					transportFailures++
+				} else {
+					transportFailures = 0
+				}
+			}
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
@@ -1249,14 +1259,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errStream
 			}
 			lastErr = errStream
-			// Unbounded key rotation amplifies upstream proxy outages. Cap silent
-			// transport-class failures even when max-retry-credentials is 0.
-			if statusCodeFromError(errStream) == 0 && (isConnectionLifecycleError(errStream) || isTransientTransportError(errStream)) {
-				transportFailures++
-				if transportFailures >= transportFailureLimit {
-					return nil, preferredExecutionAttemptError(lastErr, upstreamErr)
-				}
-			}
 			if homeMode {
 				roundTiming.Observe(lastErr)
 			}

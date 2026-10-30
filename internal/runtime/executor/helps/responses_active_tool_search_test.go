@@ -2,9 +2,11 @@ package helps
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
 
@@ -81,5 +83,48 @@ func TestResponsesActiveToolSearchUsesLatestDiscovery(t *testing.T) {
 	got := NormalizeResponsesHistory(body, "https://anyrouter.top/v1/responses")
 	if gjson.GetBytes(got, "tools.0.tools.0.parameters.description").String() != "new" || gjson.GetBytes(got, "tools.0.tools.#").Int() != 1 {
 		t.Fatalf("old definition won: %s", got)
+	}
+}
+
+func TestResponsesActiveToolSearchNormalizesMergedSchemas(t *testing.T) {
+	const tool = `{"type":"namespace","name":"fixture","description":"current catalog","tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"key":{"type":"string","pattern":"\\p{L}+"},"id":{"type":"string","pattern":"^[a-z]+$"}}}}]}`
+	const input = `[{"role":"user","content":"Find a tool."},{"type":"reasoning","encrypted_content":"active-schema-owned"},{"type":"tool_search_call","call_id":"schema-search","status":"completed","execution":"client","arguments":{"query":"lookup"}},{"type":"tool_search_output","call_id":"schema-search","status":"completed","execution":"client","tools":[` + tool + `]}]`
+	for _, mode := range []string{"normalization", "signature", "route_switch", "already_callable"} {
+		t.Run(mode, func(t *testing.T) {
+			body := []byte(`{"model":"gpt-6-astra","input":` + input + `}`)
+			if mode == "already_callable" {
+				body = []byte(`{"model":"gpt-6-astra","tools":[` + tool + `],"input":` + input + `}`)
+			}
+			before := bytes.Clone(body)
+			var got []byte
+			switch mode {
+			case "signature":
+				var retry bool
+				got, retry = PortableResponsesSignatureRetry(body, []byte(`{"error":{"code":"invalid_encrypted_content"}}`), "https://example.test/v1/responses")
+				if !retry {
+					t.Fatal("expected signature repair")
+				}
+			case "route_switch":
+				first := &coreauth.Auth{ID: "first", Provider: "codex"}
+				_, state := PrepareCodexRouteState(first, "gpt-6-astra", t.Name(), nil)
+				state.Completed(context.Background(), []byte(`{"type":"response.completed","response":{"status":"completed","output":[{"type":"reasoning","encrypted_content":"active-schema-owned"}]}}`))
+				got, _ = PrepareCodexRouteState(&coreauth.Auth{ID: "second", Provider: "codex"}, "gpt-6-astra", t.Name(), body)
+			case "already_callable":
+				got = NormalizeResponsesHistory(body, "https://anyrouter.top/v1/responses")
+			default:
+				// Production normalizes the existing catalog before loading discovery.
+				got = NormalizeResponsesHistory(NormalizeCodexToolSchemas(body), "https://anyrouter.top/v1/responses")
+			}
+			loaded := gjson.GetBytes(got, "tools.0.tools.0")
+			if loaded.Get("name").String() != "lookup" || loaded.Get("parameters.properties.key.pattern").Exists() {
+				t.Fatalf("active schema was not normalized: %s", loaded.Raw)
+			}
+			if loaded.Get("parameters.properties.id.pattern").String() != "^[a-z]+$" || gjson.GetBytes(got, "tools.0.description").String() != "current catalog" {
+				t.Fatalf("compatible schema or namespace changed: %s", got)
+			}
+			if !bytes.Equal(body, before) || !bytes.Equal(got, NormalizeCodexToolSchemas(got)) {
+				t.Fatal("caller mutation or non-idempotent normalization")
+			}
+		})
 	}
 }

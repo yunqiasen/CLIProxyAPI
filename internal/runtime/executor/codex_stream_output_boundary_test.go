@@ -15,6 +15,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 func TestCodexStreamToolOutputSignatureBoundary(t *testing.T) {
@@ -69,15 +70,10 @@ func TestCodexStreamCommittedPrefixSignatureBoundary(t *testing.T) {
 func TestCodexStreamSilentSignatureRecoveryStillWorks(t *testing.T) {
 	for _, transport := range []string{"http", "websocket", "downstream_websocket"} {
 		for _, buffering := range []bool{false, true} {
-			// HTTP's legacy bootstrap returns SSE errors directly; its unbuffered
-			// path and both websocket modes own in-stream signature recovery.
-			if transport == "http" && buffering {
-				continue
-			}
 			t.Run(fmt.Sprintf("%s/buffering_%t", transport, buffering), func(t *testing.T) {
 				scaffold := []string{`{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","summary":[],"content":[]}}`}
 				calls, output, streamErr := runCodexStreamSignatureBoundary(t, transport, buffering, scaffold)
-				if calls != 2 || streamErr != nil || !strings.Contains(output, "resp_recovered") {
+				if calls != 2 || streamErr != nil || !strings.Contains(output, "resp_recovered") || strings.Contains(output, "resp_rejected") {
 					t.Fatalf("silent recovery: attempts=%d error=%v output=%s", calls, streamErr, output)
 				}
 			})
@@ -165,4 +161,112 @@ func runCodexStreamSignatureBoundary(t *testing.T, transport string, buffering b
 		}
 	}
 	return calls.Load(), output.String(), err
+}
+
+func TestCodexStreamBufferedToolFailureBoundary(t *testing.T) {
+	for _, transport := range []string{"http", "websocket", "downstream_websocket"} {
+		for _, toolType := range []string{"function_call", "custom_tool_call"} {
+			for _, failure := range []string{"overload", "eof"} {
+				t.Run(transport+"/"+toolType+"/"+failure, func(t *testing.T) {
+					added := fmt.Sprintf(`{"type":"response.output_item.added","output_index":0,"item":{"type":%q,"id":"tool_committed","call_id":"call_committed","name":"lookup","arguments":"","input":"","status":"in_progress"}}`, toolType)
+					events := []string{codexCreatedEvent, added}
+					if failure == "overload" {
+						events = append(events, codexOverloadEvent)
+					}
+					req, opts := codexTestRequest()
+					var result *cliproxyexecutor.StreamResult
+					var err error
+					if transport == "http" {
+						server := codexSSEServer(events...)
+						defer server.Close()
+						result, err = NewCodexExecutor(codexBufferingConfig(true)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+					} else {
+						server := codexWebsocketServer(t, events...)
+						defer server.Close()
+						ctx := context.Background()
+						if transport == "downstream_websocket" {
+							ctx = cliproxyexecutor.WithDownstreamWebsocket(ctx)
+						}
+						result, err = NewCodexWebsocketsExecutor(codexBufferingConfig(true)).ExecuteStream(ctx, codexTestAuth(server.URL), req, opts)
+					}
+					if err != nil || result == nil {
+						t.Fatalf("tool declaration became a retryable attempt failure: %v", err)
+					}
+					output, streamErr := drainChunks(result)
+					if streamErr == nil || !strings.Contains(output, "call_committed") || strings.Contains(output, "response.completed") {
+						t.Fatalf("tool declaration or terminal failure lost: %v %s", streamErr, output)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCodexStreamBufferedMetadataSignatureRecovery(t *testing.T) {
+	for _, transport := range []string{"websocket", "downstream_websocket"} {
+		for _, event := range []string{"codex.rate_limits", "codex.response.metadata"} {
+			t.Run(transport+"/"+event, func(t *testing.T) {
+				calls, output, err := runCodexStreamSignatureBoundary(t, transport, true, []string{fmt.Sprintf(`{"type":%q,"metadata":"rejected-metadata"}`, event)})
+				if calls != 2 || err != nil || !strings.Contains(output, "resp_recovered") || strings.Contains(output, "resp_rejected") || strings.Contains(output, "rejected-metadata") {
+					t.Fatalf("unpublished metadata blocked recovery or leaked: calls=%d error=%v output=%s", calls, err, output)
+				}
+			})
+		}
+	}
+}
+
+func TestCodexStreamSignatureRecoverySharedBudget(t *testing.T) {
+	const rejection = `{"error":{"code":"invalid_encrypted_content","type":"invalid_request_error","message":"foreign reasoning"}}`
+	for _, buffering := range []bool{false, true} {
+		for _, mode := range []string{"repeated_sse", "http_then_sse", "retry_429", "managed"} {
+			t.Run(fmt.Sprintf("buffering_%t/%s", buffering, mode), func(t *testing.T) {
+				var calls atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					attempt := calls.Add(1)
+					body, _ := io.ReadAll(r.Body)
+					if r.Header.Get("Authorization") != "Bearer test" {
+						t.Error("signature repair changed credential")
+					}
+					if attempt > 2 {
+						t.Error("signature repair exceeded one retry")
+					}
+					if attempt == 2 && (strings.Contains(gjson.GetBytes(body, "input").Raw, "encrypted_content") || !strings.Contains(string(body), "Keep user history.")) {
+						t.Errorf("retry state or portable history is wrong: %s", body)
+					}
+					if attempt == 1 && mode == "http_then_sse" {
+						w.WriteHeader(http.StatusBadRequest)
+						_, _ = io.WriteString(w, rejection)
+						return
+					}
+					if attempt == 2 && mode == "retry_429" {
+						w.WriteHeader(http.StatusTooManyRequests)
+						_, _ = io.WriteString(w, `{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"retry quota exhausted"}}`)
+						return
+					}
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = fmt.Fprintf(w, "data: {\"type\":\"error\",\"status\":400,\"error\":%s}\n\n", gjson.Get(rejection, "error").Raw)
+				}))
+				defer server.Close()
+				req := cliproxyexecutor.Request{Model: "gpt-6-astra", Payload: []byte(`{"input":[{"type":"reasoning","encrypted_content":"` + validCodexReasoningEncryptedContentForTest() + `"},{"role":"user","content":"Keep user history."}]}`)}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: true}
+				if mode == "managed" {
+					opts.ExecutionLifecycle = newTerminalFailureLifecycle()
+				}
+				result, err := NewCodexExecutor(codexBufferingConfig(buffering)).ExecuteStream(context.Background(), newCodexSignatureTestAuth(server.URL), req, opts)
+				if err == nil {
+					_, err = drainChunks(result)
+				}
+				want := int32(2)
+				if mode == "managed" {
+					want = 1
+				}
+				if err == nil || calls.Load() != want {
+					t.Fatalf("attempts=%d want=%d error=%v", calls.Load(), want, err)
+				}
+				if mode == "retry_429" && (statusCodeFromTestError(t, err) != http.StatusTooManyRequests || !strings.Contains(err.Error(), "retry quota exhausted")) {
+					t.Fatalf("retry error lost its status or body: %v", err)
+				}
+			})
+		}
+	}
 }

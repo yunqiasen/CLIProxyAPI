@@ -379,6 +379,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 						return nil, errRetry
 					}
 					bootstrap.Reset()
+					bufferedChunks = nil
+					bufferedBytes = 0
+					param = nil
+					claudeInputTokens = helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 					continue
 				}
 			}
@@ -456,7 +460,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 
 			eventType = gjson.GetBytes(payload, "type").String()
-			if !helps.ResponsesProvisionalEvent(eventType, payload) {
+			// Private metadata held in the bootstrap is not generated output.
+			if !helps.ResponsesProvisionalEvent(eventType, payload) && eventType != "codex.rate_limits" && eventType != "codex.response.metadata" {
 				observedOutput = true
 			}
 			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" || eventType == "response.failed" || eventType == "error"
@@ -516,7 +521,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			// !isTerminalEvent is redundant against the closed allow-list, which admits no terminal
 			// type, and the empty-payload rule cannot fire on a payload already known non-empty. It
 			// stays as the guard a reader expects to find, and its SSE counterpart is !terminalSuccess.
-			if windowOpen && isCodexBootstrapBufferableEvent(eventType, payload) && !isTerminalEvent {
+			itemType := gjson.GetBytes(payload, "item.type").String()
+			toolDeclared := eventType == "response.output_item.added" && (itemType == "function_call" || itemType == "custom_tool_call")
+			// Match HTTP: tool declarations release the stream before any later error.
+			if windowOpen && isCodexBootstrapBufferableEvent(eventType, payload) && !isTerminalEvent && !toolDeclared {
 				frameBytes := len(payload)
 				for i := range currentChunks {
 					frameBytes += len(currentChunks[i])

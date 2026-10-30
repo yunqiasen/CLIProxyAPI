@@ -165,6 +165,44 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 
+	// Both bootstrap readers share the same single, same-credential repair budget.
+	retrySignature := func(rejection []byte) (bool, error) {
+		if signatureRepairUsed {
+			return false, nil
+		}
+		repaired, canRetry := helps.PortableResponsesSignatureRetry(upstreamBody, rejection, httpReq.URL.String())
+		if !canRetry {
+			return false, nil
+		}
+		retry := newAttempt(helps.CloneResponsesRetryRequest(httpReq, repaired))
+		closeHTTPResponseBody(httpResp, "codex executor: close rejected response body")
+		errRetry := recordSignatureRetry(nil, rejection, retry, repaired)
+		var next *http.Response
+		if errRetry == nil {
+			next, errRetry = httpClient.Do(retry)
+		}
+		if errRetry = firstOutput.Failure(errRetry); errRetry != nil {
+			closeHTTPResponseBody(next, "codex executor: close timed-out retry response")
+			return true, errRetry
+		}
+		httpResp = next
+		helps.RecordAPIResponseMetadata(ctx, e.cfg, next.StatusCode, next.Header.Clone())
+		if next.StatusCode < 200 || next.StatusCode >= 300 {
+			rejected, errRead := io.ReadAll(next.Body)
+			closeHTTPResponseBody(next, "codex executor: close failed retry response")
+			helps.AppendAPIResponseChunk(ctx, e.cfg, rejected)
+			if errRead = firstOutput.Failure(errRead); errRead != nil {
+				return true, errRead
+			}
+			if errClear := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, next.StatusCode, rejected); errClear != nil {
+				return true, errClear
+			}
+			return true, helps.ResponsesChannelCapacityError(baseURL, baseModel, next.StatusCode, rejected, newCodexStatusErr(next.StatusCode, rejected))
+		}
+		httpReq, upstreamBody = retry, repaired
+		return true, nil
+	}
+
 	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
 	var bootstrapTimeout time.Duration
 	var bootstrapStart time.Time
@@ -215,6 +253,22 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				translatedLine = append([]byte("data: "), data...)
 				eventType := gjson.GetBytes(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
+					if !meaningfulOutput {
+						if retried, retryErr := retrySignature(terminalBody); retried {
+							if retryErr != nil {
+								helps.RecordAPIResponseError(ctx, e.cfg, retryErr)
+								reporter.PublishFailure(ctx, retryErr)
+								return nil, retryErr
+							}
+							scanner = bufio.NewScanner(httpResp.Body)
+							scanner.Buffer(nil, 52_428_800)
+							bufferedChunks = nil
+							bufferedFrames, bufferedBytes = 0, 0
+							param = nil
+							claudeInputTokens = helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
+							continue
+						}
+					}
 					closeBootstrapBody()
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
@@ -253,9 +307,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					bootstrapTerminalErr = streamErr
 					break
 				}
-				if isCodexBootstrapBufferableEvent(eventType, data) {
-					isHandshake = true
-				}
+				itemType := gjson.GetBytes(data, "item.type").String()
+				toolDeclared := eventType == "response.output_item.added" && (itemType == "function_call" || itemType == "custom_tool_call")
+				// A tool declaration commits the attempt even before arguments arrive.
+				isHandshake = isCodexBootstrapBufferableEvent(eventType, data) && !toolDeclared
 				if errFirstOutput := firstOutput.Observe(eventType, data); errFirstOutput != nil {
 					closeBootstrapBody()
 					helps.RecordAPIResponseError(ctx, e.cfg, errFirstOutput)
@@ -450,47 +505,22 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					bootstrapEvent = "managed_execution"
 				}
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
-					if !meaningfulOutput && !bootstrap.Committed() && emittedCount == 0 && !signatureRepairUsed {
-						if repaired, canRetry := helps.PortableResponsesSignatureRetry(upstreamBody, terminalBody, httpReq.URL.String()); canRetry {
-							retry := newAttempt(helps.CloneResponsesRetryRequest(httpReq, repaired))
-							closeHTTPResponseBody(httpResp, "codex executor: close rejected response body")
-							errRetry := recordSignatureRetry(nil, terminalBody, retry, repaired)
-							var next *http.Response
-							if errRetry == nil {
-								next, errRetry = httpClient.Do(retry)
-							}
-							if errRetry = firstOutput.Failure(errRetry); errRetry != nil {
-								closeHTTPResponseBody(next, "codex executor: close timed-out retry response")
-								helps.RecordAPIResponseError(ctx, e.cfg, errRetry)
-								reporter.PublishFailure(ctx, errRetry)
+					if !meaningfulOutput && !bootstrap.Committed() && emittedCount == 0 {
+						if retried, retryErr := retrySignature(terminalBody); retried {
+							if retryErr != nil {
+								helps.RecordAPIResponseError(ctx, e.cfg, retryErr)
+								reporter.PublishFailure(ctx, retryErr)
 								select {
-								case out <- cliproxyexecutor.StreamChunk{Err: errRetry}:
+								case out <- cliproxyexecutor.StreamChunk{Err: retryErr}:
 								case <-ctx.Done():
 								}
 								return
 							}
-							httpResp = next
-							helps.RecordAPIResponseMetadata(ctx, e.cfg, next.StatusCode, next.Header.Clone())
-							if next.StatusCode >= 200 && next.StatusCode < 300 {
-								reader = helps.NewCodexResponsesSSEReader(ctx, next.Body, 52_428_800, retry.URL.String(), repaired)
-								bootstrap.Reset()
-								param = nil
-								claudeInputTokens = helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
-								continue
-							}
-							rejected, errRead := io.ReadAll(next.Body)
-							helps.AppendAPIResponseChunk(ctx, e.cfg, rejected)
-							if errRead = firstOutput.Failure(errRead); errRead != nil {
-								helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-								reporter.PublishFailure(ctx, errRead)
-								select {
-								case out <- cliproxyexecutor.StreamChunk{Err: errRead}:
-								case <-ctx.Done():
-								}
-								return
-							}
-							streamErr = newCodexStatusErr(next.StatusCode, rejected)
-							terminalBody = rejected
+							reader = helps.NewCodexResponsesSSEReader(ctx, httpResp.Body, 52_428_800, httpReq.URL.String(), upstreamBody)
+							bootstrap.Reset()
+							param = nil
+							claudeInputTokens = helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
+							continue
 						}
 					}
 

@@ -313,7 +313,7 @@ func TestAgentHubSuffixAndMultiAccountRejectionRecovery(t *testing.T) {
 		{"multi_account", "historical encrypted reasoning belongs to multiple upstream accounts; start a new conversation without previous encrypted reasoning items"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rejection, _ := json.Marshal(map[string]any{"error": map[string]any{"type": "invalid_request_error", "message": tc.message + " [hub-abcdef] [trace_id=fixture]"}})
+			rejection, _ := json.Marshal(map[string]any{"error": map[string]any{"type": "invalid_request_error", "message": tc.message + " [hub-] [trace_id=fixture]"}})
 			repaired, retry := PortableResponsesSignatureRetry(body, rejection, "https://agentrouter.org/v1/responses")
 			if !retry {
 				t.Fatal("hub rejection did not enter portable recovery")
@@ -337,7 +337,7 @@ func TestAgentHubSuffixAndMultiAccountRejectionRecovery(t *testing.T) {
 func TestAgentMultiAccountRejectionGuards(t *testing.T) {
 	message := "historical encrypted reasoning belongs to multiple upstream accounts; start a new conversation without previous encrypted reasoning items"
 	body := []byte(`{"input":[{"type":"reasoning","encrypted_content":"opaque"},{"type":"message","id":"msg_old","role":"assistant","content":"Keep history."},{"role":"user","content":"Continue."}]}`)
-	for _, suffix := range []string{"", " [hub-abc]", " [hub-abc] [trace_id=fixture]", " trace_id: fixture", " (request id: fixture) [trace_id=fixture]"} {
+	for _, suffix := range []string{"", " [hub-] [trace_id=fixture]", " [hub-abc]", " [hub-abc] [trace_id=fixture]", " trace_id: fixture", " (request id: fixture) [trace_id=fixture]"} {
 		rejection, _ := json.Marshal(map[string]any{"error": map[string]any{"type": "invalid_request_error", "message": message + suffix}})
 		if got, retry := PortableResponsesSignatureRetry(body, rejection, "https://agentrouter.org/v1/responses"); !retry || gjson.GetBytes(got, "input.0.encrypted_content").Exists() {
 			t.Errorf("expected multi-account recovery: suffix=%q retry=%t body=%s", suffix, retry, got)
@@ -357,6 +357,9 @@ func TestAgentMultiAccountRejectionGuards(t *testing.T) {
 		{"only_encrypted_history", message, `{"input":[{"type":"reasoning","encrypted_content":"opaque"}]}`, "https://agentrouter.org/v1/responses"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.history == "" {
+				tc.history = string(body)
+			}
 			rejection, _ := json.Marshal(map[string]any{"error": map[string]any{"type": "invalid_request_error", "message": tc.reject}})
 			got, retry := PortableResponsesSignatureRetry([]byte(tc.history), rejection, tc.endpoint)
 			if retry || string(got) != tc.history {

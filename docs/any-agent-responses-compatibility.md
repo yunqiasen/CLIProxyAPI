@@ -1,5 +1,41 @@
 # Any and AgentRouter Responses Compatibility
 
+## October 30: stream lifecycle and retry review
+
+The October 29/30 incident repair recognizes the exact Agent resource/encryption
+errors with optional `[hub-]` trace metadata, including the historical
+multi-account reasoning envelope. It preserves readable conversation and active
+client-discovered tools through the existing one-shot, pre-output recovery path.
+It does not reconstruct opaque compaction or stored references, suppress real
+upstream failures, or certify upstream capacity.
+
+The final review closes additional stream lifecycle gaps:
+
+- Pre-first-frame SSE comments repeat throughout synchronous credential/bootstrap
+  waits. Only the handler goroutine writes HTTP output; cancellation stops the
+  ticker and waits for bootstrap to release its request context. Once a comment
+  commits HTTP headers, subsequent errors are SSE terminal events, not mixed JSON.
+- Buffered HTTP/WebSocket output uses the same real reasoning/text/tool commitment
+  boundary as unbuffered output. Tool declarations commit the attempt even before
+  arguments arrive. Lifecycle/empty-reasoning frames and WebSocket rate-limit or
+  metadata frames alone do not prevent a signature recovery. A repaired attempt
+  starts with fresh buffers and translation state; discarded attempt IDs stay out
+  of the final stream.
+- Active discovered function schemas pass through the existing schema compatibility
+  normalizer after merging. Explicit current tools retain precedence.
+- Consecutive pre-output transport failures have a bounded non-Home credential
+  rotation budget, `max(3, defaultRequestRetry + 2)`, within each request retry
+  round. Other failures, including quota responses, break the consecutive run.
+  Existing smaller credential limits still apply; Home keeps its own retry
+  contract. There is no replay after real output and no post-output idle timeout.
+- Strict Chat upstreams receive a non-empty assistant content placeholder when a
+  reasoning-only historical assistant precedes user/tool messages. Readable
+  reasoning and tool-call pairing are retained.
+
+Verification uses deterministic HTTP/SSE/WebSocket fixtures, production handlers,
+executors and management probes, including the captured conversation shape. Real
+provider availability is recorded separately from compatibility acceptance.
+
 ## Scope and status
 
 This repair targets the configured Any `gpt-6-astra` (`cpa-6a`) and

@@ -57,15 +57,16 @@ func retainActiveResponsesTools(body []byte, items []gjson.Result, records map[i
 	if err != nil {
 		return body
 	}
-	// Preserve byte-for-byte identity when the catalog was already callable.
+	// Discovery is loaded after the executor normalizes its initial catalog.
+	// Normalize the merged catalog too, including an already-callable definition.
 	if string(encoded) == tools.Raw {
-		return body
+		return NormalizeCodexToolSchemas(body)
 	}
 	updated, err := sjson.SetRawBytes(body, "tools", encoded)
 	if err != nil {
 		return body
 	}
-	return updated
+	return NormalizeCodexToolSchemas(updated)
 }
 
 // Explicit current definitions win over discovery metadata with the same name.

@@ -19,6 +19,7 @@ import (
 	"errors"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 
 	"slices"
 )
@@ -2552,5 +2553,77 @@ func TestManager_TransportFailuresAreBoundedWithoutMaxRetryCredentials(t *testin
 	}
 	if calls := executor.Calls(); calls != 3 {
 		t.Fatalf("expected transport failure cap of 3 calls, got %d", calls)
+	}
+}
+
+// A finite sequence exercises recovery across distinct credential outcomes.
+type transportSequenceExecutor struct {
+	credentialRetryLimitExecutor
+	failures []error
+}
+
+func (e *transportSequenceExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.recordCall()
+	n := e.Calls()
+	if n <= len(e.failures) {
+		return nil, e.failures[n-1]
+	}
+	ch := make(chan cliproxyexecutor.StreamChunk, 1)
+	ch <- cliproxyexecutor.StreamChunk{Payload: []byte("completed")}
+	close(ch)
+	return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
+}
+func TestManagerTransportCapOnlyCountsConsecutiveFailures(t *testing.T) {
+	m := NewManager(nil, &FillFirstSelector{}, nil)
+	m.SetRetryConfig(0, 0, 0)
+	e := &transportSequenceExecutor{credentialRetryLimitExecutor: credentialRetryLimitExecutor{id: "claude"}, failures: []error{io.EOF, io.EOF, &Error{HTTPStatus: 429, Message: "rate limit"}, io.EOF, io.EOF}}
+	m.RegisterExecutor(e)
+	for i := 0; i < 6; i++ {
+		id := fmt.Sprintf("transport-sequence-%d", i)
+		a := &Auth{ID: id, Provider: "claude", Status: StatusActive}
+		if _, err := m.Register(context.Background(), a); err != nil {
+			t.Fatal(err)
+		}
+		registry.GetGlobalRegistry().RegisterClient(id, "claude", []*registry.ModelInfo{{ID: "transport-model"}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	}
+	result, err := m.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "transport-model"}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("mixed credential outcomes prematurely stopped: %v", err)
+	}
+	if result == nil {
+		t.Fatal("missing stream")
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatal(chunk.Err)
+		}
+	}
+	if e.Calls() != 6 {
+		t.Fatalf("calls=%d want=6", e.Calls())
+	}
+}
+func TestManagerTransportCapDoesNotOverrideHomeDispatch(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	m.SetRetryConfig(0, 0, 0)
+	dispatcher := &retryRoundHomeDispatcher{limits: map[string]int{"home-transport-a": 0, "home-transport-b": 0, "home-transport-c": 0}}
+	m.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+	e := &transportSequenceExecutor{credentialRetryLimitExecutor: credentialRetryLimitExecutor{id: "retry-round-home"}, failures: []error{io.EOF, io.EOF, io.EOF}}
+	m.RegisterExecutor(e)
+	result, err := m.ExecuteStream(context.Background(), []string{"retry-round-home"}, cliproxyexecutor.Request{Model: "gpt"}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("Home retry contract stopped by local transport cap: %v", err)
+	}
+	if result == nil {
+		t.Fatal("missing stream")
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatal(chunk.Err)
+		}
+	}
+	if e.Calls() != 4 {
+		t.Fatalf("calls=%d want=4", e.Calls())
 	}
 }

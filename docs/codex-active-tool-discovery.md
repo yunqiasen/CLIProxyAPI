@@ -8,6 +8,8 @@ prose only.
 The shared helper also retains the callable function/namespace definitions for
 verified pairs **after the latest user message** in the outgoing `tools` array.
 Deferred functions discovered in this active turn become callable immediately.
+Merged definitions pass through the same schema compatibility normalizer as
+explicit current tools before submission.
 This applies to normal request normalization, a signature retry, and an observed
 credential switch. Production requests and management probes use the same path.
 

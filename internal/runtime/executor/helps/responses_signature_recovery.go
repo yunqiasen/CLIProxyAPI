@@ -120,7 +120,7 @@ func PortableResponsesSignatureRetry(body, rejection []byte, endpoint string) ([
 	if err != nil {
 		return body, false
 	}
-	return updated, true
+	return retainActiveResponsesTools(updated, items, discovery), true
 }
 
 // stripResponsesReasoningBinding preserves the readable item and its extension fields.

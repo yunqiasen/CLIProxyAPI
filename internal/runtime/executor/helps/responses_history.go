@@ -73,7 +73,7 @@ func NormalizeResponsesHistory(body []byte, endpoint string) []byte {
 	if errSet != nil {
 		return body
 	}
-	return updated
+	return retainActiveResponsesTools(updated, items, discovery)
 }
 
 // portableResponsesWebSearchRecord retains the complete readable record without

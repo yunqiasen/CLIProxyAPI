@@ -12,7 +12,7 @@ import (
 
 // Agent appends relay request metadata to the upstream message. Keep both the
 // message and diagnostic suffix anchored rather than accepting arbitrary prose.
-const agentRejectionMetadataSuffix = `(?: \(request id: [A-Za-z0-9_-]+\))?(?: trace_id: [A-Za-z0-9_-]+)?(?: \[trace_id=[A-Za-z0-9_-]+\])?$`
+const agentRejectionMetadataSuffix = `(?: \[hub-[A-Za-z0-9_-]*\])?(?: \(request id: [A-Za-z0-9_-]+\))?(?: trace_id: [A-Za-z0-9_-]+)?(?: \[trace_id=[A-Za-z0-9_-]+\])?$`
 
 // Inner decode-envelope messages carry the same relay metadata as direct ones;
 // keeping one definition prevents the two paths from accepting different suffixes.
@@ -27,6 +27,9 @@ var agentInnerRejectionMetadata = regexp.MustCompile(`^` + agentInnerRejectionMe
 
 var agentSignatureRejection = regexp.MustCompile(`^(?:OpenAI Responses bad request: )?The encrypted content for item (rs_[A-Za-z0-9_-]+) could not be verified\. Reason: Encrypted content could not be decrypted or parsed\.` + agentRejectionMetadataSuffix)
 
+// Agent hub relays append a hub marker before relay trace metadata.
+var agentMultiAccountRejection = regexp.MustCompile(`^historical encrypted reasoning belongs to multiple upstream accounts; start a new conversation without previous encrypted reasoning items` + agentRejectionMetadataSuffix)
+
 // Agent sometimes masks the resource vendor as "***" in this exact error.
 var agentResourceRejection = regexp.MustCompile(`^(?:OpenAI Responses bad request: )?The requested item was created under a different (?:Azure|\*{3}) OpenAI resource\. Use the same resource that created the item to access it\.` + agentRejectionMetadataSuffix)
 
@@ -36,6 +39,7 @@ const (
 	agentSignatureRejectionNone agentSignatureRejectionKind = iota
 	agentSignatureRejectionEncrypted
 	agentSignatureRejectionResource
+	agentSignatureRejectionMultiAccount
 )
 
 type agentSignatureRejectionMatch struct {
@@ -58,6 +62,14 @@ func classifyAgentSignatureRejection(body, rejection []byte, endpoint string) ag
 	}
 	message := agentSignatureRejectionMessage(gjson.GetBytes(rejection, path))
 	if message == "" {
+		return agentSignatureRejectionMatch{}
+	}
+	if agentMultiAccountRejection.MatchString(message) {
+		for _, item := range gjson.GetBytes(body, "input").Array() {
+			if item.Get("type").String() == "reasoning" && item.Get("encrypted_content").Type == gjson.String && item.Get("encrypted_content").String() != "" {
+				return agentSignatureRejectionMatch{kind: agentSignatureRejectionMultiAccount, path: path}
+			}
+		}
 		return agentSignatureRejectionMatch{}
 	}
 	if match := agentSignatureRejection.FindStringSubmatch(message); len(match) == 2 {

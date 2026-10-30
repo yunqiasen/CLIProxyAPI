@@ -226,7 +226,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			if isUsableResponsesReasoning(reasoningContent) {
 				latestReasoningContent = reasoningContent
 			}
-			message := []byte(`{"role":"assistant","content":"","reasoning_content":""}`)
+			message := []byte(`{"role":"assistant","content":"[reasoning unavailable]","reasoning_content":""}`)
 			message, _ = sjson.SetBytes(message, "reasoning_content", reasoningContent)
 			appendRegularMessage(message)
 		}

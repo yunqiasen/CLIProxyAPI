@@ -959,6 +959,14 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	var lastErr error
 	var upstreamErr error
 	var roundTiming homeRetryRoundTiming
+	transportFailures := 0
+	transportFailureLimit := defaultRequestRetry + 2
+	if maxRetryCredentials > 0 && maxRetryCredentials+1 < transportFailureLimit {
+		transportFailureLimit = maxRetryCredentials + 1
+	}
+	if transportFailureLimit < 3 {
+		transportFailureLimit = 3
+	}
 	for {
 		allowSameAuthRetry := homeMode && homeSameAuthRetryPending && lastHomeAuthID != "" && homeSameAuthRetries[lastHomeAuthID] == 0
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && !allowSameAuthRetry {
@@ -1241,6 +1249,14 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errStream
 			}
 			lastErr = errStream
+			// Unbounded key rotation amplifies upstream proxy outages. Cap silent
+			// transport-class failures even when max-retry-credentials is 0.
+			if statusCodeFromError(errStream) == 0 && (isConnectionLifecycleError(errStream) || isTransientTransportError(errStream)) {
+				transportFailures++
+				if transportFailures >= transportFailureLimit {
+					return nil, preferredExecutionAttemptError(lastErr, upstreamErr)
+				}
+			}
 			if homeMode {
 				roundTiming.Observe(lastErr)
 			}

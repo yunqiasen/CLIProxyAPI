@@ -524,6 +524,9 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_KeepsReasoningBefo
 	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "[reasoning unavailable]" {
 		t.Fatalf("messages.0.reasoning_content = %q, want placeholder; output=%s", got, out)
 	}
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != "[reasoning unavailable]" {
+		t.Fatalf("messages.0.content = %q, want non-empty placeholder for strict upstreams; output=%s", got, out)
+	}
 	if got := gjson.GetBytes(out, "messages.1.role").String(); got != "user" {
 		t.Fatalf("messages.1.role = %q, want user; output=%s", got, out)
 	}

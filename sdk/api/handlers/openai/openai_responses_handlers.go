@@ -16,6 +16,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/optimize-multi-agent-v2"
@@ -701,11 +703,6 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		return
 	}
 
-	// New core execution path
-	modelName := gjson.GetBytes(rawJSON, "model").String()
-	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
-
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
@@ -719,6 +716,57 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	}
 	framer := &responsesSSEFramer{failureEvent: failureEvent, isCodexClient: isCodexClient}
 	var initialOutput bytes.Buffer
+
+	// Keep-alives must cover the whole pre-first-frame window. Stream execution
+	// below blocks synchronously while reading the first payload, so heartbeats run
+	// in their own goroutine and all first-frame writes coordinate on writerMu.
+	var writerMu sync.Mutex
+	headersCommitted := false
+	var upstreamHeaders http.Header
+	var cliCancelLocal func(error)
+	keepAliveCtx, keepAliveCancel := context.WithCancel(context.Background())
+	defer keepAliveCancel()
+	if interval := handlers.StreamingKeepAliveInterval(h.Cfg); interval > 0 {
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-keepAliveCtx.Done():
+					return
+				case <-ticker.C:
+					writerMu.Lock()
+					if headersCommitted {
+						writerMu.Unlock()
+						continue
+					}
+					setSSEHeaders()
+					if upstreamHeaders != nil {
+						handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+					}
+					if _, err := c.Writer.Write([]byte(": keep-alive\n\n")); err != nil {
+						writerMu.Unlock()
+						keepAliveCancel()
+						cliCancelLocal(err)
+						return
+					}
+					flusher.Flush()
+					headersCommitted = true
+					writerMu.Unlock()
+				}
+			}
+		}()
+	}
+
+	// New core execution path
+	modelName := gjson.GetBytes(rawJSON, "model").String()
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCancelLocal = func(err error) { cliCancel(err) }
+	dataChan, returnedHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	writerMu.Lock()
+	upstreamHeaders = returnedHeaders
+	writerMu.Unlock()
+	_ = upstreamHeaders
 
 	// Peek at the first complete SSE data frame.
 	for {
@@ -738,6 +786,9 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				safeErrMsg = sanitizeResponsesInitialErrorMessage(errMsg)
 			}
 			if safeErrMsg != nil && framer.dataFrames > 0 {
+				writerMu.Lock()
+				headersCommitted = true
+				writerMu.Unlock()
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 				_, _ = c.Writer.Write(initialOutput.Bytes())
@@ -748,7 +799,22 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, make(chan []byte), pendingErrors, framer)
 				return
 			}
+			if headersCommitted && safeErrMsg != nil {
+				// HTTP headers and heartbeat comments are already committed, so the
+				// failure must continue as an SSE terminal event.
+				writerMu.Lock()
+				headersCommitted = true
+				writerMu.Unlock()
+				_, _ = c.Writer.Write(initialOutput.Bytes())
+				flusher.Flush()
+				pendingErrors := make(chan *interfaces.ErrorMessage, 1)
+				pendingErrors <- safeErrMsg
+				close(pendingErrors)
+				h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, make(chan []byte), pendingErrors, framer)
+				return
+			}
 			// Upstream failed before a complete SSE data frame. Return JSON.
+			keepAliveCancel()
 			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), safeErrMsg)
 			h.WriteErrorResponse(c, safeErrMsg)
 			if safeErrMsg != nil {
@@ -775,6 +841,9 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				}
 
 				if framer.dataFrames > 0 {
+					writerMu.Lock()
+					headersCommitted = true
+					writerMu.Unlock()
 					setSSEHeaders()
 					handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 					_, _ = c.Writer.Write(initialOutput.Bytes())
@@ -795,6 +864,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 					return
 				}
 
+				keepAliveCancel()
 				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 				h.WriteErrorResponse(c, errMsg)
 				if errMsg != nil {
@@ -810,6 +880,9 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				continue
 			}
 
+			writerMu.Lock()
+			headersCommitted = true
+			writerMu.Unlock()
 			setSSEHeaders()
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 			_, _ = c.Writer.Write(initialOutput.Bytes())

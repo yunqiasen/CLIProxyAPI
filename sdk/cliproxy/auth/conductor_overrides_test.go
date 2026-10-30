@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"io"
+	"strconv"
 	"sync"
 
 	"github.com/google/uuid"
@@ -2481,5 +2483,74 @@ func TestManager_MarkResult_RequestFaultBodyDoesNotCooldownModelOrAuth(t *testin
 	}
 	if state := updatedFail.ModelStates[model]; state == nil || !state.Unavailable || state.NextRetryAfter.IsZero() {
 		t.Fatalf("expected real 401 authentication error to set model cooldown state, got %#v", state)
+	}
+}
+
+type transportFailureLimitExecutor struct {
+	id string
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (e *transportFailureLimitExecutor) Identifier() string { return e.id }
+
+func (e *transportFailureLimitExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, io.EOF
+}
+
+func (e *transportFailureLimitExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.recordCall()
+	return nil, io.EOF
+}
+
+func (e *transportFailureLimitExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *transportFailureLimitExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, io.EOF
+}
+
+func (e *transportFailureLimitExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *transportFailureLimitExecutor) recordCall() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.calls++
+}
+
+func (e *transportFailureLimitExecutor) Calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
+func TestManager_TransportFailuresAreBoundedWithoutMaxRetryCredentials(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(0, 0, 0)
+	executor := &transportFailureLimitExecutor{id: "claude"}
+	m.RegisterExecutor(executor)
+
+	baseID := uuid.NewString()
+	auths := make([]*Auth, 0, 4)
+	for i := 0; i < 4; i++ {
+		auth := &Auth{ID: baseID + "-auth-" + strconv.Itoa(i), Provider: "claude"}
+		auths = append(auths, auth)
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "test-model"}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+		if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %d: %v", i, errRegister)
+		}
+	}
+
+	_, err := m.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{})
+	if err == nil {
+		t.Fatal("expected transport failure error")
+	}
+	if calls := executor.Calls(); calls != 3 {
+		t.Fatalf("expected transport failure cap of 3 calls, got %d", calls)
 	}
 }

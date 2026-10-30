@@ -300,3 +300,68 @@ func TestAgentDecodeEnvelopeRecoveryGuards(t *testing.T) {
 		assertUnchanged(t, body, []byte(invalid), endpoint)
 	}
 }
+
+func TestAgentHubSuffixAndMultiAccountRejectionRecovery(t *testing.T) {
+	body := []byte(`{"input":[{"type":"reasoning","id":"rs_foreign","encrypted_content":"opaque","summary":[{"type":"summary_text","text":"Keep summary."}]},{"type":"message","id":"msg_foreign","role":"assistant","content":"Keep answer."},{"type":"message","id":"client_owned","role":"user","content":"Continue."}]}`)
+	original := bytes.Clone(body)
+	for _, tc := range []struct {
+		name    string
+		message string
+	}{
+		{"hub_resource", "The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it."},
+		{"hub_encrypted", "The encrypted content for item rs_foreign could not be verified. Reason: Encrypted content could not be decrypted or parsed."},
+		{"multi_account", "historical encrypted reasoning belongs to multiple upstream accounts; start a new conversation without previous encrypted reasoning items"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rejection, _ := json.Marshal(map[string]any{"error": map[string]any{"type": "invalid_request_error", "message": tc.message + " [hub-abcdef] [trace_id=fixture]"}})
+			repaired, retry := PortableResponsesSignatureRetry(body, rejection, "https://agentrouter.org/v1/responses")
+			if !retry {
+				t.Fatal("hub rejection did not enter portable recovery")
+			}
+			if gjson.GetBytes(repaired, "input.#").Int() != 3 || gjson.GetBytes(repaired, "input.0.summary.0.text").String() != "Keep summary." || gjson.GetBytes(repaired, "input.1.content").String() != "Keep answer." || gjson.GetBytes(repaired, "input.2.id").String() != "client_owned" {
+				t.Fatalf("readable history changed: %s", repaired)
+			}
+			if gjson.GetBytes(repaired, "input.0.encrypted_content").Exists() || gjson.GetBytes(repaired, "input.0.id").Exists() {
+				t.Fatalf("rejected encrypted binding retained: %s", repaired)
+			}
+			if !bytes.Equal(body, original) {
+				t.Fatal("caller history mutated")
+			}
+			if _, again := PortableResponsesSignatureRetry(repaired, rejection, "https://agentrouter.org/v1/responses"); again {
+				t.Fatal("already-portable history retried again")
+			}
+		})
+	}
+}
+
+func TestAgentMultiAccountRejectionGuards(t *testing.T) {
+	message := "historical encrypted reasoning belongs to multiple upstream accounts; start a new conversation without previous encrypted reasoning items"
+	body := []byte(`{"input":[{"type":"reasoning","encrypted_content":"opaque"},{"type":"message","id":"msg_old","role":"assistant","content":"Keep history."},{"role":"user","content":"Continue."}]}`)
+	for _, suffix := range []string{"", " [hub-abc]", " [hub-abc] [trace_id=fixture]", " trace_id: fixture", " (request id: fixture) [trace_id=fixture]"} {
+		rejection, _ := json.Marshal(map[string]any{"error": map[string]any{"type": "invalid_request_error", "message": message + suffix}})
+		if got, retry := PortableResponsesSignatureRetry(body, rejection, "https://agentrouter.org/v1/responses"); !retry || gjson.GetBytes(got, "input.0.encrypted_content").Exists() {
+			t.Errorf("expected multi-account recovery: suffix=%q retry=%t body=%s", suffix, retry, got)
+		}
+	}
+	for _, tc := range []struct {
+		name     string
+		reject   string
+		history  string
+		endpoint string
+	}{
+		{"quoted", "Tool reported: " + message, "", "https://agentrouter.org/v1/responses"},
+		{"trailing_prose", message + " retry", "", "https://agentrouter.org/v1/responses"},
+		{"unrelated_endpoint", message, "", "https://example.test/v1/responses"},
+		{"no_encrypted_reasoning", message, `{"input":[{"type":"message","role":"assistant","content":"History."},{"role":"user","content":"Continue."}]}`, "https://agentrouter.org/v1/responses"},
+		{"stored_history", message, `{"previous_response_id":"resp_old","input":[{"type":"reasoning","encrypted_content":"opaque"},{"role":"user","content":"Continue."}]}`, "https://agentrouter.org/v1/responses"},
+		{"only_encrypted_history", message, `{"input":[{"type":"reasoning","encrypted_content":"opaque"}]}`, "https://agentrouter.org/v1/responses"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rejection, _ := json.Marshal(map[string]any{"error": map[string]any{"type": "invalid_request_error", "message": tc.reject}})
+			got, retry := PortableResponsesSignatureRetry([]byte(tc.history), rejection, tc.endpoint)
+			if retry || string(got) != tc.history {
+				t.Fatal("unrelated rejection changed history")
+			}
+		})
+	}
+}

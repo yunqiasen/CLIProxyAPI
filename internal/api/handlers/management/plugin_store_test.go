@@ -1442,3 +1442,20 @@ func makeManagementPluginStoreZip(t *testing.T, name string, content string) []b
 	}
 	return buffer.Bytes()
 }
+
+func TestPluginStoreClientReusedPerProxy(t *testing.T) {
+	t.Parallel()
+	h := &Handler{cfg: &config.Config{}}
+	first := h.newPluginStoreClient("", "", nil)
+	second := h.newPluginStoreClient("", "", nil)
+	if first.HTTPClient == nil || first.HTTPClient != second.HTTPClient {
+		t.Fatalf("client not reused: %#v vs %#v", first.HTTPClient, second.HTTPClient)
+	}
+	proxied := h.newPluginStoreClient("http://127.0.0.1:7890", "", nil)
+	if proxied.HTTPClient == first.HTTPClient {
+		t.Fatal("proxy settings must not share a client")
+	}
+	if again := h.newPluginStoreClient("http://127.0.0.1:7890", "", nil); again.HTTPClient != proxied.HTTPClient {
+		t.Fatal("proxied client not reused")
+	}
+}

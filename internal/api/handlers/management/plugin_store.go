@@ -558,11 +558,37 @@ func (h *Handler) newPluginStoreClient(proxyURL string, registryURL string, stor
 	if httpClient != nil {
 		return pluginstore.Client{HTTPClient: httpClient, NetworkScope: strings.TrimSpace(proxyURL), RateLimiter: limiter, RegistryURL: registryURL, Auth: storeAuth}
 	}
-	client := &http.Client{}
-	if strings.TrimSpace(proxyURL) != "" {
-		util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(proxyURL)}, client)
-	}
+	client := h.pluginStoreHTTPClientForProxy(proxyURL)
 	return pluginstore.Client{HTTPClient: client, NetworkScope: strings.TrimSpace(proxyURL), RateLimiter: limiter, RegistryURL: registryURL, Auth: storeAuth}
+}
+
+// pluginStoreHTTPClientForProxy reuses one client per proxy setting so
+// connections and the TLS session ticket cache survive across catalog and
+// install requests. A fresh client per request pays a full handshake every
+// time, which is where the intermittent GitHub raw EOFs come from.
+func (h *Handler) pluginStoreHTTPClientForProxy(proxyURL string) *http.Client {
+	key := strings.TrimSpace(proxyURL)
+	if h == nil {
+		client := &http.Client{}
+		if key != "" {
+			util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: key}, client)
+		}
+		return client
+	}
+	h.pluginStoreClientMu.Lock()
+	defer h.pluginStoreClientMu.Unlock()
+	if client, ok := h.pluginStoreClients[key]; ok {
+		return client
+	}
+	client := &http.Client{}
+	if key != "" {
+		util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: key}, client)
+	}
+	if h.pluginStoreClients == nil {
+		h.pluginStoreClients = make(map[string]*http.Client)
+	}
+	h.pluginStoreClients[key] = client
+	return client
 }
 
 func (h *Handler) fetchSourcedPlugins(ctx context.Context, proxyURL string, storeAuth []pluginstore.AuthConfig, sources []pluginstore.Source) ([]sourcedPlugin, []pluginStoreSourceErr) {

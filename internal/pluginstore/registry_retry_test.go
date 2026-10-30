@@ -14,7 +14,7 @@ func TestFetchRegistryRetriesTransientTransportErrors(t *testing.T) {
 	t.Parallel()
 
 	var attempts int
-	client := Client{HTTPClient: pluginIdentityDoerFunc(func(req *http.Request) (*http.Response, error) {
+	client := Client{registryBackoff: func(context.Context, int) error { return nil }, HTTPClient: pluginIdentityDoerFunc(func(req *http.Request) (*http.Response, error) {
 		attempts++
 		if attempts < registryFetchAttempts {
 			return nil, fmt.Errorf("request failed: EOF")
@@ -55,7 +55,7 @@ func TestFetchRegistryDoesNotRetryRateLimitErrors(t *testing.T) {
 	t.Parallel()
 
 	var attempts int
-	client := Client{HTTPClient: pluginIdentityDoerFunc(func(req *http.Request) (*http.Response, error) {
+	client := Client{registryBackoff: func(context.Context, int) error { return nil }, HTTPClient: pluginIdentityDoerFunc(func(req *http.Request) (*http.Response, error) {
 		attempts++
 		return nil, &RateLimitError{StatusCode: http.StatusTooManyRequests}
 	})}
@@ -78,7 +78,7 @@ func TestFetchRegistryRetriesTruncatedBodies(t *testing.T) {
 	t.Parallel()
 
 	var attempts int
-	client := Client{HTTPClient: pluginIdentityDoerFunc(func(req *http.Request) (*http.Response, error) {
+	client := Client{registryBackoff: func(context.Context, int) error { return nil }, HTTPClient: pluginIdentityDoerFunc(func(req *http.Request) (*http.Response, error) {
 		attempts++
 		if attempts == 1 {
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: truncatedBody{}}, nil
@@ -90,5 +90,25 @@ func TestFetchRegistryRetriesTruncatedBodies(t *testing.T) {
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts=%d want 2", attempts)
+	}
+}
+
+func TestFetchRegistryRetryBackoffHonorsContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	backoffs := 0
+	client := Client{registryBackoff: func(context.Context, int) error {
+		backoffs++
+		cancel()
+		return context.Canceled
+	}, HTTPClient: pluginIdentityDoerFunc(func(*http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("request failed: EOF")
+	})}
+	if _, errFetch := client.FetchRegistry(ctx); errFetch == nil {
+		t.Fatal("expected cancellation error")
+	}
+	if backoffs != 1 {
+		t.Fatalf("backoffs=%d want 1", backoffs)
 	}
 }

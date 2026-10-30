@@ -32,6 +32,8 @@ type Client struct {
 	ResolvedAuth          []ResolvedAuthConfig
 	ResolvedAuthExpiresAt time.Time
 	preparedAuth          *preparedPluginStoreAuth
+	// registryBackoff overrides the retry delay in tests.
+	registryBackoff func(context.Context, int) error
 }
 
 type Release struct {
@@ -64,7 +66,10 @@ func (c Client) FetchRegistry(ctx context.Context) (Registry, error) {
 // registryFetchAttempts bounds retries for transient transport failures on the
 // registry listing. GitHub raw endpoints intermittently drop the TLS handshake
 // through local proxies; a single EOF must not blank the whole plugin store.
-const registryFetchAttempts = 3
+// Retries are spaced out because an immediate repeat usually hits the same
+// broken path.
+const registryFetchAttempts = 5
+const registryRetryBaseDelay = 400 * time.Millisecond
 
 func (c Client) fetchRegistryBytes(ctx context.Context, registryURL string) ([]byte, error) {
 	var errLast error
@@ -79,8 +84,28 @@ func (c Client) fetchRegistryBytes(ctx context.Context, registryURL string) ([]b
 		if ctx.Err() != nil || errors.As(errLast, &limit) || !errors.As(errLast, &transportError) {
 			break
 		}
+		if attempt < registryFetchAttempts {
+			if errWait := c.waitRegistryRetry(ctx, attempt); errWait != nil {
+				return nil, errLast
+			}
+		}
 	}
 	return nil, errLast
+}
+
+// waitRegistryRetry spaces out transport retries with linear backoff.
+func (c Client) waitRegistryRetry(ctx context.Context, attempt int) error {
+	if c.registryBackoff != nil {
+		return c.registryBackoff(ctx, attempt)
+	}
+	timer := time.NewTimer(time.Duration(attempt) * registryRetryBaseDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // FetchLatestRelease returns the latest published release of the plugin's

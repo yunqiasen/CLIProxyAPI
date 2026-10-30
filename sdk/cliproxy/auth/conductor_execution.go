@@ -25,6 +25,75 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// requestAttemptBudget is shared by every retry layer of one downstream request:
+// credential failover, outer retry rounds and stream bootstrap restarts. Without
+// it a dead site is retried once per layer, multiplying one request into dozens
+// of upstream attempts.
+type requestAttemptBudget struct {
+	mu       sync.Mutex
+	attempts int
+}
+
+type requestAttemptBudgetKey struct{}
+
+func withRequestAttemptBudget(ctx context.Context) (context.Context, *requestAttemptBudget) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if existing, ok := ctx.Value(requestAttemptBudgetKey{}).(*requestAttemptBudget); ok && existing != nil {
+		return ctx, existing
+	}
+	budget := &requestAttemptBudget{}
+	return context.WithValue(ctx, requestAttemptBudgetKey{}, budget), budget
+}
+
+func requestAttemptBudgetFrom(ctx context.Context) *requestAttemptBudget {
+	if ctx == nil {
+		return nil
+	}
+	budget, _ := ctx.Value(requestAttemptBudgetKey{}).(*requestAttemptBudget)
+	return budget
+}
+
+// reserve consumes one upstream attempt. It returns false once the whole-request
+// budget is exhausted so no layer can start another attempt.
+func (b *requestAttemptBudget) reserve(limit int) bool {
+	if b == nil {
+		return true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if limit > 0 && b.attempts >= limit {
+		return false
+	}
+	b.attempts++
+	return true
+}
+
+func (b *requestAttemptBudget) used() int {
+	if b == nil {
+		return 0
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.attempts
+}
+
+func requestAttemptLimit(defaultRequestRetry int) int {
+	if defaultRequestRetry < 0 {
+		defaultRequestRetry = 0
+	}
+	transportLimit := defaultRequestRetry + 2
+	if transportLimit < 3 {
+		transportLimit = 3
+	}
+	limit := (defaultRequestRetry + 1) * transportLimit
+	if limit < 6 {
+		limit = 6
+	}
+	return limit
+}
+
 func newUpstreamAttemptContext(ctx context.Context) context.Context {
 	ctx = requestlog.WithAttempt(ctx)
 	ctx = logging.WithFreshResponseHeadersHolder(ctx)
@@ -259,6 +328,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
+	ctx, _ = withRequestAttemptBudget(ctx)
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
@@ -959,6 +1029,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	var lastErr error
 	var upstreamErr error
 	var roundTiming homeRetryRoundTiming
+	attemptBudget := requestAttemptBudgetFrom(ctx)
+	attemptLimit := requestAttemptLimit(defaultRequestRetry)
+	// Consecutive transport failures stay per round: a genuine mixed credential
+	// outcome must still reach the next credential. The whole-request budget
+	// below bounds the multiplication across rounds.
 	transportFailures := 0
 	transportFailureLimit := defaultRequestRetry + 2
 	if transportFailureLimit < 3 {
@@ -968,7 +1043,16 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		// Bound a run of transport failures, not credential/quota failover.
 		// Home owns its dispatch/retry contract and is not subject to this cap.
 		if !homeMode && transportFailures >= transportFailureLimit {
+			if lastErr == nil && upstreamErr == nil {
+				return nil, &Error{Code: "transport_failure", Message: "upstream transport failures exhausted the request budget"}
+			}
 			return nil, preferredExecutionAttemptError(lastErr, upstreamErr)
+		}
+		if !homeMode && attemptBudget != nil && attemptBudget.used() >= attemptLimit {
+			if lastErr != nil {
+				return nil, preferredExecutionAttemptError(lastErr, upstreamErr)
+			}
+			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
 		allowSameAuthRetry := homeMode && homeSameAuthRetryPending && lastHomeAuthID != "" && homeSameAuthRetries[lastHomeAuthID] == 0
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && !allowSameAuthRetry {
@@ -1208,6 +1292,18 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if homeMode && len(models) > 1 {
 			models = models[:1]
 			pooled = false
+		}
+		if !homeMode && attemptBudget != nil && !attemptBudget.reserve(attemptLimit) {
+			releaseAttempt()
+			if selection != nil {
+				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "attempt_budget_exhausted"); errEnd != nil {
+					return nil, errEnd
+				}
+			}
+			if lastErr != nil {
+				return nil, preferredExecutionAttemptError(lastErr, upstreamErr)
+			}
+			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
 		if errStream != nil {

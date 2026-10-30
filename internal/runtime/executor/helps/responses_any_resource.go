@@ -10,6 +10,11 @@ import (
 
 var anyHistoricalItemRejection = regexp.MustCompile(`^bad response status code 400 \(request id: [A-Za-z0-9_-]+\)$`)
 
+// Any may also forward the raw Azure item-ownership error instead of its older
+// opaque wrapper. Both envelopes are anchored and still require route-bound
+// item evidence in the request body.
+var anyResourceRejection = regexp.MustCompile(`^(?:OpenAI Responses bad request: )?The requested item was created under a different (?:Azure|\*{3}) OpenAI resource\. Use the same resource that created the item to access it\.` + agentRejectionMetadataSuffix)
+
 // Any hides the underlying item error behind this exact envelope. A same-key
 // live comparison verified it rejects an Agent assistant item ID while accepting
 // identical readable history without that ID. This is a bounded repair candidate,
@@ -23,7 +28,11 @@ func anyResponsesHistoricalItemRejection(body, rejection []byte, endpoint string
 	if !e.IsObject() {
 		e = gjson.GetBytes(rejection, "response.error")
 	}
-	if e.Get("type").String() != "invalid_request_error" || e.Get("code").String() != "" || e.Get("param").String() != "" || !anyHistoricalItemRejection.MatchString(e.Get("message").String()) {
+	if e.Get("type").String() != "invalid_request_error" || e.Get("code").String() != "" || e.Get("param").String() != "" {
+		return false
+	}
+	message := e.Get("message").String()
+	if !anyHistoricalItemRejection.MatchString(message) && !anyResourceRejection.MatchString(message) {
 		return false
 	}
 	for _, item := range gjson.GetBytes(body, "input").Array() {

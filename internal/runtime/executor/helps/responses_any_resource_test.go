@@ -54,3 +54,54 @@ func TestAnyHistoricalItemRecoveryGuards(t *testing.T) {
 		}
 	}
 }
+
+func TestAnyRawAzureResourceRejectionRecovery(t *testing.T) {
+	body := []byte(`{"model":"gpt-6-astra","input":[{"type":"message","role":"assistant","id":"msg_old","content":"Keep answer"},{"type":"function_call","id":"fc_old","call_id":"keep_call","name":"lookup","arguments":"{}"},{"type":"message","role":"user","id":"msg_client","content":"Continue"}]}`)
+	rejection := []byte(`{"error":{"code":null,"message":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it. [trace_id=6b2c7db0083de4c4b8f07db3e6fc0a1b]","param":"","type":"invalid_request_error"}}`)
+	endpoint := "https://anyrouter.top/v1/responses"
+
+	got, ok := PortableResponsesSignatureRetry(body, rejection, endpoint)
+	if !ok {
+		t.Fatalf("raw Azure resource rejection was not recognized: %s", got)
+	}
+	if gjson.GetBytes(got, "input.0.id").Exists() || gjson.GetBytes(got, "input.1.id").Exists() {
+		t.Fatalf("route-bound item IDs retained: %s", got)
+	}
+	if gjson.GetBytes(got, "input.0.content").String() != "Keep answer" || gjson.GetBytes(got, "input.1.call_id").String() != "keep_call" {
+		t.Fatalf("portable history changed: %s", got)
+	}
+	if gjson.GetBytes(got, "input.2.id").String() != "msg_client" {
+		t.Fatalf("client-owned message id changed: %s", got)
+	}
+
+	for _, tc := range []struct{ name, rejection, endpoint, body string }{
+		{
+			name:      "masked vendor",
+			rejection: `{"error":{"code":null,"message":"The requested item was created under a different *** OpenAI resource. Use the same resource that created the item to access it.","param":"","type":"invalid_request_error"}}`,
+			endpoint:  endpoint,
+			body:      string(body),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := PortableResponsesSignatureRetry([]byte(tc.body), []byte(tc.rejection), tc.endpoint); !ok {
+				t.Fatal("expected recovery for supported envelope")
+			}
+		})
+	}
+
+	for _, tc := range []struct{ name, rejection, endpoint, body string }{
+		{"other route", string(rejection), "https://example.test/v1/responses", string(body)},
+		{"compact route", string(rejection), "https://anyrouter.top/v1/responses/compact", string(body)},
+		{"wrong model", string(rejection), endpoint, `{"model":"other","input":[{"type":"message","role":"assistant","id":"msg_old","content":"Keep"}]}`},
+		{"no route-bound ids", string(rejection), endpoint, `{"model":"gpt-6-astra","input":[{"type":"message","role":"user","id":"msg_client","content":"Keep"}]}`},
+		{"previous response id", string(rejection), endpoint, `{"model":"gpt-6-astra","previous_response_id":"resp_old","input":[{"type":"message","role":"assistant","id":"msg_old","content":"Keep"}]}`},
+		{"unrelated 400", `{"error":{"code":null,"message":"The requested item was created under a different Azure OpenAI resource.","param":"tools","type":"invalid_request_error"}}`, endpoint, string(body)},
+		{"different type", `{"error":{"code":null,"message":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it.","param":"","type":"server_error"}}`, endpoint, string(body)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := PortableResponsesSignatureRetry([]byte(tc.body), []byte(tc.rejection), tc.endpoint); ok {
+				t.Fatal("unrelated rejection triggered recovery")
+			}
+		})
+	}
+}

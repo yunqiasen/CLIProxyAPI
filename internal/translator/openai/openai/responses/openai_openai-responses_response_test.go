@@ -1230,6 +1230,58 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoesNotCompleteRe
 	}
 }
 
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ReasoningOnlyWithFinishReasonEmitsTerminal(t *testing.T) {
+	request := []byte(`{"model":"deepseek-v4-flash"}`)
+
+	tests := []struct {
+		name          string
+		finishReason  string
+		wantEvent     string
+		wantStatus    string
+		wantIncReason string
+	}{
+		{name: "stop completes", finishReason: "stop", wantEvent: "response.completed", wantStatus: "completed"},
+		{name: "length is incomplete", finishReason: "length", wantEvent: "response.incomplete", wantStatus: "incomplete", wantIncReason: "max_output_tokens"},
+		{name: "content filter is incomplete", finishReason: "content_filter", wantEvent: "response.incomplete", wantStatus: "incomplete", wantIncReason: "content_filter"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chunks := []string{
+				`data: {"id":"resp_reasoning_only","object":"chat.completion.chunk","created":1773896263,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"still thinking"},"finish_reason":null}]}`,
+				`data: {"id":"resp_reasoning_only","object":"chat.completion.chunk","created":1773896263,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{},"finish_reason":"` + tt.finishReason + `"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+				`data: [DONE]`,
+			}
+
+			var param any
+			var terminalSeen bool
+			for _, line := range chunks {
+				for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "deepseek-v4-flash", request, request, []byte(line), &param) {
+					event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+					if event != tt.wantEvent {
+						continue
+					}
+					terminalSeen = true
+					if got := data.Get("response.status").String(); got != tt.wantStatus {
+						t.Fatalf("response.status = %q, want %q; event=%s", got, tt.wantStatus, chunk)
+					}
+					if tt.wantIncReason != "" {
+						if got := data.Get("response.incomplete_details.reason").String(); got != tt.wantIncReason {
+							t.Fatalf("incomplete reason = %q, want %q", got, tt.wantIncReason)
+						}
+					}
+					if got := data.Get("response.output.0.type").String(); got != "reasoning" {
+						t.Fatalf("output.0.type = %q, want reasoning; event=%s", got, chunk)
+					}
+				}
+			}
+			if !terminalSeen {
+				t.Fatalf("reasoning-only stream with finish_reason=%s emitted no %s", tt.finishReason, tt.wantEvent)
+			}
+		})
+	}
+}
+
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_IncompleteToolStreamDoesNotFinalizeAsCompleted(t *testing.T) {
 	request := []byte(`{"model":"gpt-5.6-terra"}`)
 

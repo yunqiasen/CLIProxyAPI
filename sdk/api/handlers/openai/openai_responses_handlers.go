@@ -57,6 +57,7 @@ type responsesSSEFramer struct {
 	unindexedOutputItems [][]byte
 	lastEvent            string
 	terminalEvent        string
+	responseID           string
 	terminalError        *interfaces.ErrorMessage
 	failureEvent         string
 	isCodexClient        bool
@@ -203,6 +204,10 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 	}
 
 	switch eventType {
+	case "response.created":
+		if id := gjson.GetBytes(payload, "response.id").String(); id != "" {
+			f.responseID = id
+		}
 	case "response.output_item.done":
 		f.recordOutputItem(payload)
 	case "response.completed":
@@ -762,9 +767,11 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			pendingStart = nil
 		case <-heartbeat:
 			setSSEHeaders()
-			if _, errWrite := c.Writer.Write([]byte(": keep-alive\n\n")); errWrite != nil {
-				cliCancel(errWrite)
-				return
+			if beat := responsesKeepAlive(c, framer); len(beat) > 0 {
+				if _, errWrite := c.Writer.Write(beat); errWrite != nil {
+					cliCancel(errWrite)
+					return
+				}
 			}
 			flusher.Flush()
 		case <-c.Request.Context().Done():
@@ -1054,6 +1061,26 @@ func (h *OpenAIResponsesAPIHandler) logResponsesStreamError(c *gin.Context, fram
 	})
 }
 
+// responsesKeepAlive keeps an idle Responses stream observable to clients that
+// time out waiting for a parsed SSE event rather than raw bytes. Codex ignores
+// response.in_progress, so this carries no content and changes no turn state.
+// Other clients keep the plain SSE comment heartbeat.
+func responsesKeepAlive(c *gin.Context, framer *responsesSSEFramer) []byte {
+	if framer != nil && len(bytes.TrimSpace(framer.pending)) > 0 {
+		// A partial frame is already buffered. Appending a heartbeat would split
+		// it and corrupt the next event, so wait for the frame to complete.
+		return nil
+	}
+	if !isCodexResponsesClientRequest(c) {
+		return []byte(": keep-alive\n\n")
+	}
+	payload := []byte(`{"type":"response.in_progress","response":{"id":"","status":"in_progress"}}`)
+	if framer != nil && framer.responseID != "" {
+		payload, _ = sjson.SetBytes(payload, "response.id", framer.responseID)
+	}
+	return []byte(fmt.Sprintf("event: response.in_progress\ndata: %s\n\n", payload))
+}
+
 func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {
 	if framer == nil {
 		framer = &responsesSSEFramer{}
@@ -1096,6 +1123,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 	}
 
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+		WriteKeepAlive: func() {
+			if beat := responsesKeepAlive(c, framer); len(beat) > 0 {
+				_, _ = c.Writer.Write(beat)
+			}
+		},
 		NormalizeTerminalError: sanitizeResponsesStreamErrorMessage,
 		WriteChunk: func(chunk []byte) {
 			framer.WriteChunk(c.Writer, chunk)

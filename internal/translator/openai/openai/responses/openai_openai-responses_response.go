@@ -723,7 +723,13 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			return out
 		}
 		if len(st.MsgItemAdded) == 0 && len(st.FuncItemAdded) == 0 {
-			return out
+			// Reasoning-only turns still have an explicit outcome when the upstream
+			// reports a terminal finish_reason. Losing it turns a valid answer into
+			// a false "stream closed before a terminal event" failure.
+			_, reasoningIncomplete := incompleteByFinishReason(st.FinishReason)
+			if len(st.Reasonings) == 0 || (st.FinishReason != "stop" && !reasoningIncomplete) {
+				return out
+			}
 		}
 		st.CompletedEmitted = true
 		out = append(out, buildResponsesCompletedEvent(st, requestForNamespace, nextSeq))

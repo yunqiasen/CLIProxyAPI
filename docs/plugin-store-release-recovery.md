@@ -50,9 +50,16 @@ latest and version-selected installation and configuration persistence.
 ## Registry listing resilience
 
 Registry listing retries only transport failures (no HTTP response: TLS reset,
-EOF, proxy drop) up to three attempts. HTTP status errors, GitHub rate limits and
-caller cancellation stop immediately and keep their typed errors, so the listing
-no longer blanks out on a single dropped handshake.
+EOF, proxy drop, truncated body) with linear backoff, up to five attempts. HTTP
+status errors, GitHub rate limits and caller cancellation stop immediately and
+keep their typed errors, so the listing no longer blanks out on a single dropped
+handshake.
+
+The management handler also reuses one HTTP client per proxy setting instead of
+building a fresh client for every catalog and install request. A new client pays
+a full TLS handshake each time, which is where the intermittent raw.githubusercontent
+EOF originated; reusing the connection pool cut the failure rate to zero in live
+checks (6/6 public catalog requests, 0.3s warm).
 
 ## Live verification
 

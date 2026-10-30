@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -13,6 +14,7 @@ import (
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/tidwall/gjson"
 	"golang.org/x/net/context"
 )
 
@@ -193,15 +195,27 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 								completionErr = ctx.Err()
 							}
 						}
-					} else if len(payload) > 0 {
-						select {
-						case dataChan <- payload:
-						case <-done:
-							completionOutcome = pluginapi.RequestCompletionCanceled
-							completionStatus = 0
-							if ctx != nil {
-								completionErr = ctx.Err()
+					} else {
+						if len(payload) > 0 {
+							select {
+							case dataChan <- payload:
+							case <-done:
+								completionOutcome = pluginapi.RequestCompletionCanceled
+								completionStatus = 0
+								if ctx != nil {
+									completionErr = ctx.Err()
+								}
+								return
 							}
+						}
+						if status, errTerminal := responseSSEValidator.terminalFailure(); errTerminal != nil {
+							completionOutcome = pluginapi.RequestCompletionFailed
+							completionStatus = status
+							completionErr = errTerminal
+						} else if status, errTerminal := responseSSEValidator.missingTerminal(); errTerminal != nil {
+							completionOutcome = pluginapi.RequestCompletionFailed
+							completionStatus = status
+							completionErr = errTerminal
 						}
 					}
 				}
@@ -709,11 +723,26 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 						completionStatus = errMsg.StatusCode
 						completionErr = errMsg.Error
 						_ = sendErr(errMsg)
-					} else if len(payload) > 0 && !sendData(payload) {
-						completionOutcome = pluginapi.RequestCompletionCanceled
-						completionStatus = 0
-						if ctx != nil {
-							completionErr = ctx.Err()
+					} else {
+						if len(payload) > 0 && !sendData(payload) {
+							completionOutcome = pluginapi.RequestCompletionCanceled
+							completionStatus = 0
+							if ctx != nil {
+								completionErr = ctx.Err()
+							}
+							return
+						}
+						// The downstream framer rejects a Responses stream without a
+						// terminal event. Report the same outcome here so audit
+						// observations never claim success for a failed response.
+						if status, errTerminal := responseSSEValidator.terminalFailure(); errTerminal != nil {
+							completionOutcome = pluginapi.RequestCompletionFailed
+							completionStatus = status
+							completionErr = errTerminal
+						} else if status, errTerminal := responseSSEValidator.missingTerminal(); errTerminal != nil {
+							completionOutcome = pluginapi.RequestCompletionFailed
+							completionStatus = status
+							completionErr = errTerminal
 						}
 					}
 				}
@@ -766,9 +795,14 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 }
 
 type sseJSONValidationState struct {
-	pending    []byte
-	pendingErr error
-	pendingCR  bool
+	pending        []byte
+	pendingErr     error
+	pendingCR      bool
+	frames         int
+	terminalSeen   bool
+	terminalFailed bool
+	lastEvent      string
+	terminalData   []byte
 }
 
 func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
@@ -815,6 +849,7 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 			}
 			return nil, errValidate
 		}
+		s.observeFrame(frame)
 		output = append(output, frame...)
 		copy(s.pending, s.pending[frameEnd:])
 		s.pending = s.pending[:len(s.pending)-frameEnd]
@@ -831,6 +866,7 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 	lastLine := bytes.TrimSpace(s.pending[bytes.LastIndexByte(s.pending, '\n')+1:])
 	completeTail := len(lastLine) == 0 || (bytes.HasPrefix(lastLine, []byte("data:")) && len(bytes.TrimSpace(lastLine[len("data:"):])) > 0)
 	if (!found && json.Valid(s.pending)) || (found && completeTail && len(payload) > 0 && (bytes.Equal(payload, []byte("[DONE]")) || json.Valid(payload))) {
+		s.observeFrame(s.pending)
 		output = append(output, s.pending...)
 		s.pending = s.pending[:0]
 	}
@@ -857,7 +893,75 @@ func (s *sseJSONValidationState) Finish() ([]byte, error) {
 	if errValidate := validateSSEFrameDataJSON(payload); errValidate != nil {
 		return nil, errValidate
 	}
+	s.observeFrame(payload)
 	return payload, nil
+}
+
+// observeFrame tracks the Responses terminal state of one SSE frame. It never
+// rewrites the frame; it only records whether a terminal event was seen so the
+// execution lifecycle reports the same outcome the client receives.
+func (s *sseJSONValidationState) observeFrame(frame []byte) {
+	if s == nil {
+		return
+	}
+	event := ""
+	for _, line := range bytes.Split(frame, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("event:")) {
+			event = strings.TrimSpace(string(line[len("event:"):]))
+			break
+		}
+	}
+	payload, _ := sseJSONValidationDataPayload(frame)
+	payload = bytes.TrimSpace(payload)
+	if len(payload) == 0 {
+		return
+	}
+	s.frames++
+	dataType := ""
+	if json.Valid(payload) && !bytes.Equal(payload, []byte("[DONE]")) {
+		dataType = gjson.GetBytes(payload, "type").String()
+	}
+	name := event
+	if name == "" {
+		name = dataType
+	}
+	if name == "" {
+		return
+	}
+	s.lastEvent = name
+	switch name {
+	case "response.completed", "response.incomplete", "response.done":
+		s.terminalSeen = true
+	case "response.failed", "response.error", "error":
+		s.terminalSeen = true
+		s.terminalFailed = true
+		s.terminalData = append([]byte(nil), payload...)
+	}
+}
+
+// terminalFailure returns the upstream failure payload for a failed terminal event.
+func (s *sseJSONValidationState) terminalFailure() (int, error) {
+	if s == nil || !s.terminalFailed {
+		return 0, nil
+	}
+	text := strings.TrimSpace(string(s.terminalData))
+	if text == "" {
+		text = s.lastEvent
+	}
+	return http.StatusBadGateway, fmt.Errorf("%s", text)
+}
+
+// missingTerminal reports a stream that delivered data but never declared an outcome.
+func (s *sseJSONValidationState) missingTerminal() (int, error) {
+	if s == nil || s.frames == 0 || s.terminalSeen {
+		return 0, nil
+	}
+	lastEvent := s.lastEvent
+	if lastEvent == "" {
+		lastEvent = "none"
+	}
+	return http.StatusBadGateway, fmt.Errorf("upstream stream closed before a terminal event (last event: %s)", lastEvent)
 }
 
 func sseJSONValidationDataPayload(frame []byte) ([]byte, bool) {

@@ -65,6 +65,8 @@ type Handler struct {
 	pluginReleaseCacheMu    sync.Mutex
 	pluginReleaseCache      map[string]pluginReleaseCacheEntry
 	pluginStoreRateLimiter  *pluginstore.GitHubRateLimiter
+	pluginStoreClientMu     sync.Mutex
+	pluginStoreClients      map[string]*http.Client
 	pluginReleases          pluginReleaseCache
 	quotaRefreshJobs        *quotaRefreshJobStore
 	requestLogIndex         *requestLogIndexManager

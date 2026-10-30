@@ -112,8 +112,15 @@ func TestResponsesHandlerKeepAliveBootstrapLifecycle(t *testing.T) {
 					if outcome == "canceled" {
 						expectedBeats = 2
 					}
-					if got := strings.Count(body, ": keep-alive\n\n"); got != expectedBeats {
+					heartbeatMarker := ": keep-alive\n\n"
+					if codex {
+						heartbeatMarker = "event: response.in_progress"
+					}
+					if got := strings.Count(body, heartbeatMarker); got != expectedBeats {
 						t.Fatalf("heartbeats=%d want=%d body=%q", got, expectedBeats, body)
+					}
+					if codex && strings.Contains(body, ": keep-alive") {
+						t.Fatalf("codex client received a comment-only heartbeat: %q", body)
 					}
 					if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Type") != "text/event-stream" {
 						t.Fatalf("heartbeat response status=%d headers=%v", recorder.Code, recorder.Header())
@@ -135,7 +142,10 @@ func TestResponsesHandlerKeepAliveBootstrapLifecycle(t *testing.T) {
 							t.Fatalf("completion corrupted: %q", body)
 						}
 					case "canceled":
-						if strings.Contains(body, "data:") {
+						// A Codex heartbeat is an in_progress frame, but cancellation
+						// must never fabricate content or a terminal outcome.
+						stripped := strings.ReplaceAll(body, "event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"\",\"status\":\"in_progress\"}}\n\n", "")
+						if strings.Contains(stripped, "data:") {
 							t.Fatalf("cancellation fabricated output: %q", body)
 						}
 					}

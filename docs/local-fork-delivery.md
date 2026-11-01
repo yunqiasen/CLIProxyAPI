@@ -4,11 +4,16 @@ Every completed code-change task includes tests, relevant documentation, require
 review, a scoped **local Git commit**, and verification of the running CPA. Execute
 these steps automatically, without another user reminder. Do not auto-push.
 
+The workspace moved under `/home/div/1_Project_dir/AI/CPA/` on 2026-11-01.
+See [Workspace Migration](workspace-migration.md) for data locations, compatibility
+links, maintenance entry points and rollback. Run the commands below from
+`/home/div/1_Project_dir/AI/CPA/CLIProxyAPI`.
+
 ## Local code hot reload
 
 The local development service uses:
 
-- Branch/workspace: `CPA-fork`, `/home/div/1_Project_dir/AI/CLIProxyAPI`.
+- Branch/workspace: `CPA-fork`, `/home/div/1_Project_dir/AI/CPA/CLIProxyAPI`.
 - Docker endpoint: verify the current context; normally `unix:///var/run/docker.sock`.
 - Compose project/service/container: `cliproxyapi` / `cli-proxy-api`.
 - Base configuration: machine-local `docker-compose.local.yml`.

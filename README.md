@@ -333,6 +333,11 @@ compatibility](docs/native-model-catalog.md).
 
 ## Fork And Branch Workflow
 
+The primary checkout is `/home/div/1_Project_dir/AI/CPA/CLIProxyAPI`; the UI and
+plugin forks are sibling repositories under `/home/div/1_Project_dir/AI/CPA/`.
+The former checkout is retained for historical worktrees, not runtime delivery.
+See [Workspace Migration](docs/workspace-migration.md).
+
 This repository is maintained as a fork of `router-for-me/CLIProxyAPI`.
 
 - `main` stays close to upstream and is used to land upstream updates first.

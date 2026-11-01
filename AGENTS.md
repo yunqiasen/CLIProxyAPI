@@ -7,7 +7,8 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 
 ## Branch Workflow
 - This repository is maintained as a fork of `router-for-me/CLIProxyAPI`.
-- Primary local workspace: `/home/div/1_Project_dir/AI/CLIProxyAPI`.
+- Primary local workspace: `/home/div/1_Project_dir/AI/CPA/CLIProxyAPI`.
+- The former `/home/div/1_Project_dir/AI/CLIProxyAPI` checkout is retained for historical worktrees; new development and runtime delivery use the primary workspace above. See [Workspace Migration](docs/workspace-migration.md).
 - The old `/home/div/1_Project_dir/AI/CLIProxyAPI-CPA-fork` symlink was removed; do not recreate or use it.
 - Fork remote: `origin` -> `https://github.com/yunqiasen/CLIProxyAPI.git`.
 - Upstream remote: `upstream` -> `https://github.com/router-for-me/CLIProxyAPI.git`.
@@ -32,7 +33,7 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 - A current explicit read-only, no-commit or no-restart instruction overrides the corresponding step for that task. Otherwise complete local commit and runtime verification without another reminder. Exact setup, verification and rollback commands are in [Local Fork Delivery](docs/local-fork-delivery.md); keep both README workflow summaries aligned.
 
 ## CPA Fork Customizations
-- Management UI source is maintained separately at `/home/div/1_Project_dir/AI/Cli-Proxy-API-Management-Center` on branch `CPA-UI-fork`.
+- Management UI source is maintained separately at `/home/div/1_Project_dir/AI/CPA/Cli-Proxy-API-Management-Center` on branch `CPA-UI-fork`.
 - CPA fork deployments must load the management panel from `https://github.com/yunqiasen/Cli-Proxy-API-Management-Center`, not the upstream UI repository. Keep `internal/config.DefaultPanelGitHubRepository`, `internal/managementasset.defaultManagementReleaseURL`, and `config.example.yaml` aligned with that fork.
 - Other servers should be able to deploy this CPA fork normally with Docker and automatically receive the forked UI through the management panel release download. Do not require manual copying of `static/management.html` for normal server installs.
 - Forked management UI releases must upload the built single-file panel as an asset named exactly `management.html`; labels are not enough because the backend updater downloads by asset name.

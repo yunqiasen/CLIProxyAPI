@@ -27,6 +27,7 @@ type pluginListResponse struct {
 type pluginListEntry struct {
 	ID               string                  `json:"id"`
 	Path             string                  `json:"path"`
+	ActivePath       string                  `json:"active_path,omitempty"`
 	Configured       bool                    `json:"configured"`
 	Registered       bool                    `json:"registered"`
 	Enabled          bool                    `json:"enabled"`
@@ -122,6 +123,7 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 			entry := entries[info.ID]
 			entry.ID = htmlsanitize.String(info.ID)
 			entry.Registered = true
+			entry.ActivePath = htmlsanitize.String(info.ActivePath)
 			entry.SupportsOAuth = info.SupportsOAuth
 			entry.OAuthProvider = htmlsanitize.String(info.OAuthProvider)
 			entry.SupportsQuota = info.SupportsQuota

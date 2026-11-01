@@ -246,6 +246,62 @@ func TestListPluginsUsesConfiguredStoreVersionWhenFilesCoexist(t *testing.T) {
 	t.Fatalf("sample-provider entry missing: %#v", body.Plugins)
 }
 
+func TestListPluginsReportsActivePathSeparatelyFromDiscoveredPath(t *testing.T) {
+	t.Parallel()
+
+	pluginsDir := writeManagementPluginFile(t, "sample-provider")
+	host := pluginhost.New()
+	host.RegisterPluginForTest("sample-provider", pluginapi.Plugin{
+		Metadata: pluginapi.Metadata{Name: "Sample", Version: "1.0.0"},
+	})
+	h := &Handler{
+		cfg: &config.Config{Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"sample-provider": pluginConfigFromYAML(t, "enabled: true\n"),
+				"configured-only": pluginConfigFromYAML(t, "enabled: true\n"),
+			},
+		}},
+		pluginHost: host,
+	}
+
+	for _, prefix := range []string{"/v0/management", "/v8/management"} {
+		t.Run(prefix, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodGet, prefix+"/plugins", nil)
+			h.ListPlugins(ctx)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d; body=%s", recorder.Code, recorder.Body.String())
+			}
+			var response struct {
+				Plugins []map[string]any `json:"plugins"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			foundRegistered := false
+			for _, entry := range response.Plugins {
+				if entry["id"] == "sample-provider" {
+					foundRegistered = true
+					if entry["active_path"] != "test/sample-provider" {
+						t.Fatalf("active_path = %#v, want registered runtime path; entry=%#v", entry["active_path"], entry)
+					}
+					if entry["path"] == "" || entry["path"] == entry["active_path"] || entry["registered"] != true {
+						t.Fatalf("discovery path and registration changed: %#v", entry)
+					}
+				} else if _, exists := entry["active_path"]; exists {
+					t.Fatalf("unregistered entry contains active_path: %#v", entry)
+				}
+			}
+			if !foundRegistered {
+				t.Fatal("registered plugin missing from response")
+			}
+		})
+	}
+}
+
 func TestGetPluginConfigReturnsPreservedRawConfig(t *testing.T) {
 	t.Parallel()
 

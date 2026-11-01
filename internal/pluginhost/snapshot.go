@@ -26,6 +26,8 @@ type Snapshot struct {
 
 // RegisteredPluginInfo describes a plugin that is active in the current runtime snapshot.
 type RegisteredPluginInfo struct {
+	// ActivePath identifies the image in this registered runtime snapshot.
+	ActivePath    string
 	ID            string
 	Priority      int
 	Metadata      pluginapi.Metadata
@@ -90,6 +92,7 @@ func (h *Host) RegisteredPlugins() []RegisteredPluginInfo {
 			}
 		}
 		out = append(out, RegisteredPluginInfo{
+			ActivePath:    record.path,
 			ID:            record.id,
 			Priority:      record.priority,
 			Metadata:      clonePluginMetadata(record.meta),

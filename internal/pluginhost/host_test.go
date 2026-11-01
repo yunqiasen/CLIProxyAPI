@@ -1409,6 +1409,56 @@ func TestRegisteredPluginsIncludesMetadataAndOAuthCapability(t *testing.T) {
 	}
 }
 
+func TestRegisteredPluginsActivePathTracksSuccessfulGeneration(t *testing.T) {
+	newClient := func() *lifecycleTestClient {
+		return &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+			switch method {
+			case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
+				// Every generation deliberately reports identical embedded metadata.
+				return lifecycleRegistrationResult(validTestPlugin("alpha"))
+			case pluginabi.MethodPluginQuiesce:
+				return marshalRPCResult(rpcEmptyResponse{})
+			default:
+				return nil, fmt.Errorf("unexpected lifecycle method %s", method)
+			}
+		}}
+	}
+	failedClient := &lifecycleTestClient{call: func(context.Context, string, []byte) ([]byte, error) {
+		return nil, fmt.Errorf("replacement registration failed")
+	}}
+	h := NewForTest(&sequencePluginLoader{clients: []pluginClient{newClient(), newClient(), failedClient}})
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0")
+	assertActivePath := func(want string) {
+		t.Helper()
+		infos := h.RegisteredPlugins()
+		if len(infos) != 1 || infos[0].ActivePath != want || infos[0].Metadata.Version != "1.0.0" {
+			t.Fatalf("RegisteredPlugins() = %#v, want active path %s with unchanged metadata", infos, want)
+		}
+	}
+
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+	assertActivePath(paths["1.0.0"])
+	paths["2.0.0"] = writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+	assertActivePath(paths["2.0.0"])
+
+	paths["3.0.0"] = writeVersionedPluginFile(t, pluginsDir, "alpha", "3.0.0")
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "3.0.0"))
+	assertActivePath(paths["2.0.0"])
+	files, err := DiscoverPluginFiles(pluginsDir, map[string]string{"alpha": "3.0.0"})
+	if err != nil || len(files) != 1 || files[0].Path != paths["3.0.0"] {
+		t.Fatalf("discovered files = %#v, error = %v; want rejected candidate path", files, err)
+	}
+
+	cfg := versionedPluginHostConfig(t, pluginsDir, "3.0.0")
+	cfg.Plugins.Enabled = false
+	h.ApplyConfig(context.Background(), cfg)
+	if infos := h.RegisteredPlugins(); len(infos) != 0 {
+		t.Fatalf("disabled plugins retain active descriptors: %#v", infos)
+	}
+}
+
 func TestHostApplyConfig_InvalidMetadataOrNoCapabilitiesSkipped(t *testing.T) {
 	loader := newTestSymbolLoader()
 	loader.lookups["empty-name"] = newTestSymbolLookup(&testPlugin{

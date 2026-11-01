@@ -321,7 +321,10 @@ POST /v1/audio/transcriptions
 ## Fork 与分支规范
 
 主工作区已迁到 `/home/div/1_Project_dir/AI/CPA/CLIProxyAPI`；管理台和插件仓库也在
-`/home/div/1_Project_dir/AI/CPA/` 下独立维护。旧源码目录保留历史 worktree，新开发和运行交付使用新目录。
+`/home/div/1_Project_dir/AI/CPA/` 下独立维护。旧仓库与 43 个现存关联工作区已归档到
+`/home/div/1_Project_dir/AI/CPA/_archive/20261101/`，外层旧路径已移除。
+以后新建隔离工作区统一放在 `/home/div/1_Project_dir/AI/CPA/.worktrees/`。
+插件构建、加载和维护见[插件二开说明](docs/plugin-fork.md)；提交后自动发布目前是方案，尚未启用。
 详见[工作区迁移记录](docs/workspace-migration.md)。
 
 这个仓库按 `router-for-me/CLIProxyAPI` 的 fork 来维护。

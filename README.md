@@ -335,7 +335,11 @@ compatibility](docs/native-model-catalog.md).
 
 The primary checkout is `/home/div/1_Project_dir/AI/CPA/CLIProxyAPI`; the UI and
 plugin forks are sibling repositories under `/home/div/1_Project_dir/AI/CPA/`.
-The former checkout is retained for historical worktrees, not runtime delivery.
+The former checkouts and 43 linked worktrees are preserved under
+`/home/div/1_Project_dir/AI/CPA/_archive/20261101/`; the outer legacy paths are gone.
+New isolated worktrees belong under `/home/div/1_Project_dir/AI/CPA/.worktrees/`.
+Plugin build/loading maintenance is documented in [Plugin Fork](docs/plugin-fork.md);
+commit-triggered plugin delivery is a design, not an enabled service.
 See [Workspace Migration](docs/workspace-migration.md).
 
 This repository is maintained as a fork of `router-for-me/CLIProxyAPI`.

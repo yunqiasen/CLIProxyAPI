@@ -8,7 +8,8 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 ## Branch Workflow
 - This repository is maintained as a fork of `router-for-me/CLIProxyAPI`.
 - Primary local workspace: `/home/div/1_Project_dir/AI/CPA/CLIProxyAPI`.
-- The former `/home/div/1_Project_dir/AI/CLIProxyAPI` checkout is retained for historical worktrees; new development and runtime delivery use the primary workspace above. See [Workspace Migration](docs/workspace-migration.md).
+- The former checkout and its linked worktrees are archived under `/home/div/1_Project_dir/AI/CPA/_archive/20261101/`; the outer legacy path has been removed. Archives are history, not runtime entry points. See [Workspace Migration](docs/workspace-migration.md).
+- Create future isolated worktrees under `/home/div/1_Project_dir/AI/CPA/.worktrees/CLIProxyAPI/` so CPA development stays under the same parent directory.
 - The old `/home/div/1_Project_dir/AI/CLIProxyAPI-CPA-fork` symlink was removed; do not recreate or use it.
 - Fork remote: `origin` -> `https://github.com/yunqiasen/CLIProxyAPI.git`.
 - Upstream remote: `upstream` -> `https://github.com/router-for-me/CLIProxyAPI.git`.

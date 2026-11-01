@@ -4,8 +4,10 @@
 
 Consolidate the backend, management UI and plugin fork under
 `/home/div/1_Project_dir/AI/CPA/` without changing provider settings, credentials,
-plugin behavior or the deployed panel. Plugin development and a new plugin
-build/hot-reload workflow are deferred. No VPS service is changed by this task.
+plugin behavior or the deployed panel. The cleanup below also preserves all
+existing historical checkouts. Plugin business changes and a new automatic delivery
+service are deferred; the maintenance design is in [Plugin Fork](plugin-fork.md).
+No VPS service is changed by this task.
 
 ## Repository layout
 
@@ -33,19 +35,75 @@ The installed project skills and lock file were copied into the new CPA checkout
 
 The actual `config.yaml`, `auths/` and `logs/` now reside inside the new backend
 checkout. They were moved on the same filesystem with the service stopped,
-retaining inodes, contents, ownership and permissions. The old paths point to
-the new locations through compatibility symlinks, **not the other way around**.
+retaining inodes, contents, ownership and permissions. At the initial cutover,
+compatibility symlinks in the old backend checkout pointed to the new data. After
+the cleanup below those links live inside the archived backend checkout; the
+outer legacy paths are absent. The active data never depends on an archive link.
 The new `.env` is a private copy (0600). Static management assets were preserved.
 
-The retained source repositories are:
+## Historical workspace cleanup
 
-- `/home/div/1_Project_dir/AI/CLIProxyAPI` (including 38 historical worktrees).
-- `/home/div/1_Project_dir/AI/Cli-Proxy-API-Management-Center`.
+The first cutover kept the outer repositories as a temporary rollback precaution.
+That was not a finished consolidation. The follow-up moved them, their complete
+Git databases and all existing linked worktrees together into:
 
-Do not remove or relocate their `.git` directories, prune their worktrees, or
-run cleanup against them. They are historical checkouts, not active development
-entry points. Old maintenance commands remain a rollback concern: use the new
-workspace for all routine changes. Compatibility links do not forward source edits.
+```text
+/home/div/1_Project_dir/AI/CPA/_archive/20261101/
+  CLIProxyAPI/                             # former main checkout and .git
+  Cli-Proxy-API-Management-Center/          # former UI checkout and .git
+  worktrees/
+    CLIProxyAPI/                          # 33 existing linked worktrees
+    Cli-Proxy-API-Management-Center/       # 10 existing linked worktrees
+```
+
+The former outer checkout paths and the two old worktree-root paths are absent;
+no compatibility symlink is recreated there. The three active clones stay separate
+from the archival repositories. Open the new primary checkout in the editor/app;
+an existing terminal whose cwd was inside the old checkout still refers to the
+archived inode until it changes directory.
+
+A Git clone transfers committed history, not another checkout's untracked/ignored
+files, working index, local-only refs, reflogs, stashes or external linked worktrees.
+For that reason the historical trees were renamed intact, not re-cloned, flattened
+into the active checkout, reset or deleted. `git worktree repair` rewrote both sides
+of the existing links. Five UI `node_modules` symlinks were also retargeted to the
+archived UI dependency directory. The old backend's config/auth/log links still
+point to the current data under the active backend; do not run archival Compose
+files or treat those links as independent credential backups.
+
+Eight registrations already referenced missing `/tmp` checkouts before cleanup
+(four per repository). Their Git metadata remains in the archive and is locked
+against pruning; no missing working files are claimed to have been recovered.
+Automatic Git maintenance and pruning are disabled in the two archive repositories.
+Do not run `git clean`, `git worktree prune`, `git gc` or `git reset --hard` there.
+
+Future isolated work belongs under `/home/div/1_Project_dir/AI/CPA/.worktrees/`,
+partitioned by repository. The old global worktree directories are no longer CPA
+development entry points. Project instructions and local editor trust entries use
+the new paths. No global Git identity or unrelated project settings were changed.
+
+### Cleanup verification
+
+Private evidence: `/home/div/1_Project_dir/AI/CPA/.migration-backups/20261101-cleanup/`.
+It contains the old/new path map, move journal, Git snapshots, filesystem manifests
+and original symlink targets. The checks compare:
+
+- 45 existing checkouts (two primary plus 43 linked): unchanged HEAD/branch,
+  tracked/untracked status, index hashes, complete ref lists and stash refs.
+- Every pre-existing filesystem entry: inode, ownership, permissions and, for
+  non-directories, size and modification time; only intentional Git linkage/config
+  updates and the five symlink targets are excepted. Files were renamed on the
+  same filesystem without copying or following live-data links. The final inventory
+  contained 132986 pre-existing entries: 132885 retained identical checked metadata;
+  101 had expected Git pointer/config rewrites or one of five symlink replacements.
+  Both archived Git databases passed `git fsck --connectivity-only --no-dangling`.
+- All 43 linked checkouts resolve the correct archived common Git directory.
+  Eight already-missing registrations remain locked.
+- The CPA container keeps its ID and new bind mounts; configuration, 51 credential
+  registrations, plugin enablement and the served UI are checked against baseline.
+  This cleanup adds no paid model probe.
+
+## Running service
 
 The running container uses:
 
@@ -90,7 +148,7 @@ outdated on migration. Four handoff notes are copied into parent `docs/handoff/`
 - `retrieval-handoff-20260921-154438.md`
 
 These local copies are private (files 0600, handoff directory 0700), not material
-for a public Git push. Original files remain available in the old checkout.
+for a public Git push. Original files remain available in the archived checkout.
 
 ## Verification evidence
 
@@ -148,18 +206,22 @@ manifests. The first cutover attempt failed a static-file precheck, rolled back
 and restored service; after preserving the missing historical static file, the
 second cutover completed and passed the checks above.
 
-For a path-specific regression, preserve current data first. The old checkout
-and old Compose files remain available; its config/auth/log compatibility links
-resolve to the **current** data in the new workspace. After checking the old
-Compose resolution and image against the backup, a controlled recreation from
-that checkout with both Compose files can restore the old source mount. If using
-that rollback, restore the ops object's previous settings and reload the registry
-so management actions target the matching checkout. Keep only one instance on 8317.
+Use the active new checkout and [Local Fork Delivery](local-fork-delivery.md) for
+normal image/code rollback. Do not start a second instance or execute the archived
+Compose files against their live-data symlinks.
 
-Do not blindly restore the credential archive over newer credentials, use
-`down -v`, remove either checkout, or clear cache volumes. Verify panel, credentials,
-plugins and runtime version after any rollback. Image-only rollback details are in
-[Local Fork Delivery](local-fork-delivery.md).
+If historical-directory relocation itself needs reversal, use the private
+`path-map.json`, `moves-applied.json` and `symlinks-repaired.json` from the cleanup
+evidence. First verify there is no new content at the old destinations and no
+process writing the archives. Restore the four roots by same-filesystem rename,
+run `git worktree repair` with the restored linked paths, and restore the five
+original symlink targets. Recheck HEAD, refs, index, status and dependency links.
+This directory reversal does not require switching the running CPA mounts back.
+Keep original archive Git config in the evidence if maintenance settings need
+restoring; never overwrite credentials with an old backup as part of this step.
+
+Do not use `down -v`, clear cache volumes or discard either historical repository.
+Runtime rollback and historical-directory recovery are separate operations.
 
 ## Delivery review
 
@@ -181,3 +243,18 @@ Additional build verification passed inside the existing development container:
 The `-buildvcs=false` flag matches the normal supervisor build, whose commit
 metadata is supplied explicitly; a bare root-owned `go build` encounters Git's
 ownership check on the read-only user checkout.
+
+### Cleanup follow-up review
+
+The follow-up archive procedure passed an independent preflight and a complete
+apply/verify/rollback fixture, including staged, unstaged, untracked and ignored
+files, missing registrations, and an injected symlink-replacement failure. Both
+Spec and Standards document reviews finished with zero remaining findings; the
+initial ambiguous reference to old data links was corrected to archival links.
+
+The follow-up changed only guidance and directory ownership, not CPA/plugin
+business code or the built UI. Panel regression, shell-example syntax, document
+links, config/plugin hashes and Git connectivity checks passed. A host compile
+check passed in the existing container with the normal `-buildvcs=false` mode.
+Local commits and exact runtime-revision checks are the final delivery steps;
+this follow-up does not request another remote push or VPS deployment.

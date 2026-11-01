@@ -5,8 +5,12 @@ review, a scoped **local Git commit**, and verification of the running CPA. Exec
 these steps automatically, without another user reminder. Do not auto-push.
 
 The workspace moved under `/home/div/1_Project_dir/AI/CPA/` on 2026-11-01.
-See [Workspace Migration](workspace-migration.md) for data locations, compatibility
-links, maintenance entry points and rollback. Run the commands below from
+See [Workspace Migration](workspace-migration.md) for data locations, archived
+worktrees, maintenance entry points and rollback. Historical repositories are now
+under `/home/div/1_Project_dir/AI/CPA/_archive/20261101/`, not at the old outer paths.
+Use `/home/div/1_Project_dir/AI/CPA/.worktrees/CLIProxyAPI/` for new isolated work.
+For plugin-specific build/loading boundaries, see [Plugin Fork](plugin-fork.md).
+Run the commands below from
 `/home/div/1_Project_dir/AI/CPA/CLIProxyAPI`.
 
 ## Local code hot reload

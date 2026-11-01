@@ -218,3 +218,33 @@ func TestManagementV8PluginOperationMigratesConfiguration(t *testing.T) {
 		t.Fatal("missing configuration reload")
 	}
 }
+
+func TestManagementV8CredentialModelProbeRouteExists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("port: 8317\nremote-management: {secret-key: test-password}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.AuthDir = t.TempDir()
+	h := management.NewHandler(cfg, path, nil)
+	h.SetLocalPassword("test-password")
+	s := &Server{cfg: cfg, engine: gin.New(), mgmt: h}
+	s.managementRoutesEnabled.Store(true)
+	s.registerManagementRoutes()
+
+	req := httptest.NewRequest(http.MethodPost, "/v8/management/credentials/models/probe", strings.NewReader("{}"))
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("Authorization", "Bearer test-password")
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	s.engine.ServeHTTP(recorder, req)
+	if recorder.Code == http.StatusNotFound {
+		t.Fatalf("v8 credential model probe route is not registered: %s", recorder.Body.String())
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want=400 body=%s", recorder.Code, recorder.Body.String())
+	}
+}

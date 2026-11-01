@@ -195,6 +195,7 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
+		mgmt.POST("/auth-files/models/probe", s.mgmt.ProbeAuthFileModel)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
 		mgmt.GET("/auth-files/download-zip", s.mgmt.DownloadAuthFilesZip)

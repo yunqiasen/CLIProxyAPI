@@ -72,6 +72,7 @@ type Handler struct {
 	requestLogIndex         *requestLogIndexManager
 	requestLogIndexError    string
 	observationStore        ObservationSource
+	modelExecutor           AuthFileModelExecutor
 }
 
 type configReloadSnapshot struct {

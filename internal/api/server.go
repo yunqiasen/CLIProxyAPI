@@ -214,6 +214,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	s.mgmt.SetRequestObservations(observations)
 	s.mgmt.SetPluginHost(optionState.pluginHost)
+	s.mgmt.SetModelExecutor(s.handlers)
 	s.mgmt.SetConfigReloadHook(optionState.configReloadHook)
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)

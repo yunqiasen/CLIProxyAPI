@@ -311,6 +311,11 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 		}
 	}
 	if provider == "" {
+		// Files without a credential type inside a subdirectory are plugin state
+		// payloads (model caches, alias tables), not auth credentials.
+		if rel, errRel := filepath.Rel(baseDir, path); errRel == nil && filepath.Dir(rel) != "." {
+			return nil, nil
+		}
 		provider = "unknown"
 	}
 	info, errStat = os.Stat(path)

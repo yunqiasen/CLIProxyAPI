@@ -482,3 +482,31 @@ func TestFileTokenStoreListAppliesNoteToPluginAuths(t *testing.T) {
 		}
 	}
 }
+
+func TestFileTokenStoreListSkipsTypelessNestedJSON(t *testing.T) {
+	baseDir := t.TempDir()
+	nestedDir := filepath.Join(baseDir, "plugin-state")
+	if errMkdir := os.MkdirAll(nestedDir, 0o700); errMkdir != nil {
+		t.Fatalf("create nested dir: %v", errMkdir)
+	}
+	if errWrite := os.WriteFile(filepath.Join(nestedDir, "state.json"), []byte(`{"version":1,"models":["a"]}`), 0o600); errWrite != nil {
+		t.Fatalf("write nested state file: %v", errWrite)
+	}
+	if errWrite := os.WriteFile(filepath.Join(baseDir, "top-level.json"), []byte(`{"access_token":"token"}`), 0o600); errWrite != nil {
+		t.Fatalf("write top-level file: %v", errWrite)
+	}
+
+	RegisterPluginAuthParser(nil)
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auths, errList := store.List(context.Background())
+	if errList != nil {
+		t.Fatalf("List() error = %v", errList)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("List() len = %d, want only the top-level auth file", len(auths))
+	}
+	if auths[0].ID != "top-level.json" {
+		t.Fatalf("List() id = %q, want top-level.json", auths[0].ID)
+	}
+}

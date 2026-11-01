@@ -56,7 +56,8 @@ func TestProbeAuthFileModelPinsCredentialAndReportsSuccess(t *testing.T) {
 	executor := &fakeProbeExecutor{
 		resp: apiHandlers.ModelExecutionResponse{
 			StatusCode: http.StatusOK,
-			Body:       []byte(`{"choices":[{"message":{"content":"ok"}}]}`),
+			Body: []byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],` +
+				`"usage":{"prompt_tokens":11,"completion_tokens":2,"total_tokens":13}}`),
 		},
 	}
 	handler := newProbeTestHandler(t, executor)
@@ -82,6 +83,16 @@ func TestProbeAuthFileModelPinsCredentialAndReportsSuccess(t *testing.T) {
 	}
 	if executor.gotReq.Model != "sn-kimi-k3" {
 		t.Fatalf("probe model = %q, want sn-kimi-k3", executor.gotReq.Model)
+	}
+	if finish, _ := body["finish"].(string); finish != "stop" {
+		t.Fatalf("finish = %q, want stop", finish)
+	}
+	usage, _ := body["usage"].(map[string]any)
+	if usage == nil || int(usage["total_tokens"].(float64)) != 13 {
+		t.Fatalf("usage = %#v, want total_tokens 13", body["usage"])
+	}
+	if latency, ok := body["latency_ms"].(float64); !ok || latency < 0 {
+		t.Fatalf("latency_ms = %#v, want a non-negative number", body["latency_ms"])
 	}
 }
 
@@ -109,6 +120,9 @@ func TestProbeAuthFileModelReportsUpstreamFailure(t *testing.T) {
 	}
 	if message, _ := body["error"].(string); !strings.Contains(message, "403") {
 		t.Fatalf("error = %q, want upstream message", message)
+	}
+	if latency, ok := body["latency_ms"].(float64); !ok || latency < 0 {
+		t.Fatalf("latency_ms = %#v, want a non-negative number", body["latency_ms"])
 	}
 }
 

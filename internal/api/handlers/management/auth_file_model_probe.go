@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
@@ -92,6 +93,7 @@ func (h *Handler) ProbeAuthFileModel(c *gin.Context) {
 	}
 
 	auth.EnsureIndex()
+	startedAt := time.Now()
 	response, errMsg := executor.ExecuteModel(c.Request.Context(), apiHandlers.ModelExecutionRequest{
 		EntryProtocol: string(sdktranslator.FormatOpenAI),
 		ExitProtocol:  string(sdktranslator.FormatOpenAI),
@@ -100,6 +102,7 @@ func (h *Handler) ProbeAuthFileModel(c *gin.Context) {
 		AuthID:        auth.ID,
 		Path:          "/v1/chat/completions",
 	})
+	elapsedMs := time.Since(startedAt).Milliseconds()
 	if errMsg != nil {
 		status := errMsg.StatusCode
 		if status == 0 {
@@ -116,6 +119,7 @@ func (h *Handler) ProbeAuthFileModel(c *gin.Context) {
 			"model":      modelName,
 			"auth_id":    auth.ID,
 			"auth_index": auth.Index,
+			"latency_ms": elapsedMs,
 			"body":       string(errMsg.Body),
 		})
 		return
@@ -127,7 +131,10 @@ func (h *Handler) ProbeAuthFileModel(c *gin.Context) {
 		"model":      modelName,
 		"auth_id":    auth.ID,
 		"auth_index": auth.Index,
+		"latency_ms": elapsedMs,
 		"text":       probeResponseText(response.Body),
+		"usage":      probeResponseUsage(response.Body),
+		"finish":     probeResponseFinishReason(response.Body),
 		"body":       string(response.Body),
 	})
 }
@@ -171,4 +178,41 @@ func probeResponseText(body []byte) string {
 		return ""
 	}
 	return strings.TrimSpace(parsed.Choices[0].Message.Content)
+}
+
+type probeUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+func probeResponseUsage(body []byte) *probeUsage {
+	if len(body) == 0 {
+		return nil
+	}
+	var parsed struct {
+		Usage *probeUsage `json:"usage"`
+	}
+	if errUnmarshal := json.Unmarshal(body, &parsed); errUnmarshal != nil {
+		return nil
+	}
+	return parsed.Usage
+}
+
+func probeResponseFinishReason(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var parsed struct {
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if errUnmarshal := json.Unmarshal(body, &parsed); errUnmarshal != nil {
+		return ""
+	}
+	if len(parsed.Choices) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(parsed.Choices[0].FinishReason)
 }

@@ -449,3 +449,36 @@ func (f fileStoreMultiAuthParserFunc) ParseAuth(context.Context, pluginapi.AuthP
 func (f fileStoreMultiAuthParserFunc) ParseAuths(ctx context.Context, req pluginapi.AuthParseRequest) ([]*cliproxyauth.Auth, bool, error) {
 	return f(ctx, req)
 }
+
+func TestFileTokenStoreListAppliesNoteToPluginAuths(t *testing.T) {
+	baseDir := t.TempDir()
+	path := filepath.Join(baseDir, "plugin.json")
+	if errWrite := os.WriteFile(path, []byte(`{"type":"plugin","note":"  小浣熊  "}`), 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
+
+	RegisterPluginAuthParser(fileStoreMultiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*cliproxyauth.Auth, bool, error) {
+		return []*cliproxyauth.Auth{
+			{ID: "first", Provider: "plugin", Metadata: map[string]any{"type": "plugin"}},
+			{ID: "second", Provider: "plugin", Metadata: map[string]any{"type": "plugin"}},
+		}, true, nil
+	}))
+	t.Cleanup(func() {
+		RegisterPluginAuthParser(nil)
+	})
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auths, errList := store.List(context.Background())
+	if errList != nil {
+		t.Fatalf("List() error = %v", errList)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("List() len = %d, want two plugin auths", len(auths))
+	}
+	for _, auth := range auths {
+		if got := auth.Attributes["note"]; got != "小浣熊" {
+			t.Errorf("auth %s note attribute = %q, want trimmed file note", auth.ID, got)
+		}
+	}
+}

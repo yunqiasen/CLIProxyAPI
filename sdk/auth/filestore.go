@@ -299,6 +299,7 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 					return nil, errWeight
 				}
 				cliproxyauth.ApplyAuthPriorityMetadata(auth, metadata)
+				cliproxyauth.ApplyAuthNoteMetadata(auth, metadata)
 				if _, inherited := auth.Attributes[cliproxyauth.AttributeFilePriority]; inherited {
 					if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 						setter.SetMetadata(auth.Metadata)

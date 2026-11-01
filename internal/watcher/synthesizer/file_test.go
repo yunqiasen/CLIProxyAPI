@@ -1108,3 +1108,31 @@ func TestSynthesizeAuthFile_CodexPlanType(t *testing.T) {
 		})
 	}
 }
+
+func TestSynthesizeAuthFileAppliesNoteToPluginAuths(t *testing.T) {
+	fullPath := filepath.Join(t.TempDir(), "plugin.json")
+	ctx := &SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: filepath.Dir(fullPath),
+		Now:     time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC),
+		PluginAuthParser: multiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
+			return []*coreauth.Auth{
+				{ID: "first", Provider: "plugin", Metadata: map[string]any{"type": "plugin"}},
+				{ID: "second", Provider: "plugin", Metadata: map[string]any{"type": "plugin"}},
+			}, true, nil
+		}),
+	}
+
+	auths, errSynthesize := SynthesizeAuthFile(ctx, fullPath, []byte(`{"type":"plugin","note":"  小浣熊  "}`))
+	if errSynthesize != nil {
+		t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("SynthesizeAuthFile() len = %d, want two plugin auths", len(auths))
+	}
+	for _, auth := range auths {
+		if got := auth.Attributes["note"]; got != "小浣熊" {
+			t.Errorf("auth %s note attribute = %q, want trimmed file note", auth.ID, got)
+		}
+	}
+}

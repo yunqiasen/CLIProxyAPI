@@ -139,6 +139,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 					return nil, fmt.Errorf("invalid plugin auth weight in %s: %w", filepath.Base(fullPath), errWeight)
 				}
 				coreauth.ApplyAuthPriorityMetadata(auth, metadata)
+				coreauth.ApplyAuthNoteMetadata(auth, metadata)
 				if _, inherited := auth.Attributes[coreauth.AttributeFilePriority]; inherited {
 					if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 						setter.SetMetadata(auth.Metadata)
@@ -218,13 +219,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 		return nil, fmt.Errorf("invalid auth weight in %s: %w", filepath.Base(fullPath), errWeight)
 	}
 	// Read note from auth file.
-	if rawNote, ok := metadata["note"]; ok {
-		if note, isStr := rawNote.(string); isStr {
-			if trimmed := strings.TrimSpace(note); trimmed != "" {
-				a.Attributes["note"] = trimmed
-			}
-		}
-	}
+	coreauth.ApplyAuthNoteMetadata(a, metadata)
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	coreauth.SetOAuthModelAliasesAttribute(a, perAccountModelAliases)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")

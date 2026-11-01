@@ -764,6 +764,16 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quotaSupported .
 			}
 		}
 	}
+	// Expose display_name from Attributes (set by synthesizer from the auth JSON).
+	if displayName := strings.TrimSpace(authAttribute(auth, "display_name")); displayName != "" {
+		entry["display_name"] = displayName
+	} else if auth.Metadata != nil {
+		if rawDisplayName, ok := auth.Metadata["display_name"].(string); ok {
+			if trimmed := strings.TrimSpace(rawDisplayName); trimmed != "" {
+				entry["display_name"] = trimmed
+			}
+		}
+	}
 	// Expose note from Attributes (set by synthesizer from JSON "note" field).
 	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
 	if note := strings.TrimSpace(authAttribute(auth, "note")); note != "" {

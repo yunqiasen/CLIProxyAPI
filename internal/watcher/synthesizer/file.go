@@ -140,6 +140,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 				}
 				coreauth.ApplyAuthPriorityMetadata(auth, metadata)
 				coreauth.ApplyAuthNoteMetadata(auth, metadata)
+				coreauth.ApplyAuthDisplayNameMetadata(auth, metadata)
 				if _, inherited := auth.Attributes[coreauth.AttributeFilePriority]; inherited {
 					if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 						setter.SetMetadata(auth.Metadata)

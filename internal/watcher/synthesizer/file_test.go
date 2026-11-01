@@ -1136,3 +1136,31 @@ func TestSynthesizeAuthFileAppliesNoteToPluginAuths(t *testing.T) {
 		}
 	}
 }
+
+func TestSynthesizeAuthFileAppliesDisplayNameToPluginAuths(t *testing.T) {
+	fullPath := filepath.Join(t.TempDir(), "plugin.json")
+	ctx := &SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: filepath.Dir(fullPath),
+		Now:     time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC),
+		PluginAuthParser: multiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
+			return []*coreauth.Auth{
+				{ID: "first", Provider: "plugin", Metadata: map[string]any{"type": "plugin"}},
+				{ID: "second", Provider: "plugin", Metadata: map[string]any{"type": "plugin"}},
+			}, true, nil
+		}),
+	}
+
+	auths, errSynthesize := SynthesizeAuthFile(ctx, fullPath, []byte(`{"type":"plugin","display_name":"  小浣熊-主力  "}`))
+	if errSynthesize != nil {
+		t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("SynthesizeAuthFile() len = %d, want two plugin auths", len(auths))
+	}
+	for _, auth := range auths {
+		if got := auth.Attributes["display_name"]; got != "小浣熊-主力" {
+			t.Errorf("auth %s display_name attribute = %q, want trimmed file display name", auth.ID, got)
+		}
+	}
+}

@@ -510,3 +510,36 @@ func TestFileTokenStoreListSkipsTypelessNestedJSON(t *testing.T) {
 		t.Fatalf("List() id = %q, want top-level.json", auths[0].ID)
 	}
 }
+
+func TestFileTokenStoreListAppliesDisplayNameToPluginAuths(t *testing.T) {
+	baseDir := t.TempDir()
+	path := filepath.Join(baseDir, "plugin.json")
+	if errWrite := os.WriteFile(path, []byte(`{"type":"plugin","display_name":"  小浣熊-主力  "}`), 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
+
+	RegisterPluginAuthParser(fileStoreMultiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*cliproxyauth.Auth, bool, error) {
+		return []*cliproxyauth.Auth{
+			{ID: "first", Provider: "plugin", Metadata: map[string]any{"type": "plugin"}},
+			{ID: "second", Provider: "plugin", Metadata: map[string]any{"type": "plugin"}},
+		}, true, nil
+	}))
+	t.Cleanup(func() {
+		RegisterPluginAuthParser(nil)
+	})
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auths, errList := store.List(context.Background())
+	if errList != nil {
+		t.Fatalf("List() error = %v", errList)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("List() len = %d, want two plugin auths", len(auths))
+	}
+	for _, auth := range auths {
+		if got := auth.Attributes["display_name"]; got != "小浣熊-主力" {
+			t.Errorf("auth %s display_name attribute = %q, want trimmed file display name", auth.ID, got)
+		}
+	}
+}

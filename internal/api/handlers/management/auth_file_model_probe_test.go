@@ -84,6 +84,9 @@ func TestProbeAuthFileModelPinsCredentialAndReportsSuccess(t *testing.T) {
 	if executor.gotReq.Model != "sn-kimi-k3" {
 		t.Fatalf("probe model = %q, want sn-kimi-k3", executor.gotReq.Model)
 	}
+	if !strings.Contains(string(executor.gotReq.Body), `"max_tokens":512`) {
+		t.Fatalf("probe payload must leave room for reasoning models: %s", executor.gotReq.Body)
+	}
 	if finish, _ := body["finish"].(string); finish != "stop" {
 		t.Fatalf("finish = %q, want stop", finish)
 	}

@@ -51,6 +51,11 @@ type authFileModelProbeRequest struct {
 
 const authFileModelProbeDefaultPrompt = "Reply with the single word: ok"
 
+// authFileModelProbeMaxTokens leaves headroom for reasoning models, which can
+// spend a small budget entirely on hidden reasoning and return empty content
+// with finish_reason=length.
+const authFileModelProbeMaxTokens = 512
+
 // ProbeAuthFileModel runs one non-streaming chat request through the production
 // executor while pinning the credential card the operator clicked.
 func (h *Handler) ProbeAuthFileModel(c *gin.Context) {
@@ -85,7 +90,7 @@ func (h *Handler) ProbeAuthFileModel(c *gin.Context) {
 		"model":      modelName,
 		"messages":   []map[string]string{{"role": "user", "content": prompt}},
 		"stream":     false,
-		"max_tokens": 64,
+		"max_tokens": authFileModelProbeMaxTokens,
 	})
 	if errMarshal != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build probe payload"})

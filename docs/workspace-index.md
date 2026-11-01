@@ -65,8 +65,8 @@ docker compose -p cliproxyapi -f docker-compose.local.yml -f docker-compose.hot-
 | --- | --- |
 | CPA Go source | Existing supervisor recompiles and replaces the CPA process inside the same container; verify the exact committed revision |
 | CPA management UI | Build the UI source and deliver the single-file `management.html` artifact |
-| Plugin source or embedded plugin console | Build a compatible, uniquely versioned `.so`, then select that version through CPA; see the runbook below |
-| Plugin Git commit alone | **No automatic build/deployment listener installed yet**; the proposed pipeline and acceptance gates are documented |
+| Plugin source or embedded plugin console | With the opt-in listener enabled, a clean fork commit is tested, built, selected and verified automatically; refresh the plugin page |
+| Plugin Git commit | `freetier2api_fork` only; inspect `/home/div/1_Project_dir/AI/CPA/freetier2api/scripts/dev-plugin status` for listener and exact delivered commit |
 
 Plugin builds belong to the plugin project; CPA's plugin directory contains
 installed artifacts, not a second source checkout. No automatic model-generation
@@ -77,7 +77,7 @@ probe is part of maintenance.
 - [Migration, archive verification and rollback](/home/div/1_Project_dir/AI/CPA/docs/workspace-migration.md)
 - [Backend local delivery](/home/div/1_Project_dir/AI/CPA/docs/local-fork-delivery.md)
 - [Plugin quick guide (Chinese)](/home/div/1_Project_dir/AI/CPA/docs/plugin-fork_CN.md)
-- [Plugin fork, build, load, rollback and automatic-delivery design](/home/div/1_Project_dir/AI/CPA/docs/plugin-fork.md)
+- [Plugin fork, build, load, rollback and automatic delivery](/home/div/1_Project_dir/AI/CPA/docs/plugin-fork.md)
 - [Plugin catalog](/home/div/1_Project_dir/AI/CPA/docs/cpa_plugln.md): **historical snapshot, 2026-08-08**, not a current catalog
 - [Four handoff notes](/home/div/1_Project_dir/AI/CPA/docs/handoff/): private local copies
 

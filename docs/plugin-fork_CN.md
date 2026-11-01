@@ -1,79 +1,41 @@
-# FreeTier 2API 二开：开发、加载与维护
+# FreeTier 2API 二开加载
 
-## 先说当前状态
+**提交后自动测试、编译、加载与回滚脚本已实现。** 本机是否启用监听、实际加载到哪个提交，以状态命令为准。
 
-- 插件源码、CPA、管理台已经分成三个独立仓库，统一放在 `/home/div/1_Project_dir/AI/CPA/`。
-- CPA 本身有插件换版机制；**插件提交后自动构建、自动加载的监听服务尚未实现、尚未启用**。
-- 当前迁移保留的是 `freetier2api-v0.1.23.so`。这份整理没有替换插件，也没有更改账号和渠道配置。
-- 完整命令、验收与回滚步骤：[维护手册](/home/div/1_Project_dir/AI/CPA/docs/plugin-fork.md)。
-
-## 哪个目录管什么
-
-| 位置 | 作用 | 平时怎么用 |
-| --- | --- | --- |
-| `/home/div/1_Project_dir/AI/CPA/freetier2api` | 插件源码、测试、构建脚本 | 插件功能全部在这里开发 |
-| `/home/div/1_Project_dir/AI/CPA/CLIProxyAPI` | CPA 主程序 | 只有宿主功能需要变化时才修改 |
-| `/home/div/1_Project_dir/AI/CPA/CLIProxyAPI/logs/plugins/linux/amd64` | CPA 加载的插件成品 | 放编译好的 `.so`，不在这里开发源码 |
-| `/home/div/1_Project_dir/AI/CPA/Cli-Proxy-API-Management-Center` | CPA 管理台源码 | 修改 CPA 管理台的页面 |
-| `/home/div/1_Project_dir/AI/CPA/_archive/20261101` | 旧仓库及历史工作区 | 留档恢复，不当作日常开发目录 |
-
-源码和安装文件分开不代表维护需要来回手动复制：后续用一个发布流程把两端连接起来即可。
-
-## 你想要的使用体验：提交后自动更新
-
-建议实现成下面这条线，目前是**待实施方案**：
-
-```text
-在插件仓库的 freetier2api_fork 分支开发
-    ↓ 测试、审查、本地 Git 提交
-监听器发现新的提交
-    ↓ 从该提交取固定源码，不混入继续编辑的文件
-固定环境测试和编译
-    ↓ 得到带提交号的新版本 .so
-自动放进 CPA 插件目录
-    ↓ 调用 CPA 管理接口，选中这个版本
-检查实际注册版本、插件页面和模型列表
-    ├─ 通过：记录交付成功，刷新插件页面体验
-    └─ 失败：切回上一版并验证恢复
+```bash
+cd /home/div/1_Project_dir/AI/CPA/freetier2api
+./scripts/dev-plugin status
 ```
 
-- **不依赖 push**：本地提交即可作为触发条件，push 仅用于远端保存。
-- 同一时间只允许一个发布任务；连续提交时，只发布最新有效结果。
-- 编译失败保留当前版本；同步 `main` 不触发发布。
-- 通常只换插件，不重启整个 CPA 容器；是否影响正在输出的请求，需要先测清楚。
-- 验收只检查注册、页面、模型列表，不自动请求模型消耗额度。
-- 浏览器已经打开的旧页面需要刷新；刷新本身不等于新版已经加载成功。
-
-## 分支怎么维护
-
-| 分支 | 用途 |
+| 位置 | 作用 |
 | --- | --- |
-| `main` | 只同步原插件上游 |
-| `freetier2api_fork` | 我们日常二开 |
-| 从二开分支切出的功能分支 | 较大的独立改动，完成后合回二开分支 |
+| `/home/div/1_Project_dir/AI/CPA/freetier2api` | 插件源码、测试、发布工具；在 `freetier2api_fork` 开发 |
+| `/home/div/1_Project_dir/AI/CPA/CLIProxyAPI` | CPA 宿主，平时改插件不需要改这里 |
+| `/home/div/1_Project_dir/AI/CPA/CLIProxyAPI/logs/plugins/linux/amd64` | 自动安装编译产物，不在这里写插件源码 |
+| `/home/div/1_Project_dir/AI/CPA/Cli-Proxy-API-Management-Center` | CPA 管理台；插件自带页面另在插件源码中 |
 
-更新顺序：工作区干净 → 拉取上游 → 快进更新 `main` → 检查更新内容 → 合并到二开分支 → 解决冲突、测试、审查 → 提交。
+```text
+二开分支：改代码 → 测试/审查 → 本地提交
+    ↓ 监听服务发现干净的新提交
+固定快照全测/编译 → 安装独立 .so → CPA 选中版本
+    ├─ 实际注册路径、文件、页面、模型与凭证一致：记录成功
+    └─ 失败：验证回滚，记录原因，停止重复尝试
+```
 
-上游有状态格式、接口或依赖变化时，要做兼容检查，不是强行覆盖我们的改动。
+保存未提交、脏工作区、`main` 不发布；不依赖 push。插件页面刷新后体验新版。
 
-## 当前实际加载方式
-
-1. 使用插件已有的构建脚本和兼容环境，生成新的独立版本文件。
-2. 文件名、插件内报告的版本、CPA 选择的版本保持一致。
-3. 备份旧文件到插件扫描目录外，再放入新文件；不覆盖正在加载的文件。
-4. 通过 CPA 管理接口选择新版本，正确字段是 **`store/version`**。
-5. 检查实际注册版本和插件可用状态，再核对页面、模型列表。
-6. 出错时选择旧版本，验证后台任务也已恢复。
-
-单纯保存源码、修改文件名、放一个 `.so`，都不等于完成加载。完整操作见维护手册，不需要改凭证文件。
-
-## 自动发布前还要补什么
-
-| 项目 | 原因 |
+| 操作 | 命令（在插件目录） |
 | --- | --- |
-| 失败回滚后的后台任务恢复测试 | 源码显示旧插件会先停止后台任务，回滚路径是否重新启动还需验证；尚未实测复现 |
-| 连续多次换版测试 | 宿主保留旧插件实例，需要检查内存和后台任务是否持续累积 |
-| 流式请求、状态兼容测试 | 确认换版过程中请求和账号状态表现符合预期 |
-| 自动构建、发布锁、版本验证和回滚脚本 | 把现有分散步骤串成提交后自动体验的流程 |
+| 查看状态 | `./scripts/dev-plugin status` |
+| 暂停 / 恢复后续发布 | `./scripts/dev-plugin pause` / `./scripts/dev-plugin resume` |
+| 手动发布 / 排查后重试 | `./scripts/dev-plugin publish` / `./scripts/dev-plugin publish --retry` |
+| 回滚 | `./scripts/dev-plugin rollback` |
 
-插件自己的页面位于 `/home/div/1_Project_dir/AI/CPA/freetier2api/internal/admin/console.html`，它编译进 `.so`；修改这个页面走插件发布，不需要重编 CPA 管理台。
+**两个限制：**回滚使用新文件副本，避开旧库回调复用问题；每个 CPA 进程原生映射最多八份，达到门槛暂停发布，安排维护重载后继续。不会为了插件提交自动重启 CPA。
+
+自动验收不发模型请求、不签到、不刷新供应商模型；凭证、备注、别名、启停设置作为一致性检查。
+有意改变模型清单或状态格式时，先暂停并明确兼容方案。
+
+安装、服务日志、失败处理、分支同步及详细验收统一维护在插件仓库：
+[插件二开与自动加载手册](/home/div/1_Project_dir/AI/CPA/freetier2api/docs/local-delivery.md)。
+英文接口说明：[Plugin fork maintenance](/home/div/1_Project_dir/AI/CPA/docs/plugin-fork.md)。

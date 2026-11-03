@@ -1,5 +1,7 @@
 # CPA Workspace
 
+> English mirror of `/home/div/1_Project_dir/AI/CPA/README.md` (Chinese is canonical).
+
 The active repositories and runtime data are consolidated under
 `/home/div/1_Project_dir/AI/CPA/`. This parent is a navigation/data directory, not
 an extra Git repository. Its `README.md` links to this tracked backend document;
@@ -26,6 +28,7 @@ Open one of the active checkouts above in the editor/app before editing.
 ├── CLIProxyAPI/                      active backend Git clone and runtime
 ├── Cli-Proxy-API-Management-Center/   active management UI Git clone
 ├── freetier2api/                     active plugin Git clone
+├── lab/                              external-API verification scratch area (not a Git repo)
 ├── docs/                            document links and private handoff notes
 ├── .worktrees/                      future isolated development checkouts
 ├── _archive/20261101/                two old repos + 43 existing linked worktrees
@@ -33,11 +36,45 @@ Open one of the active checkouts above in the editor/app before editing.
 └── .migration-20261101/              private earlier preparation evidence
 ```
 
+`lab/` holds throwaway probes and their evidence. It never becomes a product
+source tree and never receives edits that belong in one of the three checkouts.
+
 The old outer repository paths have been removed, not hidden behind symlinks.
 Archives preserve local branches, stashes, reflogs, uncommitted and ignored files;
 they are not another development/runtime installation. Eight previously missing
 `/tmp` worktree registrations remain locked in the archive as historical metadata.
 Do not prune, clean or launch services from the archives.
+
+## Verification scratch area (`lab/`)
+
+Third-party upstreams change model lists, WAF rules and client fingerprints on
+their own schedule. Before any plugin or backend change, reproduce the symptom
+here and separate "upstream behaves this way" from "our code is wrong".
+
+```text
+/home/div/1_Project_dir/AI/CPA/lab/
+├── README.md      boundary, usage and pass/fail rules
+├── probes/        read-only probes; no config writes, no credential edits
+│   ├── lib.sh            mgmt() management calls, probe() single-credential model probe
+│   ├── vendor_matrix.sh  first credential x first card model, per vendor
+│   ├── card_probe.sh     every card model per vendor (highest spend, dry-run default)
+│   ├── net_matrix.sh     direct vs global-proxy reachability per upstream host
+│   └── parse_probe.py    probe output to TSV
+└── results/       local evidence; raw dumps git-ignored, findings kept as Markdown
+```
+
+Rules that keep this area honest:
+
+- Probes call the same production path the credential card uses
+  (`POST /v0/management/auth-files/models/probe`), so a failure here is the same
+  failure the operator sees.
+- One credential per vendor for the sampling run. A full pool sweep is a separate,
+  explicit decision.
+- `HTTP 200` is not success; read the `ok` field in the JSON body.
+- Findings state time, credential name and model ID. Tokens are never written down.
+- A failed verification stops at verification. No code change rides along with it.
+
+Latest findings: `/home/div/1_Project_dir/AI/CPA/lab/results/FINDINGS-2026-11-02.md`.
 
 ## Runtime and ports
 
@@ -78,6 +115,7 @@ probe is part of maintenance.
 - [Backend local delivery](/home/div/1_Project_dir/AI/CPA/docs/local-fork-delivery.md)
 - [Plugin quick guide (Chinese)](/home/div/1_Project_dir/AI/CPA/docs/plugin-fork_CN.md)
 - [Plugin fork, build, load, rollback and automatic delivery](/home/div/1_Project_dir/AI/CPA/docs/plugin-fork.md)
+- [Verification scratch area](/home/div/1_Project_dir/AI/CPA/lab/README.md)
 - [Plugin catalog](/home/div/1_Project_dir/AI/CPA/docs/cpa_plugln.md): **historical snapshot, 2026-08-08**, not a current catalog
 - [Four handoff notes](/home/div/1_Project_dir/AI/CPA/docs/handoff/): private local copies
 

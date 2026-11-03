@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 type callbackContextRegistry struct {
@@ -210,4 +212,27 @@ func (h *Host) callbackContextPluginID(id string) string {
 		return ""
 	}
 	return h.callbackContexts.pluginID(id)
+}
+
+// callbackHTTPClientKey retains host-owned egress policy across the RPC boundary.
+// The client never crosses the wire; callback ownership is checked before lookup.
+type callbackHTTPClientKey struct{}
+
+func withCallbackHTTPClient(ctx context.Context, client pluginapi.HostHTTPClient) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if client == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, callbackHTTPClientKey{}, client)
+}
+
+func (h *Host) callbackHTTPClient(ctx context.Context) pluginapi.HostHTTPClient {
+	if ctx != nil {
+		if client, ok := ctx.Value(callbackHTTPClientKey{}).(pluginapi.HostHTTPClient); ok && client != nil {
+			return client
+		}
+	}
+	return h.newHTTPClient(nil)
 }

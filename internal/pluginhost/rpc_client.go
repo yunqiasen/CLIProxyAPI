@@ -44,9 +44,10 @@ type rpcQuotaProvider struct {
 }
 
 type rpcError struct {
-	Code       string
-	message    string
-	statusCode int
+	Code        string
+	message     string
+	statusCode  int
+	requestStop bool
 }
 
 func (e rpcError) Error() string {
@@ -56,6 +57,9 @@ func (e rpcError) Error() string {
 func (e rpcError) StatusCode() int {
 	return e.statusCode
 }
+
+// IsRequestStop preserves a plugin diagnostic request's no-replay contract.
+func (e rpcError) IsRequestStop() bool { return e.requestStop }
 
 type rpcResponseNormalizer struct {
 	*rpcPluginAdapter
@@ -366,9 +370,10 @@ func decodeEnvelopeResult[T any](envelope pluginabi.Envelope) (T, error) {
 				message = "plugin call failed"
 			}
 			return zero, rpcError{
-				Code:       strings.TrimSpace(envelope.Error.Code),
-				message:    message,
-				statusCode: envelope.Error.HTTPStatus,
+				Code:        strings.TrimSpace(envelope.Error.Code),
+				message:     message,
+				statusCode:  envelope.Error.HTTPStatus,
+				requestStop: envelope.Error.RequestStop,
 			}
 		}
 		return zero, fmt.Errorf("plugin call failed")
@@ -411,7 +416,7 @@ func (a *rpcPluginAdapter) StaticModels(ctx context.Context, req pluginapi.Stati
 }
 
 func (a *rpcPluginAdapter) ModelsForAuth(ctx context.Context, req pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
-	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	callbackID, closeCallback := a.openHostCallbackContext(withCallbackHTTPClient(ctx, req.HTTPClient))
 	defer closeCallback()
 	return callPlugin[pluginapi.ModelResponse](ctx, a.client, pluginabi.MethodModelForAuth, rpcAuthModelRequest{
 		AuthModelRequest: req,
@@ -464,7 +469,7 @@ func (a *rpcPluginAdapter) ParseAuth(ctx context.Context, req pluginapi.AuthPars
 }
 
 func (a *rpcPluginAdapter) StartLogin(ctx context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
-	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	callbackID, closeCallback := a.openHostCallbackContext(withCallbackHTTPClient(ctx, req.HTTPClient))
 	defer closeCallback()
 	return callPlugin[pluginapi.AuthLoginStartResponse](ctx, a.client, pluginabi.MethodAuthLoginStart, rpcAuthLoginStartRequest{
 		AuthLoginStartRequest: req,
@@ -473,7 +478,7 @@ func (a *rpcPluginAdapter) StartLogin(ctx context.Context, req pluginapi.AuthLog
 }
 
 func (a *rpcPluginAdapter) PollLogin(ctx context.Context, req pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
-	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	callbackID, closeCallback := a.openHostCallbackContext(withCallbackHTTPClient(ctx, req.HTTPClient))
 	defer closeCallback()
 	return callPlugin[pluginapi.AuthLoginPollResponse](ctx, a.client, pluginabi.MethodAuthLoginPoll, rpcAuthLoginPollRequest{
 		AuthLoginPollRequest: req,
@@ -482,7 +487,7 @@ func (a *rpcPluginAdapter) PollLogin(ctx context.Context, req pluginapi.AuthLogi
 }
 
 func (a *rpcPluginAdapter) RefreshAuth(ctx context.Context, req pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
-	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	callbackID, closeCallback := a.openHostCallbackContext(withCallbackHTTPClient(ctx, req.HTTPClient))
 	defer closeCallback()
 	return callPlugin[pluginapi.AuthRefreshResponse](ctx, a.client, pluginabi.MethodAuthRefresh, rpcAuthRefreshRequest{
 		AuthRefreshRequest: req,
@@ -495,7 +500,7 @@ func (a *rpcPluginAdapter) Authenticate(ctx context.Context, req pluginapi.Front
 }
 
 func (a *rpcPluginAdapter) Execute(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
-	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	callbackID, closeCallback := a.openHostCallbackContext(withCallbackHTTPClient(ctx, req.HTTPClient))
 	defer closeCallback()
 	return callPlugin[pluginapi.ExecutorResponse](ctx, a.client, pluginabi.MethodExecutorExecute, rpcExecutorRequest{
 		ExecutorRequest: req,
@@ -504,7 +509,7 @@ func (a *rpcPluginAdapter) Execute(ctx context.Context, req pluginapi.ExecutorRe
 }
 
 func (a *rpcPluginAdapter) CountTokens(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
-	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	callbackID, closeCallback := a.openHostCallbackContext(withCallbackHTTPClient(ctx, req.HTTPClient))
 	defer closeCallback()
 	return callPlugin[pluginapi.ExecutorResponse](ctx, a.client, pluginabi.MethodExecutorCountTokens, rpcExecutorRequest{
 		ExecutorRequest: req,
@@ -513,7 +518,7 @@ func (a *rpcPluginAdapter) CountTokens(ctx context.Context, req pluginapi.Execut
 }
 
 func (a *rpcPluginAdapter) HttpRequest(ctx context.Context, req pluginapi.ExecutorHTTPRequest) (pluginapi.ExecutorHTTPResponse, error) {
-	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	callbackID, closeCallback := a.openHostCallbackContext(withCallbackHTTPClient(ctx, req.HTTPClient))
 	defer closeCallback()
 	return callPlugin[pluginapi.ExecutorHTTPResponse](ctx, a.client, pluginabi.MethodExecutorHTTPRequest, rpcExecutorHTTPRequest{
 		ExecutorHTTPRequest: req,
@@ -652,7 +657,7 @@ func (a rpcQuotaProvider) DescribeQuota(ctx context.Context, req pluginapi.Quota
 }
 
 func (a rpcQuotaProvider) FetchQuota(ctx context.Context, req pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
-	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	callbackID, closeCallback := a.openHostCallbackContext(withCallbackHTTPClient(ctx, req.HTTPClient))
 	defer closeCallback()
 	return callPlugin[pluginapi.QuotaFetchResponse](ctx, a.client, pluginabi.MethodQuotaFetch, rpcQuotaFetchRequest{
 		QuotaFetchRequest: req,
@@ -661,7 +666,7 @@ func (a rpcQuotaProvider) FetchQuota(ctx context.Context, req pluginapi.QuotaFet
 }
 
 func (a rpcQuotaProvider) ResetQuota(ctx context.Context, req pluginapi.QuotaResetRequest) (pluginapi.QuotaResetResponse, error) {
-	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	callbackID, closeCallback := a.openHostCallbackContext(withCallbackHTTPClient(ctx, req.HTTPClient))
 	defer closeCallback()
 	return callPlugin[pluginapi.QuotaResetResponse](ctx, a.client, pluginabi.MethodQuotaReset, rpcQuotaResetRequest{
 		QuotaResetRequest: req,

@@ -19,6 +19,7 @@ import (
 )
 
 type rpcHostHTTPRequest struct {
+	AuthIndex      string                     `json:"auth_index,omitempty"`
 	HTTPClientID   string                     `json:"http_client_id,omitempty"`
 	HostCallbackID string                     `json:"host_callback_id,omitempty"`
 	OperationID    string                     `json:"operation_id,omitempty"`
@@ -205,7 +206,11 @@ func (h *Host) callHostHTTPDo(ctx context.Context, request []byte) ([]byte, erro
 		return nil, errAcquire
 	}
 	defer operation.finish()
-	resp, errDo := h.newHTTPClient(nil).Do(operation.ctx, httpReq)
+	client, errClient := h.httpClientForCallback(operation, request)
+	if errClient != nil {
+		return nil, errClient
+	}
+	resp, errDo := client.Do(operation.ctx, httpReq)
 	if errDo != nil {
 		return nil, errDo
 	}
@@ -238,7 +243,11 @@ func (h *Host) callHostHTTPDoStream(ctx context.Context, request []byte) ([]byte
 		operation.finish()
 	}()
 
-	resp, errDo := h.newHTTPClient(nil).DoStream(streamCtx, httpReq)
+	client, errClient := h.httpClientForCallback(operation, request)
+	if errClient != nil {
+		return nil, errClient
+	}
+	resp, errDo := client.DoStream(streamCtx, httpReq)
 	if errDo != nil {
 		return nil, errDo
 	}

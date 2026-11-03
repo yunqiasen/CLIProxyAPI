@@ -339,7 +339,9 @@ The former checkouts and 43 linked worktrees are preserved under
 `/home/div/1_Project_dir/AI/CPA/_archive/20261101/`; the outer legacy paths are gone.
 New isolated worktrees belong under `/home/div/1_Project_dir/AI/CPA/.worktrees/`.
 Plugin build/loading maintenance is documented in [Plugin Fork](docs/plugin-fork.md);
-commit-triggered plugin delivery is a design, not an enabled service.
+commit-triggered delivery runs through the sibling plugin repository's local watcher.
+A paused watcher deliberately leaves the installed version unchanged.
+See [Plugin HTTP Egress](docs/plugin-http-egress.md) for credential routing and diagnostic no-replay behavior.
 See [Workspace Migration](docs/workspace-migration.md).
 
 This repository is maintained as a fork of `router-for-me/CLIProxyAPI`.

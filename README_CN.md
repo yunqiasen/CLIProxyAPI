@@ -324,7 +324,8 @@ POST /v1/audio/transcriptions
 `/home/div/1_Project_dir/AI/CPA/` 下独立维护。旧仓库与 43 个现存关联工作区已归档到
 `/home/div/1_Project_dir/AI/CPA/_archive/20261101/`，外层旧路径已移除。
 以后新建隔离工作区统一放在 `/home/div/1_Project_dir/AI/CPA/.worktrees/`。
-插件构建、加载和维护见[插件二开说明](docs/plugin-fork.md)；提交后自动发布目前是方案，尚未启用。
+插件构建、加载和维护见[插件二开说明](docs/plugin-fork.md)；由插件仓库的本地监听服务负责干净提交后的测试、构建和加载，暂停期间保持当前版本。
+固定凭证的出站继承与测速不重试契约见[插件 HTTP 桥说明](docs/plugin-http-egress.md)。
 详见[工作区迁移记录](docs/workspace-migration.md)。
 
 这个仓库按 `router-for-me/CLIProxyAPI` 的 fork 来维护。

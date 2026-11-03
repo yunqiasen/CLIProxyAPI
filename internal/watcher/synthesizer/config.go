@@ -32,6 +32,12 @@ func addWeightToAttrs(weight *int, attrs map[string]string) {
 	attrs[coreauth.AttributeWeight] = strconv.Itoa(normalized)
 }
 
+// addProviderPriority preserves the supplier tier independently of per-key overrides.
+func addProviderPriority(attrs map[string]string, group string, priority int) {
+	attrs[coreauth.AttributeProviderGroup] = group
+	attrs[coreauth.AttributeProviderPriority] = strconv.Itoa(priority)
+}
+
 // Synthesize generates Auth entries from config API keys.
 func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
 	out := make([]*coreauth.Auth, 0, 32)
@@ -114,6 +120,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 			if effective.Priority != 0 || (effective.Index >= 0 && entry.APIKeyEntries[effective.Index].Priority != nil) {
 				attrs["priority"] = strconv.Itoa(effective.Priority)
 			}
+			addProviderPriority(attrs, fmt.Sprintf("%s:%d", provider, i), entry.Priority)
 			addWeightToAttrs(entry.Weight, attrs)
 			if resolvedBase != "" {
 				attrs["base_url"] = resolvedBase
@@ -177,6 +184,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			if effective.Priority != 0 || (effective.Index >= 0 && ck.APIKeyEntries[effective.Index].Priority != nil) {
 				attrs["priority"] = strconv.Itoa(effective.Priority)
 			}
+			addProviderPriority(attrs, fmt.Sprintf("claude:%d", i), ck.Priority)
 			addWeightToAttrs(ck.Weight, attrs)
 			if resolvedBase != "" {
 				attrs["base_url"] = resolvedBase
@@ -283,6 +291,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
+			addProviderPriority(attrs, fmt.Sprintf("openai-compatibility:%d", i), compat.Priority)
 			addWeightToAttrs(entry.Weight, attrs)
 			if key != "" {
 				attrs["api_key"] = key
@@ -329,6 +338,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
+			addProviderPriority(attrs, fmt.Sprintf("openai-compatibility:%d", i), compat.Priority)
 			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
 				attrs["models_hash"] = hash
 			}
@@ -402,6 +412,7 @@ func (s *ConfigSynthesizer) synthesizeMediaProviders(ctx *SynthesisContext) []*c
 			if priority != 0 || entry.Priority != nil || provider.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(priority)
 			}
+			addProviderPriority(attrs, fmt.Sprintf("media:%d", i), provider.Priority)
 			addWeightToAttrs(entry.Weight, attrs)
 			addConfigHeadersToAttrs(provider.Headers, attrs)
 			metadata := map[string]any{}
@@ -573,6 +584,7 @@ func synthesizeCodexStyleKey(ctx *SynthesisContext, entry config.CodexKey, effec
 	if effective.Priority != 0 || (effective.Index >= 0 && entry.APIKeyEntries[effective.Index].Priority != nil) {
 		attrs["priority"] = strconv.Itoa(effective.Priority)
 	}
+	addProviderPriority(attrs, fmt.Sprintf("%s:%d", provider, index), entry.Priority)
 	addWeightToAttrs(entry.Weight, attrs)
 	if resolvedBaseURL != "" {
 		attrs["base_url"] = resolvedBaseURL

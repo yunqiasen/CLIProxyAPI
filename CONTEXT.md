@@ -69,3 +69,18 @@ _Avoid_: Public catalog or unrestricted inventory.
 **Client display order**:
 The order ultimately shown by an external client's model picker. A client may reorder or cache CPA's catalog instead of displaying the supplied order directly.
 _Avoid_: Guaranteed catalog rendering order.
+
+## Provider scheduling language
+
+**Supplier priority**:
+The preference of a configured provider group over other eligible groups. It is
+independent of priorities assigned to individual keys inside that group.
+_Avoid_: Default key priority when describing cross-supplier ordering.
+
+**Key priority**:
+The preference of an eligible key within its own supplier group. A key from a
+lower supplier tier does not outrank keys in a higher supplier tier.
+_Avoid_: Global priority across all suppliers.
+
+See [Provider-first key scheduling](docs/provider-priority.md) for failover,
+legacy credential, weighting and session-affinity behavior.

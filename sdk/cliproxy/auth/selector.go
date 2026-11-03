@@ -472,7 +472,7 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 		candidate := auths[i]
 		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
 		if !blocked {
-			priority := authPriority(candidate)
+			priority := authProviderPriority(candidate)
 			available[priority] = append(available[priority], candidate)
 			continue
 		}
@@ -575,6 +575,7 @@ func availableAuthsFromPriorityBuckets(availableByPriority map[int][]*Auth, allP
 		bucket := availableByPriority[bestPriority]
 		candidates = make([]*Auth, 0, len(bucket))
 		candidates = append(candidates, bucket...)
+		candidates = highestKeyPriorityAuths(candidates)
 	}
 	if len(candidates) > 1 {
 		sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
@@ -582,9 +583,9 @@ func availableAuthsFromPriorityBuckets(availableByPriority map[int][]*Auth, allP
 	return candidates
 }
 
-// highestPriorityAuths narrows an availability slice to its highest priority tier while
-// preserving the input order. The input slice is returned unchanged when every candidate
-// already shares the highest priority, so the common single-tier case allocates nothing.
+// highestPriorityAuths keeps the highest supplier tier, then the highest eligible
+// key tier within each supplier, preserving the input order. Ungrouped credentials
+// retain the legacy single-priority behavior.
 func highestPriorityAuths(auths []*Auth) []*Auth {
 	if len(auths) <= 1 {
 		return auths
@@ -592,7 +593,7 @@ func highestPriorityAuths(auths []*Auth) []*Auth {
 	bestPriority := 0
 	bestCount := 0
 	for _, auth := range auths {
-		priority := authPriority(auth)
+		priority := authProviderPriority(auth)
 		switch {
 		case bestCount == 0 || priority > bestPriority:
 			bestPriority = priority
@@ -602,15 +603,15 @@ func highestPriorityAuths(auths []*Auth) []*Auth {
 		}
 	}
 	if bestCount == len(auths) {
-		return auths
+		return highestKeyPriorityAuths(auths)
 	}
 	highest := make([]*Auth, 0, bestCount)
 	for _, auth := range auths {
-		if authPriority(auth) == bestPriority {
+		if authProviderPriority(auth) == bestPriority {
 			highest = append(highest, auth)
 		}
 	}
-	return highest
+	return highestKeyPriorityAuths(highest)
 }
 
 // Pick selects the next available auth for the provider in a round-robin manner.
